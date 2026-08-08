@@ -32,6 +32,7 @@
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
+#include "player/veinminer.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
     static ModuleRegistry registry;
@@ -103,6 +104,7 @@ void registerAllModules() {
     registry.emplace<SkinStealerModule>();
     registry.emplace<AutoGG>();
     registry.emplace<AutoReQ>();
+    registry.emplace<VeinMinerModule>();
     registry.emplace<FPSUnlockerModule>();
     registry.emplace<LightOverlayModule>();
     registry.emplace<ShulkerPreviewModule>();
