@@ -1,5 +1,9 @@
 #pragma once
 
+// Motion blur implementation based on code by CrackedMatter
+// Original source: https://github.com/CrackedMatter/mcpelauncher-motion-blur
+// GitHub: https://github.com/CrackedMatter
+
 #include "../Module.hpp"
 #include <GLES2/gl2.h>
 #include <cstdint>

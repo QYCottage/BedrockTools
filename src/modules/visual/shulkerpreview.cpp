@@ -1,3 +1,6 @@
+// Shulker preview module — thanks to Kashifro
+// GitHub: https://github.com/Kashifro
+
 #include "shulkerpreview.hpp"
 #include <pl/memory/Vtable.hpp>
 #include "core/memory/Hooks.hpp"

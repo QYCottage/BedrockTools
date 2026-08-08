@@ -1,5 +1,8 @@
 #pragma once
 
+// Shulker preview module — thanks to Kashifro
+// GitHub: https://github.com/Kashifro
+
 #include "../Module.hpp"
 
 class ShulkerPreviewModule : public Module {

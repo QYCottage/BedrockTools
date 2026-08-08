@@ -87,6 +87,10 @@ BedrockTools is made by [RadiantByte](https://github.com/RadiantByte).
 
 Special thanks to [dreamguxiang](https://github.com/dreamguxiang) for helping make this mod possible.
 
+Motion blur module based on [mcpelauncher-motion-blur](https://github.com/CrackedMatter/mcpelauncher-motion-blur) by [CrackedMatter](https://github.com/CrackedMatter).
+
+Thanks to [Kashifro](https://github.com/Kashifro) for the Shulker Preview and Tablist modules.
+
 Built for [LeviLauncher](https://github.com/LiteLDev/LeviLaunchroid).
 
 ## Contact

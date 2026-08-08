@@ -1,3 +1,6 @@
+// Tablist module — thanks to Kashifro
+// GitHub: https://github.com/Kashifro
+
 #include "tablist.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
