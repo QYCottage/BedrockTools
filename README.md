@@ -9,7 +9,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 ## Features
 
 - Native C++20 mod built for LeviLauncher and Preloader
-- 33 configurable modules
+- 34 configurable modules
 - Public headers for Minecraft wrappers, offsets, signatures, and utilities
 - Typed event system with runtime subscriptions for other native mods
 - LeviLauncher mod-menu integration and persistent configuration
@@ -21,7 +21,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 
 **HUD:** Ping Counter, Reach Counter, Combo Display, Break Indicator, Player Coords, Compass, Speed Display, Debug Menu, Keystrokes, Tablist
 
-**Player:** Time Changer, Weather Changer, Nick, Skin Stealer, AutoGG, AutoReQ
+**Player:** Time Changer, Weather Changer, Nick, Skin Stealer, AutoGG, AutoReQ, Vein Miner
 
 **Misc:** No Disconnect, No Touch Border, CPS Limiter
 
@@ -86,10 +86,6 @@ Do not use LeviLauncher or BedrockTools to violate Mojang or Microsoft's user ag
 BedrockTools is made by [RadiantByte](https://github.com/RadiantByte).
 
 Special thanks to [dreamguxiang](https://github.com/dreamguxiang) for helping make this mod possible.
-
-Motion blur module based on [mcpelauncher-motion-blur](https://github.com/CrackedMatter/mcpelauncher-motion-blur) by [CrackedMatter](https://github.com/CrackedMatter).
-
-Thanks to [Kashifro](https://github.com/Kashifro) for the Shulker Preview and Tablist modules.
 
 Built for [LeviLauncher](https://github.com/LiteLDev/LeviLaunchroid).
 
