@@ -46,6 +46,7 @@ enum class SignatureId : std::uint16_t {
     MeshHelpersRenderMeshImmediately2,
     RenderMaterialGroupCommon,
     SurvivalModeAttack,
+    SurvivalModeDestroyBlock,
     GameModeAttack,
     LevelGetHitResult,
     BlockSourceGetBiome,
