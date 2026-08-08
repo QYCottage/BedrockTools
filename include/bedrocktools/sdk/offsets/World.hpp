@@ -4,6 +4,12 @@
 
 namespace bedrocktools::sdk::offsets {
 
+namespace GameMode {
+inline constexpr std::size_t mPlayer = 0x8;
+inline constexpr std::size_t mOldDestroyProgress = 0x20;
+inline constexpr std::size_t mDestroyProgress = 0x24;
+}
+
 namespace Player {
 inline constexpr std::size_t mName = 2824;
 inline constexpr std::size_t mSkin = 2552;
