@@ -108,6 +108,8 @@ const std::array<SignatureDefinition, SignatureCount> definitions{{
     SignatureDefinition{SignatureId::GuiDataDisplayTextObjectWhisperMessageObject, "FF 43 01 D1 FD 7B 02 A9 F6 57 03 A9 F4 4F 04 A9 FD 83 00 91 56 D0 3B D5 F5 03 00 AA E0 03 01 AA C8 16 40 F9 F3 03 03 AA F4 03 02 AA A8 83 1F F8 28 00 40 F9 09 09 40 F9 E8 03 00 91 20 01 3F D6"},
     SignatureDefinition{SignatureId::GuiDataDisplayWhisperMessage, "FD 7B BA A9 FC 0B 00 F9 FA 67 02 A9 F8 5F 03 A9 F6 57 04 A9 F4 4F 05 A9 FD 03 00 91 FF C3 09 D1 5A D0 3B D5 F5 03 05 AA F4 03 04 AA 48 17 40 F9 F7 03 02 AA F6 03 01 AA F3 03 00 AA A8 83 1F F8"},
     SignatureDefinition{SignatureId::GuiDataAddMessage, "FD 7B BC A9 F8 5F 01 A9 F6 57 02 A9 F4 4F 03 A9 FD 03 00 91 08 24 54 A9 F4 03 02 2A F3 03 00 AA 1F 01 09 EB ? ? ? ? 29 00 40 B9 09 01 00 B9 29 0C 40 F9 20 80 C0 3C 09 0D 00 F9 E9 03 08 AA"},
+    SignatureDefinition{SignatureId::ResourcePacksInfoPacketHandle, "48 00 40 F9 E0 03 02 AA 62 00 40 F9 03 75 40 F9 60 00 1F D6 ?? ?? ?? F0 08 81 1D 91 08 00 00 F9"},
+    SignatureDefinition{SignatureId::ResourcePackStackPacketHandle, "48 00 40 F9 E0 03 02 AA 62 00 40 F9 03 79 40 F9 60 00 1F D6 ?? ?? ?? D0 08 C1 1F 91 08 00 00 F9"},
 }};
 }
 

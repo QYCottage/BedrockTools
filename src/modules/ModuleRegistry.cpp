@@ -17,6 +17,7 @@
 #include "misc/nodisconnect.hpp"
 #include "misc/chattimestamps.hpp"
 #include "misc/notouchborder.hpp"
+#include "misc/forceglobalrp.hpp"
 #include "misc/cpslimiter.hpp"
 #include "hud/speeddisplay.hpp"
 #include "hud/debugmenu.hpp"
@@ -113,4 +114,5 @@ void registerAllModules() {
     registry.emplace<LightOverlayModule>();
     registry.emplace<ShulkerPreviewModule>();
     registry.emplace<ConnectedGlassModule>();
+    registry.emplace<ForceGlobalRPModule>();
 }

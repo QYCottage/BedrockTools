@@ -107,6 +107,8 @@ enum class SignatureId : std::uint16_t {
     GuiDataDisplayTextObjectWhisperMessageObject,
     GuiDataDisplayWhisperMessage,
     GuiDataAddMessage,
+    ResourcePacksInfoPacketHandle,
+    ResourcePackStackPacketHandle,
     Count
 };
 
