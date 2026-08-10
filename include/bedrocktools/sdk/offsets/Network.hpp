@@ -12,6 +12,15 @@ namespace Packet {
 inline constexpr std::size_t Size = 0x30;
 }
 
+namespace ResourcePacksInfoPacket {
+inline constexpr std::size_t mResourcePackRequired = 0x30;
+inline constexpr std::size_t mForceDisableVibrantVisuals = 0x33;
+}
+
+namespace ResourcePackStackPacket {
+inline constexpr std::size_t mResourcePackRequired = 0x68;
+}
+
 namespace TextPacketPayload {
 inline constexpr std::size_t mBody = 0x58;
 inline constexpr std::size_t mVariantIndex = 0x90;

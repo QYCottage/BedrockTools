@@ -11,8 +11,8 @@ static void (*original_ResourcePacksInfoPacket_handle)(void* _this, void* a1, vo
 static void ResourcePacksInfoPacket_handle_hook(void* _this, void* a1, void* a2, std::shared_ptr<bedrocktools::sdk::Packet>& packet) {
     if (g_forceGlobalRPMod && g_forceGlobalRPMod->enabled && packet.get() != nullptr) {
         bedrocktools::sdk::Packet* pkt = packet.get();
-        bedrocktools::sdk::field<bool>(pkt, 0x30) = false;
-        bedrocktools::sdk::field<bool>(pkt, 0x33) = false;
+        bedrocktools::sdk::field<bool>(pkt, bedrocktools::sdk::offsets::ResourcePacksInfoPacket::mResourcePackRequired) = false;
+        bedrocktools::sdk::field<bool>(pkt, bedrocktools::sdk::offsets::ResourcePacksInfoPacket::mForceDisableVibrantVisuals) = false;
     }
     
     if (original_ResourcePacksInfoPacket_handle) {
@@ -22,7 +22,7 @@ static void ResourcePacksInfoPacket_handle_hook(void* _this, void* a1, void* a2,
 static void ResourcePackStackPacket_handle_hook(void* _this, void* a1, void* a2, std::shared_ptr<bedrocktools::sdk::Packet>& packet) {
     if (g_forceGlobalRPMod && g_forceGlobalRPMod->enabled && packet.get() != nullptr) {
         bedrocktools::sdk::Packet* pkt = packet.get();
-        bedrocktools::sdk::field<bool>(pkt, 0x68) = false;
+        bedrocktools::sdk::field<bool>(pkt, bedrocktools::sdk::offsets::ResourcePackStackPacket::mResourcePackRequired) = false;
     }
     
     if (original_ResourcePacksInfoPacket_handle) {
