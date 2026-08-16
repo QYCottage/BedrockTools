@@ -20,7 +20,7 @@ SwingModifierModule::~SwingModifierModule() {
 
 static int (*_getModifiedSwingDuration_orig)(void*) = nullptr;
 static int _getModifiedSwingDuration_hook(void* self) {
-    if(g_swingMod->m_fluxSwing) g_swingMod->applyPatch();
+    if(g_swingMod->m_fluxSwing && g_swingMod->enabled) g_swingMod->applyPatch();
     else g_swingMod->removePatch();
     if(!g_swingMod || !g_swingMod->enabled) return _getModifiedSwingDuration_orig(self);
     return g_swingMod->m_swingSpeed;
