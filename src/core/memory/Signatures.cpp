@@ -110,6 +110,8 @@ const std::array<SignatureDefinition, SignatureCount> definitions{{
     SignatureDefinition{SignatureId::GuiDataAddMessage, "FD 7B BC A9 F8 5F 01 A9 F6 57 02 A9 F4 4F 03 A9 FD 03 00 91 08 24 54 A9 F4 03 02 2A F3 03 00 AA 1F 01 09 EB ? ? ? ? 29 00 40 B9 09 01 00 B9 29 0C 40 F9 20 80 C0 3C 09 0D 00 F9 E9 03 08 AA"},
     SignatureDefinition{SignatureId::ResourcePacksInfoPacketHandle, "48 00 40 F9 E0 03 02 AA 62 00 40 F9 03 75 40 F9 60 00 1F D6 ?? ?? ?? F0 08 81 1D 91 08 00 00 F9"},
     SignatureDefinition{SignatureId::ResourcePackStackPacketHandle, "48 00 40 F9 E0 03 02 AA 62 00 40 F9 03 79 40 F9 60 00 1F D6 ?? ?? ?? D0 08 C1 1F 91 08 00 00 F9"},
+    SignatureDefinition{SignatureId::FluxSwing, "82 28 22 1E 00 28 25 1E 21 0F 06 2D 22 03 07 2D ? ? ? ? 1F 15 00 71"},
+    SignatureDefinition{SignatureId::MobGetModifiedSwingDuration, "FD 7B BE A9 F4 4F 01 A9 FD 03 00 91 61 00 80 52"},
 }};
 }
 

@@ -36,6 +36,7 @@
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
+#include "visual/swingmodifier.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
     static ModuleRegistry registry;
@@ -100,6 +101,7 @@ void registerAllModules() {
     registry.emplace<SpeedDisplayModule>();
     registry.emplace<DebugMenuModule>();
     registry.emplace<ViewModelModule>();
+    registry.emplace<SwingModifierModule>();
     registry.emplace<KeystrokesModule>();
     registry.emplace<ThirdPersonNametagModule>();
     registry.emplace<TablistModule>();
