@@ -7,3 +7,8 @@ compile_commands.json
 *.so
 *.levipack
 *.zip
+
+# host-side rebuild of the block outline module (artifacts)
+host_test/build/
+host_test/blockoutline_test
+host_test/*.svg
