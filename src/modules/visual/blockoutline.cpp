@@ -32,8 +32,6 @@ using TessellatorVertexFn =
 using RenderMeshImmediatelyFn =
     void (*)(void* screenContext, void* tessellator, void* material, char* pad);
 
-using LevelGetHitResultFn = void* (*)(void* level);
-
 struct MaterialPtr {
     void* sharedPtrData[2];
 
@@ -57,7 +55,6 @@ static TessellatorBeginFn s_tessBegin = nullptr;
 static TessellatorColorFn s_tessColor = nullptr;
 static TessellatorVertexFn s_tessVertex = nullptr;
 static RenderMeshImmediatelyFn s_renderMesh = nullptr;
-static LevelGetHitResultFn s_getHitResult = nullptr;
 
 static void* s_renderMaterialGroup = nullptr;
 static void* g_localPlayer = nullptr;
@@ -465,7 +462,7 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     if (!screenContext || reinterpret_cast<uintptr_t>(screenContext) < 0x1000)
         return;
 
-    if (!s_getHitResult || !s_tessBegin || !s_tessColor ||
+    if (!s_tessBegin || !s_tessColor ||
         !s_tessVertex || !s_renderMesh) {
         return;
     }
@@ -513,7 +510,17 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     if (!levelPtr || levelPtr < 0x1000)
         return;
 
-    void* hitResult = s_getHitResult(reinterpret_cast<void*>(levelPtr));
+    // Read the embedded HitResult directly via Level::mHitResultWrapper +
+    // HitResultWrapper::mHitResult (same path as Level::storedHitResult() in
+    // the SDK). Calling Level::getHitResult() every frame from the render
+    // thread (inside the RenderLevel hook) takes a lock and deadlocks /
+    // stalls the first frame after enabling the module when several visual
+    // modules (Chunk Border / Breadcrumbs / this one) all hook RenderLevel.
+    // Reading the stored HitResult field is lock-free.
+    void* hitResult = reinterpret_cast<void*>(
+        levelPtr +
+        bedrocktools::sdk::offsets::Level::mHitResultWrapper +
+        bedrocktools::sdk::offsets::HitResultWrapper::mHitResult);
     if (!hitResult)
         return;
 
@@ -723,13 +730,6 @@ void BlockOutlineModule::onInit() {
 
     if (renderMesh)
         s_renderMesh = reinterpret_cast<RenderMeshImmediatelyFn>(renderMesh);
-
-    const uintptr_t getHitResult =
-        bedrocktools::memory::resolve(
-            bedrocktools::memory::SignatureId::LevelGetHitResult);
-
-    if (getHitResult)
-        s_getHitResult = reinterpret_cast<LevelGetHitResultFn>(getHitResult);
 
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) {

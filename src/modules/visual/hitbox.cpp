@@ -19,7 +19,6 @@ typedef void (*Tessellator_vertex_t)(void* tessellator, float x, float y, float 
 typedef void (*MeshHelpers_renderMeshImmediately_t)(void* screenContext, void* tessellator, void* material, char* pad);
 
 typedef void* (*HitResult_getEntity_t)(void* hitResult);
-typedef void* (*Level_getHitResult_t)(void* level);
 typedef bool (*Actor_isPlayer_t)(void* actor);
 typedef bool (*Actor_isInvisible_t)(void* actor);
 typedef bool (*BlockSource_isSolidBlockingBlock_t)(void* region, const bedrocktools::sdk::BlockPos& pos);
@@ -115,7 +114,6 @@ static Tessellator_vertex_t               s_tessVertex = nullptr;
 static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 
 static HitResult_getEntity_t              s_hitResultGetEntity = nullptr;
-static Level_getHitResult_t               s_getHitResult = nullptr;
 static Actor_isPlayer_t                   s_actorIsPlayer = nullptr;
 static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
@@ -420,15 +418,15 @@ static float distanceToAABB(float x, float y, float z, const AABB& aabb) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// Prefer Level::getHitResult() (same path Block Outline / Reach Counter use).
-// The raw mHitResultWrapper offset is only a fallback — it does not always
-// point at the live pick used for melee.
+// Read the embedded HitResult directly via Level::mHitResultWrapper +
+// HitResultWrapper::mHitResult (same path as Level::storedHitResult() in
+// the SDK). Calling Level::getHitResult() every frame from the render
+// thread (inside the RenderLevel hook) takes a lock and deadlocks / stalls
+// the first frame after enabling the module when several visual modules
+// (Chunk Border / Breadcrumbs / Block Outline / this one) all hook
+// RenderLevel. Reading the stored HitResult field is lock-free.
 static void* resolveHitResult(void* level) {
     if (!level || reinterpret_cast<uintptr_t>(level) < 0x1000) return nullptr;
-    if (s_getHitResult) {
-        void* hit = s_getHitResult(level);
-        if (hit && reinterpret_cast<uintptr_t>(hit) >= 0x1000) return hit;
-    }
     uintptr_t wrapper = reinterpret_cast<uintptr_t>(level) +
                         bedrocktools::sdk::offsets::Level::mHitResultWrapper;
     void* hit = reinterpret_cast<void*>(
@@ -719,7 +717,9 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     // The previous indicator reconstructed the ray from ActorRotationComponent,
     // which on Bedrock (especially mobile) often lags or disagrees with the
     // camera, so the box never turned red even when the crosshair was on a
-    // mob. Level::getHitResult() is the live pick Block Outline already uses.
+    // mob. The embedded Level HitResult (the stored pick) is the live pick
+    // Block Outline already uses, read field-offset so it never stalls the
+    // render thread.
     void* selectedEntity = nullptr;
     PickRay pick;
     uintptr_t levelPtr = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mLevel);
@@ -943,9 +943,6 @@ void HitboxModule::onInit() {
 
     uintptr_t hrge = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
     if (hrge) s_hitResultGetEntity = (HitResult_getEntity_t)hrge;
-
-    uintptr_t ghr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LevelGetHitResult);
-    if (ghr) s_getHitResult = (Level_getHitResult_t)ghr;
 
     uintptr_t aip = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorIsPlayer);
     if (aip) s_actorIsPlayer = (Actor_isPlayer_t)aip;
