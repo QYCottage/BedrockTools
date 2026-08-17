@@ -465,10 +465,9 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     float camZ = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 8);
 
     // Wall occlusion: resolve the dimension's BlockSource once per frame so
-    // hitboxes behind solid blocks can be culled. Skipped entirely unless
-    // the "occlusion" setting is on.
+    // hitboxes behind solid blocks are always culled, with no menu setting.
     void* region = nullptr;
-    if (g_hitboxMod->occlusion && s_isSolidBlockingBlock) {
+    if (s_isSolidBlockingBlock) {
         uintptr_t dimension = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mDimension);
         if (dimension >= 0x1000) {
             uintptr_t blockSource = *(uintptr_t*)(dimension + bedrocktools::sdk::offsets::Dimension::mBlockSource);
@@ -903,9 +902,6 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("crosshairIndicator")) {
         try { crosshairIndicator = j["crosshairIndicator"].get<bool>(); } catch (...) {}
     }
-    if (j.contains("occlusion")) {
-        occlusion = j["occlusion"].get<bool>();
-    }
 
     auto parseColor = [&](const std::string& key, uint32_t& outColor) {
         if (!j.contains(key) || !j[key].is_string()) return;
@@ -945,7 +941,6 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["hitboxIndicator"] = hitboxIndicator;
     j["hitRange"] = hitRange;
     j["crosshairIndicator"] = crosshairIndicator;
-    j["occlusion"] = occlusion;
 
     char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12], hexC[12];
     snprintf(hexH, sizeof(hexH), "#%08X", forceOpaqueColor(hitboxColor));
