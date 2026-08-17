@@ -4,6 +4,7 @@
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
+#include <bedrocktools/sdk/world/Level.hpp>
 #include <cmath>
 #include <string>
 #include <cstring>
@@ -287,11 +288,11 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     void* selectedEntity = nullptr;
     uintptr_t levelPtr = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mLevel);
     if (levelPtr && s_hitResultGetEntity) {
-        uintptr_t hitResultWrapper = levelPtr + bedrocktools::sdk::offsets::Level::mHitResultWrapper;
-        void* hitResult = (void*)(hitResultWrapper + bedrocktools::sdk::offsets::HitResultWrapper::mHitResult);
-
-        int hitType = *(int*)((uintptr_t)hitResult + bedrocktools::sdk::offsets::HitResult::mType);
-        if (hitType == 1) {
+        auto* hitResult =
+            reinterpret_cast<bedrocktools::sdk::Level*>(levelPtr)
+                ->storedHitResult();
+        if (hitResult && hitResult->type() ==
+            bedrocktools::sdk::offsets::HitResult::TypeEntity) {
             selectedEntity = s_hitResultGetEntity(hitResult);
         }
     }
