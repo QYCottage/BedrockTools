@@ -32,6 +32,14 @@ struct ActorVec {
 
 typedef ActorVec (*Actor_fetchNearbyActorsSorted_t)(void* actor, void* extent, int actorType);
 
+// BlockSource::isSolidBlockingBlock(BlockPos const&) -- true for full opaque
+// blocks that block movement and sight (stone, dirt, planks...), false for
+// transparent or partial blocks (glass, water, leaves, fences, slabs...).
+struct BlockPosI {
+    int x, y, z;
+};
+typedef bool (*BlockSource_isSolidBlockingBlock_t)(void* region, const BlockPosI& pos);
+
 struct HashedString {
     uint64_t mStrHash;
     std::string mStr;
@@ -125,6 +133,7 @@ static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 static Actor_isPlayer_t                   s_actorIsPlayer = nullptr;
 static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
+static BlockSource_isSolidBlockingBlock_t s_isSolidBlockingBlock = nullptr;
 
 static MaterialPtr s_matSelection;
 static MaterialPtr s_matFill;
@@ -318,6 +327,89 @@ static bool rayHitsAABB(float ox, float oy, float oz,
     return true;
 }
 
+// Amanatides & Woo voxel traversal: walks every voxel the segment
+// camera -> target passes through and returns true as soon as a solid
+// blocking block is found. The camera's own voxel is never tested, so
+// the check keeps working when the camera clips into geometry.
+static bool rayHitsSolid(void* region,
+                         float ox, float oy, float oz,
+                         float tx, float ty, float tz) {
+    if (!region || !s_isSolidBlockingBlock) return false;
+
+    const float dx = tx - ox;
+    const float dy = ty - oy;
+    const float dz = tz - oz;
+    const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.01f) return false;
+
+    int x = (int)floorf(ox);
+    int y = (int)floorf(oy);
+    int z = (int)floorf(oz);
+    const int ex = (int)floorf(tx);
+    const int ey = (int)floorf(ty);
+    const int ez = (int)floorf(tz);
+    if (x == ex && y == ey && z == ez) return false;
+
+    int stepX, stepY, stepZ;
+    float tMaxX, tMaxY, tMaxZ;
+    float tDeltaX, tDeltaY, tDeltaZ;
+    constexpr float kInf = 1e30f;
+
+    if (dx > 0.0f)      { stepX = 1;  tDeltaX = 1.0f / dx;      tMaxX = (x + 1 - ox) * tDeltaX; }
+    else if (dx < 0.0f) { stepX = -1; tDeltaX = -1.0f / dx;     tMaxX = (ox - x) * tDeltaX; }
+    else                { stepX = 0;  tDeltaX = kInf;           tMaxX = kInf; }
+
+    if (dy > 0.0f)      { stepY = 1;  tDeltaY = 1.0f / dy;      tMaxY = (y + 1 - oy) * tDeltaY; }
+    else if (dy < 0.0f) { stepY = -1; tDeltaY = -1.0f / dy;     tMaxY = (oy - y) * tDeltaY; }
+    else                { stepY = 0;  tDeltaY = kInf;           tMaxY = kInf; }
+
+    if (dz > 0.0f)      { stepZ = 1;  tDeltaZ = 1.0f / dz;      tMaxZ = (z + 1 - oz) * tDeltaZ; }
+    else if (dz < 0.0f) { stepZ = -1; tDeltaZ = -1.0f / dz;     tMaxZ = (oz - z) * tDeltaZ; }
+    else                { stepZ = 0;  tDeltaZ = kInf;           tMaxZ = kInf; }
+
+    while (true) {
+        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+            x += stepX;
+            if (tMaxX > dist) break;
+            tMaxX += tDeltaX;
+        } else if (tMaxY < tMaxZ) {
+            y += stepY;
+            if (tMaxY > dist) break;
+            tMaxY += tDeltaY;
+        } else {
+            z += stepZ;
+            if (tMaxZ > dist) break;
+            tMaxZ += tDeltaZ;
+        }
+
+        // Reached the voxel holding the target point: the target itself is
+        // never treated as blocking (a mob hugging a wall stays visible).
+        if (x == ex && y == ey && z == ez) break;
+
+        BlockPosI bp{x, y, z};
+        if (s_isSolidBlockingBlock(region, bp)) return true;
+    }
+
+    return false;
+}
+
+// True when every sampled point of the actor's box is hidden behind solid
+// blocks. Samples the box center and the top-center, so a tall mob whose
+// head pokes over a low wall stays visible while a fully hidden one is culled.
+static bool isOccluded(void* region,
+                       float camX, float camY, float camZ,
+                       const AABB& aabb) {
+    if (!region || !s_isSolidBlockingBlock) return false;
+
+    const float cx = (aabb.min.x + aabb.max.x) * 0.5f;
+    const float cz = (aabb.min.z + aabb.max.z) * 0.5f;
+    const float cy = (aabb.min.y + aabb.max.y) * 0.5f;
+
+    if (!rayHitsSolid(region, camX, camY, camZ, cx, cy, cz)) return false;
+    if (!rayHitsSolid(region, camX, camY, camZ, cx, aabb.max.y, cz)) return false;
+    return true;
+}
+
 static AABB getActorAABB(void* actor) {
     AABB aabb = {{0,0,0},{0,0,0}};
     uintptr_t actorAddr = (uintptr_t)actor;
@@ -371,6 +463,18 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     float camX = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos);
     float camY = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 4);
     float camZ = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 8);
+
+    // Wall occlusion: resolve the dimension's BlockSource once per frame so
+    // hitboxes behind solid blocks can be culled. Skipped entirely unless
+    // the "occlusion" setting is on.
+    void* region = nullptr;
+    if (g_hitboxMod->occlusion && s_isSolidBlockingBlock) {
+        uintptr_t dimension = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mDimension);
+        if (dimension >= 0x1000) {
+            uintptr_t blockSource = *(uintptr_t*)(dimension + bedrocktools::sdk::offsets::Dimension::mBlockSource);
+            if (blockSource >= 0x1000) region = (void*)blockSource;
+        }
+    }
 
     ensureMaterials();
 
@@ -563,6 +667,11 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         if (aabb.min.x == 0.f && aabb.min.y == 0.f && aabb.min.z == 0.f &&
             aabb.max.x == 0.f && aabb.max.y == 0.f && aabb.max.z == 0.f) return;
 
+        // Cull hitboxes that are fully hidden behind solid blocks instead of
+        // drawing them through walls. Skips the eye/look lines too, since
+        // they belong to the same box.
+        if (region && isOccluded(region, camX, camY, camZ, aabb)) return;
+
         uint32_t boxColor = g_hitboxMod->hitboxColor;
         if (g_hitboxMod->hitboxIndicator) {
             // The indicator may only become active for the entity currently
@@ -734,6 +843,9 @@ void HitboxModule::onInit() {
     uintptr_t afn = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorFetchNearbyActorsSorted);
     if (afn) s_actorFetchNearby = (Actor_fetchNearbyActorsSorted_t)afn;
 
+    uintptr_t isb = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceIsSolidBlockingBlock);
+    if (isb) s_isSolidBlockingBlock = (BlockSource_isSolidBlockingBlock_t)isb;
+
     uintptr_t ghr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LevelGetHitResult);
     if (ghr) s_levelGetHitResult = (Level_getHitResult_t)ghr;
 
@@ -791,6 +903,9 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("crosshairIndicator")) {
         try { crosshairIndicator = j["crosshairIndicator"].get<bool>(); } catch (...) {}
     }
+    if (j.contains("occlusion")) {
+        occlusion = j["occlusion"].get<bool>();
+    }
 
     auto parseColor = [&](const std::string& key, uint32_t& outColor) {
         if (!j.contains(key) || !j[key].is_string()) return;
@@ -830,6 +945,7 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["hitboxIndicator"] = hitboxIndicator;
     j["hitRange"] = hitRange;
     j["crosshairIndicator"] = crosshairIndicator;
+    j["occlusion"] = occlusion;
 
     char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12], hexC[12];
     snprintf(hexH, sizeof(hexH), "#%08X", forceOpaqueColor(hitboxColor));

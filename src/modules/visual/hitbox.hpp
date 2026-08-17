@@ -48,6 +48,13 @@ public:
     bool crosshairIndicator = false;
     uint32_t crosshairIndicatorColor = 0xFFFF0000;
 
+    // Wall occlusion: when enabled, hitboxes behind solid blocks are culled
+    // instead of being drawn through walls. Uses the game's own solid-block
+    // test, so transparent blocks (glass, water, leaves, fences...) do not
+    // hide hitboxes. The box is drawn as soon as any part of it (center or
+    // top) is in line of sight.
+    bool occlusion = true;
+
 private:
     bool m_patched;
     bool m_cursorHooked;
