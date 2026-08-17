@@ -36,6 +36,9 @@
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
+#include "misc/commentkey.hpp"
+#include "misc/commandhotkey.hpp"
+#include "visual/blockoutline.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
     static ModuleRegistry registry;
@@ -115,4 +118,7 @@ void registerAllModules() {
     registry.emplace<ShulkerPreviewModule>();
     registry.emplace<ConnectedGlassModule>();
     registry.emplace<ForceGlobalRPModule>();
+    registry.emplace<BlockOutlineModule>();
+    registry.emplace<CommentKey>();
+    registry.emplace<CommandHotkeyModule>();
 }
