@@ -228,6 +228,11 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     void* matInner = s_matSelection ? (void*)&s_matSelection
                                     : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
 
+    // Filled geometry (thick lines) uses the embedded selection overlay
+    // material, the same one Breadcrumbs / Block Outline use for quads.
+    void* matFill = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
+    if (!matFill) matFill = matInner;
+
     uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
     if (!colorHolderPtr || colorHolderPtr < 0x1000) return;
     float* colorHolder = (float*)colorHolderPtr;
@@ -238,6 +243,15 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     colorHolder[2] = 1.0f;
     colorHolder[3] = 1.0f;
 
+    // Menu thickness slider -> world-space half width. 1.0 (or lower) keeps
+    // the classic hairline box; anything above is drawn as real geometry,
+    // because GL line width is ignored by nearly every mobile GLES driver.
+    float thicknessSetting = g_hitboxMod->lineThickness;
+    if (thicknessSetting < 1.0f) thicknessSetting = 1.0f;
+    if (thicknessSetting > 20.0f) thicknessSetting = 20.0f;
+    const bool thickLines = thicknessSetting > 1.05f;
+    const float halfWidth = thicknessSetting * 0.01f * 0.5f;
+
     auto drawLines = [&](const std::vector<std::pair<bedrocktools::sdk::Vec3, bedrocktools::sdk::Vec3>>& lines, uint32_t color) {
         if (lines.empty()) return;
         float r = ((color >> 16) & 0xFF) / 255.0f;
@@ -245,6 +259,76 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         float b = ((color      ) & 0xFF) / 255.0f;
         float a = ((color >> 24) & 0xFF) / 255.0f;
 
+        char pad[0x58];
+
+        // Thick pass: every segment becomes a camera-facing quad, so the
+        // apparent width follows the thickness setting from any angle.
+        if (thickLines) {
+            s_tessBegin(tessellator, nullptr, 1, static_cast<int>(lines.size() * 8), 0);
+            s_tessColor(tessellator, r, g, b, a);
+
+            for (const auto& line : lines) {
+                bedrocktools::sdk::Vec3 p1 = line.first;
+                bedrocktools::sdk::Vec3 p2 = line.second;
+                p1.x -= camX; p1.y -= camY; p1.z -= camZ;
+                p2.x -= camX; p2.y -= camY; p2.z -= camZ;
+
+                float dx = p2.x - p1.x;
+                float dy = p2.y - p1.y;
+                float dz = p2.z - p1.z;
+                float len = sqrtf(dx * dx + dy * dy + dz * dz);
+                if (len < 1e-5f) continue;
+                dx /= len; dy /= len; dz /= len;
+
+                // The camera sits at the origin of this relative space, so
+                // the vector to the segment midpoint is the view direction.
+                float mx = (p1.x + p2.x) * 0.5f;
+                float my = (p1.y + p2.y) * 0.5f;
+                float mz = (p1.z + p2.z) * 0.5f;
+
+                // side = dir x view, i.e. perpendicular to both the segment
+                // and the eye ray => the quad always faces the player.
+                float sx = dy * mz - dz * my;
+                float sy = dz * mx - dx * mz;
+                float sz = dx * my - dy * mx;
+                float sLen = sqrtf(sx * sx + sy * sy + sz * sz);
+                if (sLen < 1e-5f) {
+                    // Looking straight down the segment: pick any perpendicular.
+                    if (fabsf(dy) < 0.9f) { sx = -dz; sy = 0.0f; sz = dx; }
+                    else { sx = 1.0f; sy = 0.0f; sz = 0.0f; }
+                    sLen = sqrtf(sx * sx + sy * sy + sz * sz);
+                    if (sLen < 1e-5f) continue;
+                }
+                sx = sx / sLen * halfWidth;
+                sy = sy / sLen * halfWidth;
+                sz = sz / sLen * halfWidth;
+
+                // Overshoot both ends by half the width so corners stay solid.
+                float ex = dx * halfWidth;
+                float ey = dy * halfWidth;
+                float ez = dz * halfWidth;
+
+                bedrocktools::sdk::Vec3 quad[4] = {
+                    {p1.x - ex - sx, p1.y - ey - sy, p1.z - ez - sz},
+                    {p2.x + ex - sx, p2.y + ey - sy, p2.z + ez - sz},
+                    {p2.x + ex + sx, p2.y + ey + sy, p2.z + ez + sz},
+                    {p1.x - ex + sx, p1.y - ey + sy, p1.z - ez + sz}
+                };
+
+                // Emitted with both windings so back-face culling never
+                // eats a segment.
+                for (int i = 0; i < 4; ++i)
+                    s_tessVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
+                for (int i = 3; i >= 0; --i)
+                    s_tessVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
+            }
+
+            memset(pad, 0, sizeof(pad));
+            s_renderMesh(screenContext, tessellator, matFill, pad);
+        }
+
+        // Core hairline pass: keeps the edge crisp and visible even when the
+        // quads shrink below a pixel at long range.
         s_tessBegin(tessellator, nullptr, 4, static_cast<int>(lines.size() * 2), 0);
         s_tessColor(tessellator, r, g, b, a);
 
@@ -257,7 +341,6 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
             s_tessVertex(tessellator, p2.x, p2.y, p2.z);
         }
 
-        char pad[0x58];
         memset(pad, 0, sizeof(pad));
         s_renderMesh(screenContext, tessellator, matInner, pad);
     };
@@ -505,6 +588,12 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     showLookLine = j.value("showLookLine", showLookLine);
     lookLineLength = j.value("lookLineLength", lookLineLength);
 
+    if (j.contains("lineThickness")) {
+        try { lineThickness = j["lineThickness"].get<float>(); } catch (...) {}
+    }
+    if (lineThickness < 1.0f) lineThickness = 1.0f;
+    if (lineThickness > 20.0f) lineThickness = 20.0f;
+
     if (j.contains("hitboxIndicator")) {
         hitboxIndicator = j["hitboxIndicator"].get<bool>();
     }
@@ -536,6 +625,7 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["showEyeLine"] = showEyeLine;
     j["showLookLine"] = showLookLine;
     j["lookLineLength"] = lookLineLength;
+    j["lineThickness"] = lineThickness;
     j["hitboxIndicator"] = hitboxIndicator;
     j["hitRange"] = hitRange;
 
