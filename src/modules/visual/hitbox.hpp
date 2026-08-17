@@ -41,8 +41,16 @@ public:
     uint32_t indicatorActiveColor = 0xFFFF0000;  
     float hitRange = 3.0f;                         
 
+    // Crosshair indicator: recolors the game's own crosshair as soon as the
+    // player is aiming at a mob or another player that is close enough to
+    // actually be hit. Nothing extra is drawn -- the vanilla cursor itself is
+    // tinted while it renders.
+    bool crosshairIndicator = false;
+    uint32_t crosshairIndicatorColor = 0xFFFF0000;
+
 private:
     bool m_patched;
+    bool m_cursorHooked;
     void* m_patchTarget;
 
     void* m_tessBeginAddr;
