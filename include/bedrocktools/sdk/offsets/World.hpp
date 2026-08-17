@@ -55,8 +55,12 @@ inline constexpr std::size_t mHitResultWrapper = 456;
 
 namespace HitResult {
 inline constexpr std::size_t mStartPos = 0;
+inline constexpr std::size_t mRayDir = 12;
 inline constexpr std::size_t mType = 24;
 inline constexpr std::size_t mPos = 44;
+inline constexpr std::size_t mBlockPos = 56;
+inline constexpr int TypeEntity = 1;
+inline constexpr int TypeEntityOutOfRange = 3;
 }
 
 namespace HitResultWrapper {

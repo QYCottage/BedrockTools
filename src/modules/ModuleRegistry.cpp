@@ -70,6 +70,18 @@ bool ModuleRegistry::onMouseEvent(int button, bool isDown) {
     return consumed;
 }
 
+bool ModuleRegistry::onKeyEvent(int key, bool isDown) {
+    bool consumed = false;
+    for (auto* module : mView) if (module->onKeyEvent(key, isDown)) consumed = true;
+    return consumed;
+}
+
+bool ModuleRegistry::onTouchEvent(float x, float y, bool isDown) {
+    bool consumed = false;
+    for (auto* module : mView) if (module->onTouchEvent(x, y, isDown)) consumed = true;
+    return consumed;
+}
+
 void ModuleRegistry::setKeybindBlocked(bool blocked) {
     mKeybindBlocked = blocked;
 }
