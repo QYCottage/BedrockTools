@@ -3,7 +3,7 @@
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/Types.hpp>
-#include <bedrocktools/sdk/world/Level.hpp>
+#include <bedrocktools/sdk/world/HitResult.hpp>
 
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/events/EventBus.hpp>
@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <mutex>
 
 namespace {
 
@@ -58,7 +59,53 @@ static TessellatorVertexFn s_tessVertex = nullptr;
 static RenderMeshImmediatelyFn s_renderMesh = nullptr;
 
 static void* s_renderMaterialGroup = nullptr;
-static void* g_localPlayer = nullptr;
+struct HitSnapshot {
+    bedrocktools::sdk::BlockPos blockPos{};
+    bedrocktools::sdk::Vec3 hitPos{};
+    bool valid = false;
+};
+
+static HitSnapshot g_hitSnapshot;
+static std::mutex g_hitSnapshotMutex;
+using LevelGetHitResultFn = void* (*)(void*);
+static LevelGetHitResultFn s_levelGetHitResult = nullptr;
+
+static bool validHitSnapshot(const HitSnapshot& snapshot) {
+    const auto finite = [](float value) { return std::isfinite(value); };
+    const auto& block = snapshot.blockPos;
+    const auto& hit = snapshot.hitPos;
+    // Reject corrupt native data before it can reach the renderer or produce
+    // huge vertex coordinates. These bounds cover valid Bedrock world space.
+    return snapshot.valid && std::abs(block.x) <= 30000000 &&
+           block.y >= -2048 && block.y <= 2048 && std::abs(block.z) <= 30000000 &&
+           finite(hit.x) && finite(hit.y) && finite(hit.z) &&
+           hit.x >= static_cast<float>(block.x) - 1.0f &&
+           hit.x <= static_cast<float>(block.x) + 2.0f &&
+           hit.y >= static_cast<float>(block.y) - 1.0f &&
+           hit.y <= static_cast<float>(block.y) + 2.0f &&
+           hit.z >= static_cast<float>(block.z) - 1.0f &&
+           hit.z <= static_cast<float>(block.z) + 2.0f;
+}
+
+static void updateHitSnapshot(void* player) {
+    HitSnapshot next{};
+    if (player && s_levelGetHitResult) {
+        const uintptr_t level = *reinterpret_cast<uintptr_t*>(
+            reinterpret_cast<uintptr_t>(player) +
+            bedrocktools::sdk::offsets::Actor::mLevel);
+        if (level >= 0x1000) {
+            const auto* hit = reinterpret_cast<const bedrocktools::sdk::HitResult*>(
+                s_levelGetHitResult(reinterpret_cast<void*>(level)));
+            if (hit && hit->type() == bedrocktools::sdk::offsets::HitResult::TypeBlock) {
+                next.blockPos = hit->blockPosition();
+                next.hitPos = hit->position();
+                next.valid = validHitSnapshot(next);
+            }
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_hitSnapshotMutex);
+    g_hitSnapshot = next;
+}
 static MaterialPtr s_selectionMaterial;
 static MaterialPtr s_xrayMaterial;
 
@@ -498,35 +545,15 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     const float camZ = *reinterpret_cast<float*>(
         lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 8);
 
-    const uintptr_t localPlayerPtr =
-        reinterpret_cast<uintptr_t>(g_localPlayer);
-
-    if (!localPlayerPtr || localPlayerPtr < 0x1000)
-        return;
-
-    const uintptr_t levelPtr =
-        *reinterpret_cast<uintptr_t*>(
-            localPlayerPtr + bedrocktools::sdk::offsets::Actor::mLevel);
-
-    if (!levelPtr || levelPtr < 0x1000)
-        return;
-
-    // mHitResultWrapper is a UniqueOwnerPointer. Level::storedHitResult()
-    // follows its owned-value pointer before accessing the embedded result;
-    // treating the owner itself as HitResult reads unrelated Level fields and
-    // makes every real block hit look invalid.
-    const auto* hitResult =
-        reinterpret_cast<const bedrocktools::sdk::Level*>(levelPtr)
-            ->storedHitResult();
-    if (!hitResult)
-        return;
-
-    if (hitResult->type() !=
-        bedrocktools::sdk::offsets::HitResult::TypeBlock) {
-        return;
+    HitSnapshot hitSnapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_hitSnapshotMutex);
+        hitSnapshot = g_hitSnapshot;
     }
+    if (!validHitSnapshot(hitSnapshot))
+        return;
 
-    const auto hitPos = hitResult->position();
+    const auto hitPos = hitSnapshot.hitPos;
 
     const float distance =
         std::sqrt(
@@ -540,7 +567,7 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     // Use the selected block field rather than flooring the surface hit
     // point. In HitResult's arm64 layout mBlock is at +32, before mPos at
     // +44; the previous +56 offset pointed into the entity reference.
-    const auto blockPos = hitResult->blockPosition();
+    const auto blockPos = hitSnapshot.blockPos;
 
     const float x = static_cast<float>(blockPos.x);
     const float y = static_cast<float>(blockPos.y);
@@ -717,9 +744,15 @@ void BlockOutlineModule::onInit() {
     if (renderMesh)
         s_renderMesh = reinterpret_cast<RenderMeshImmediatelyFn>(renderMesh);
 
+    const uintptr_t getHitResult =
+        bedrocktools::memory::resolve(
+            bedrocktools::memory::SignatureId::LevelGetHitResult);
+    if (getHitResult)
+        s_levelGetHitResult = reinterpret_cast<LevelGetHitResultFn>(getHitResult);
+
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) {
-            g_localPlayer = event.player;
+            updateHitSnapshot(event.player);
         });
 
     const uintptr_t materialGroup =
