@@ -36,6 +36,10 @@ using LevelGetHitResultFn = void* (*)(void* level);
 
 struct MaterialPtr {
     void* sharedPtrData[2];
+
+    explicit operator bool() const {
+        return sharedPtrData[0] != nullptr;
+    }
 };
 
 struct Line {
@@ -57,8 +61,8 @@ static LevelGetHitResultFn s_getHitResult = nullptr;
 
 static void* s_renderMaterialGroup = nullptr;
 static void* g_localPlayer = nullptr;
-static MaterialPtr* s_selectionMaterial = nullptr;
-static MaterialPtr* s_xrayMaterial = nullptr;
+static MaterialPtr s_selectionMaterial;
+static MaterialPtr s_xrayMaterial;
 
 static void (*s_renderLevelOriginal)(void*, void*, void*) = nullptr;
 
@@ -155,9 +159,9 @@ static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) 
     return 0;
 }
 
-static MaterialPtr* getMaterial(const char* name) {
+static MaterialPtr getMaterial(const char* name) {
     if (!s_renderMaterialGroup || !name)
-        return nullptr;
+        return {};
 
     // BedrockTools uses the same HashedString layout for material lookup.
     struct HashedString {
@@ -180,11 +184,11 @@ static MaterialPtr* getMaterial(const char* name) {
     const auto getMatIndex =
         bedrocktools::sdk::offsets::VTable::RenderMaterialGroup_getMaterial;
     if (!vtable || !vtable[getMatIndex])
-        return nullptr;
+        return {};
 
     HashedString hs(name);
 
-    using GetMaterialFn = MaterialPtr* (*)(void*, const HashedString*);
+    using GetMaterialFn = MaterialPtr (*)(void*, const HashedString*);
     return reinterpret_cast<GetMaterialFn>(vtable[getMatIndex])(
         s_renderMaterialGroup, &hs);
 }
@@ -601,7 +605,7 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
 
     void* lineMaterial =
         s_selectionMaterial
-            ? reinterpret_cast<void*>(s_selectionMaterial)
+            ? reinterpret_cast<void*>(&s_selectionMaterial)
             : overlayMaterial;
 
     // Filled bands use the embedded selection overlay material, the same
@@ -649,7 +653,7 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     // 3D extra pass: draw the same geometry without depth so the back
     // edges stay visible through the block (Flarial-style "3D Outline").
     if (g_module->threeD && s_xrayMaterial) {
-        void* xray = reinterpret_cast<void*>(s_xrayMaterial);
+        void* xray = reinterpret_cast<void*>(&s_xrayMaterial);
         renderOutline(
             screenContext,
             tessellator,

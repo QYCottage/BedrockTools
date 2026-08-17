@@ -63,6 +63,10 @@ private:
 
 struct MaterialPtr {
     void* sharedPtrData[2];
+
+    explicit operator bool() const {
+        return sharedPtrData[0] != nullptr;
+    }
 };
 
 static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) {
@@ -117,8 +121,8 @@ static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
 static BlockSource_isSolidBlockingBlock_t s_isSolidBlockingBlock = nullptr;
 
-static MaterialPtr* s_matSelection = nullptr;
-static MaterialPtr* s_matOpaqueFill = nullptr;
+static MaterialPtr s_matSelection;
+static MaterialPtr s_matOpaqueFill;
 static uintptr_t    s_renderMaterialGroup = 0;
 
 // Fixed values for settings that were removed from the module menu:
@@ -151,17 +155,17 @@ static void s_hitboxTickCallback(void* _this) {
     }
 }
 
-static MaterialPtr* getMaterial(const char* name) {
-    if (!s_renderMaterialGroup || !name) return nullptr;
+static MaterialPtr getMaterial(const char* name) {
+    if (!s_renderMaterialGroup || !name) return {};
 
     HashedString hs(name);
 
     void** vtable = *reinterpret_cast<void***>(s_renderMaterialGroup);
     const auto getMatIndex =
         bedrocktools::sdk::offsets::VTable::RenderMaterialGroup_getMaterial;
-    if (!vtable || !vtable[getMatIndex]) return nullptr;
+    if (!vtable || !vtable[getMatIndex]) return {};
 
-    using getMat_t = MaterialPtr*(*)(void*, const HashedString*);
+    using getMat_t = MaterialPtr(*)(void*, const HashedString*);
     return reinterpret_cast<getMat_t>(vtable[getMatIndex])((void*)s_renderMaterialGroup, &hs);
 }
 
@@ -512,8 +516,8 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     // named materials did not resolve, the embedded selection overlay on
     // LevelRendererPlayer still draws untextured colored lines/quads.
     void* overlayMaterial = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
-    void* matInner = s_matSelection ? (void*)s_matSelection : overlayMaterial;
-    void* matFill = s_matOpaqueFill ? (void*)s_matOpaqueFill : overlayMaterial;
+    void* matInner = s_matSelection ? (void*)&s_matSelection : overlayMaterial;
+    void* matFill = s_matOpaqueFill ? (void*)&s_matOpaqueFill : overlayMaterial;
     if (!matInner && !matFill) return;
 
     uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
