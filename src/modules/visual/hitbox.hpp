@@ -23,6 +23,12 @@ public:
     bool showLookLine = true;
     float lookLineLength = 2.0f;
 
+    // Line thickness (menu slider units). 1.0 keeps the classic hairline
+    // look; anything above that is drawn as real geometry (beams around
+    // every edge) whose world-space width is lineThickness * 0.01 blocks,
+    // because GL line width is ignored by most mobile GL ES drivers.
+    float lineThickness = 1.0f;
+
     
     uint32_t hitboxColor = 0xFFFFFFFF;   
     uint32_t eyeLineColor = 0xFFFF0000;  
