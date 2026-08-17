@@ -59,10 +59,45 @@ static bool validPtr(uintptr_t p) {
     return p >= 0x10000ULL;
 }
 
+// Resolves the address a function computes with ADRP + ADD (immediate).
+// Mirrors the proven helper shared by the other render modules (hitbox,
+// breadcrumbs, chunkborder, lightoverlay): scans up to `count` instructions
+// for an ADRP writing targetReg, then the following ADD (immediate) to the
+// same register, and returns the computed page + imm12 address.
+static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) {
+    for (size_t i = 0; i < count; i++) {
+        uint32_t insn = insns[i];
+        if ((insn & 0x1F) != targetReg) continue;
+
+        if ((insn & 0x9F000000) == 0x90000000) {
+            uintptr_t page = ((uintptr_t)&insns[i] & ~0xFFFULL)
+                           + ((int64_t)((uint64_t)((insn >> 3) & 0x1FFFFC | (insn >> 29) & 3) << 43) >> 31);
+
+            for (size_t j = i + 1; j < count; j++) {
+                uint32_t add = insns[j];
+                if ((add & 0xFF000000) == 0x91000000 &&
+                    ((add >> 5) & 0x1F) == targetReg &&
+                    (add & 0x1F) == targetReg) {
+                    uint32_t imm12 = (add >> 10) & 0xFFF;
+                    if (add & 0x400000) imm12 <<= 12;
+                    return page + imm12;
+                }
+                if ((add & 0x1F) == targetReg) break;
+            }
+        }
+        if ((insn & 0x9F000000) == 0x10000000) {
+            int64_t imm = (int64_t)((uint64_t)((insn >> 3) & 0x1FFFFC | (insn >> 29)) << 43) >> 43;
+            return (uintptr_t)&insns[i] + imm;
+        }
+    }
+    return 0;
+}
+
 static MaterialPtr getMaterial(const char* name) {
     if (!validPtr(g_materialGroup)) return {};
     void** vtable = *reinterpret_cast<void***>(g_materialGroup);
-    if (!vtable || !vtable[2]) return {};
+    if (!validPtr(reinterpret_cast<uintptr_t>(vtable)) || !vtable[2] ||
+        !validPtr(reinterpret_cast<uintptr_t>(vtable[2]))) return {};
     using GetMaterialFn = MaterialPtr (*)(void*, const HashedString*);
     HashedString key(name);
     return reinterpret_cast<GetMaterialFn>(vtable[2])(
@@ -315,19 +350,17 @@ void BlockOutlineModule::onInit() {
     g_renderMesh = reinterpret_cast<RenderMeshFn>(mesh);
 
     if (group) {
-        // RenderMaterialGroupCommon loads the singleton pointer using ADRP + ADD.
-        const auto* insns = reinterpret_cast<const uint32_t*>(group);
-        uintptr_t page = reinterpret_cast<uintptr_t>(insns) & ~0xFFFULL;
-        const uint32_t first = insns[0];
-        if ((first & 0x9F000000u) == 0x90000000u) {
-            const int64_t imm = ((static_cast<int64_t>((first >> 5) & 0x7FFFF) << 2) |
-                                 static_cast<int64_t>((first >> 29) & 0x3));
-            const int64_t signedImm = (imm & (1LL << 20)) ? (imm | ~((1LL << 21) - 1)) : imm;
-            const uintptr_t adrp = page + (signedImm << 12);
-            const uint32_t add = insns[1];
-            if ((add & 0xFF000000u) == 0x91000000u)
-                g_materialGroup = adrp + ((add >> 10) & 0xFFFu);
-        }
+        // RenderMaterialGroupCommon loads the singleton pointer using
+        // ADRP + ADD. The ADD gives the address of the material-group owner
+        // object; the actual RenderMaterialGroup* field lives
+        // mRenderMaterialGroupOffset bytes into it. This offset is required:
+        // without it getMaterial() dereferenced unrelated memory and called
+        // a garbage vtable slot, which crashed the game on the first frame
+        // the module rendered. Every other render module (hitbox,
+        // breadcrumbs, chunkborder, lightoverlay) adds the same offset.
+        const uintptr_t groupAddr = resolveADRP(reinterpret_cast<uint32_t*>(group), 2, 0);
+        if (groupAddr)
+            g_materialGroup = groupAddr + bedrocktools::sdk::offsets::MaterialGroup::mRenderMaterialGroupOffset;
         if (!g_materialGroup) {
             // Fallback: RenderLevel already contains the selection material,
             // so material lookup is optional. The renderer can still work.
