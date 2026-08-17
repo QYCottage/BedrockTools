@@ -9,6 +9,30 @@
 #include <string_view>
 #include <vector>
 
+// Child settings are normally attached to a toggle whose key is a prefix of
+// theirs (e.g. "crosshairIndicator" owns "crosshairIndicatorColor"). A few
+// settings are named differently but are still owned by a toggle, so they are
+// mapped explicitly here. The parent must be a toggle that exists in the same
+// module for the dependency to be applied.
+struct ExplicitDependency {
+    const char* child;
+    const char* parent;
+};
+
+static const ExplicitDependency kExplicitDependencies[] = {
+    // Hitbox module: the indicator colors only matter while the hitbox
+    // indicator itself is enabled.
+    {"indicatorDefaultColor", "hitboxIndicator"},
+    {"indicatorActiveColor", "hitboxIndicator"},
+};
+
+static const char* explicitParentFor(const std::string& key) {
+    for (const auto& dep : kExplicitDependencies) {
+        if (key == dep.child) return dep.parent;
+    }
+    return nullptr;
+}
+
 static void onModuleToggle(std::string_view module_id, bool enabled) {
     auto* mod = ModuleRegistry::get().find(module_id);
     if (!mod) return;
@@ -222,12 +246,23 @@ void registerModulesWithLauncher() {
             std::string k = entry.key;
             if (entry.type != pl::modmenu::ConfigType::Toggle) {
                 std::string bestParent = "";
-                for (const auto& parentCandidate : configs) {
-                    if (parentCandidate.type == pl::modmenu::ConfigType::Toggle) {
-                        std::string pKey = parentCandidate.key;
-                        if (k.length() > pKey.length() && k.compare(0, pKey.length(), pKey) == 0) {
-                            if (pKey.length() > bestParent.length()) {
-                                bestParent = pKey;
+                if (const char* explicitParent = explicitParentFor(k)) {
+                    for (const auto& parentCandidate : configs) {
+                        if (parentCandidate.type == pl::modmenu::ConfigType::Toggle &&
+                            parentCandidate.key == explicitParent) {
+                            bestParent = parentCandidate.key;
+                            break;
+                        }
+                    }
+                }
+                if (bestParent.empty()) {
+                    for (const auto& parentCandidate : configs) {
+                        if (parentCandidate.type == pl::modmenu::ConfigType::Toggle) {
+                            std::string pKey = parentCandidate.key;
+                            if (k.length() > pKey.length() && k.compare(0, pKey.length(), pKey) == 0) {
+                                if (pKey.length() > bestParent.length()) {
+                                    bestParent = pKey;
+                                }
                             }
                         }
                     }
