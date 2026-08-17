@@ -1,78 +1,31 @@
 name: Build
+
 on:
   push:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
-permissions:
-  contents: read
-concurrency:
-  group: build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-env:
-  XMAKE_VERSION: 3.1.0
-  XMAKE_SHA256: 1baab457f3bf11032e82c6210bc5bec04f5b902962da17dab53cae10783170de
-  NDK_VERSION: r28c
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The setup-xmake action fetches every xmake branch and pull-request ref.
-      # Use the official, checksummed single-file bundle instead so transient
-      # git failures do not prevent the build from starting.
-      - name: Set up xmake
-        shell: bash
-        run: |
-          set -euo pipefail
-          xmake_dir="${RUNNER_TEMP}/xmake/bin"
-          xmake_bin="${xmake_dir}/xmake"
-          xmake_url="https://github.com/xmake-io/xmake/releases/download/v${XMAKE_VERSION}/xmake-bundle-v${XMAKE_VERSION}.linux.x86_64"
-          mkdir -p "${xmake_dir}"
-          curl --fail --location \
-            --retry 5 --retry-delay 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "${xmake_bin}" "${xmake_url}"
-          echo "${XMAKE_SHA256}  ${xmake_bin}" | sha256sum --check --strict
-          chmod +x "${xmake_bin}"
-          echo "${xmake_dir}" >> "${GITHUB_PATH}"
-          "${xmake_bin}" --version
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+      - uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: ${{ env.NDK_VERSION }}
-      - name: Restore xmake packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.xmake/packages
-            ~/.xmake/repositories
-          key: xmake-${{ runner.os }}-android-arm64-${{ env.NDK_VERSION }}-${{ hashFiles('xmake.lua', 'xmake-requires.lock') }}
-          restore-keys: |
-            xmake-${{ runner.os }}-android-arm64-${{ env.NDK_VERSION }}-
-      - name: Configure
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if xmake f -y -p android -a arm64-v8a -m release --ndk="${{ steps.ndk.outputs.ndk-path }}"; then
-              exit 0
-            fi
-            if [[ "${attempt}" == 3 ]]; then
-              echo "xmake configuration failed after ${attempt} attempts" >&2
-              exit 1
-            fi
-            delay=$((attempt * 15))
-            echo "xmake configuration failed (attempt ${attempt}/3); retrying in ${delay}s..." >&2
-            sleep "${delay}"
-          done
+          ndk-version: r28c
+
       - name: Build and package
-        run: xmake -y
-      - name: Upload package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        run: |
+          xmake f -y -p android -a arm64-v8a -m release --ndk=${{ steps.ndk.outputs.ndk-path }}
+          xmake -y
+
+      - uses: actions/upload-artifact@v4
         with:
           name: BedrockTools-levipack
           path: build/android/arm64-v8a/release/BedrockTools.levipack
