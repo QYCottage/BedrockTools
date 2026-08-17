@@ -18,9 +18,9 @@ public:
     
     bool showEntities = true;
     bool showPlayers = true;
-    bool showSelf = true;
-    bool showEyeLine = true;
-    bool showLookLine = true;
+    bool showSelf = false;
+    bool showEyeLine = false;
+    bool showLookLine = false;
     float lookLineLength = 2.0f;
 
     // Line thickness (menu slider units). 1.0 keeps the classic hairline
