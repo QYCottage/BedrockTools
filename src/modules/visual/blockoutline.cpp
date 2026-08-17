@@ -3,6 +3,7 @@
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/Types.hpp>
+#include <bedrocktools/sdk/world/Level.hpp>
 
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/events/EventBus.hpp>
@@ -510,33 +511,22 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     if (!levelPtr || levelPtr < 0x1000)
         return;
 
-    // Read the embedded HitResult directly via Level::mHitResultWrapper +
-    // HitResultWrapper::mHitResult (same path as Level::storedHitResult() in
-    // the SDK). Calling Level::getHitResult() every frame from the render
-    // thread (inside the RenderLevel hook) takes a lock and deadlocks /
-    // stalls the first frame after enabling the module when several visual
-    // modules (Chunk Border / Breadcrumbs / this one) all hook RenderLevel.
-    // Reading the stored HitResult field is lock-free.
-    void* hitResult = reinterpret_cast<void*>(
-        levelPtr +
-        bedrocktools::sdk::offsets::Level::mHitResultWrapper +
-        bedrocktools::sdk::offsets::HitResultWrapper::mHitResult);
+    // mHitResultWrapper is a UniqueOwnerPointer. Level::storedHitResult()
+    // follows its owned-value pointer before accessing the embedded result;
+    // treating the owner itself as HitResult reads unrelated Level fields and
+    // makes every real block hit look invalid.
+    const auto* hitResult =
+        reinterpret_cast<const bedrocktools::sdk::Level*>(levelPtr)
+            ->storedHitResult();
     if (!hitResult)
         return;
 
-    const int hitType =
-        *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(hitResult) +
-            bedrocktools::sdk::offsets::HitResult::mType);
-
-    // BedrockTools uses type == 0 for a block hit and type == 1 for an entity hit.
-    if (hitType != 0)
+    if (hitResult->type() !=
+        bedrocktools::sdk::offsets::HitResult::TypeBlock) {
         return;
+    }
 
-    const auto hitPos =
-        *reinterpret_cast<bedrocktools::sdk::Vec3*>(
-            reinterpret_cast<uintptr_t>(hitResult) +
-            bedrocktools::sdk::offsets::HitResult::mPos);
+    const auto hitPos = hitResult->position();
 
     const float distance =
         std::sqrt(
@@ -547,14 +537,10 @@ static void renderLevelHook(void* self, void* screenContext, void* a3) {
     if (distance > g_module->maxDistance)
         return;
 
-    // Use HitResult::mBlockPos so the outline is drawn around the actual
-    // selected block. HitResult::mPos is the surface hit point, so flooring
-    // it places the outline one block too high when looking at the top face
-    // (and similarly for the other positive-facing sides).
-    const auto blockPos =
-        *reinterpret_cast<bedrocktools::sdk::BlockPos*>(
-            reinterpret_cast<uintptr_t>(hitResult) +
-            bedrocktools::sdk::offsets::HitResult::mBlockPos);
+    // Use the selected block field rather than flooring the surface hit
+    // point. In HitResult's arm64 layout mBlock is at +32, before mPos at
+    // +44; the previous +56 offset pointed into the entity reference.
+    const auto blockPos = hitResult->blockPosition();
 
     const float x = static_cast<float>(blockPos.x);
     const float y = static_cast<float>(blockPos.y);

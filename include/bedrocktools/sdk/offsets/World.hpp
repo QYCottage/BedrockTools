@@ -50,17 +50,27 @@ inline constexpr std::size_t mAABB = 0;
 
 namespace Level {
 inline constexpr std::size_t mActorManager = 0x470;
+// Bedrock::UniqueOwnerPointer<HitResultWrapper>, not an embedded wrapper.
 inline constexpr std::size_t mHitResultWrapper = 456;
+}
+
+namespace UniqueOwnerPointer {
+// UniqueOwnerPointer stores its reference-control owner first and the owned
+// value second. Both members are pointer-sized on the supported arm64 ABI.
+inline constexpr std::size_t mValue = sizeof(std::uintptr_t);
 }
 
 namespace HitResult {
 inline constexpr std::size_t mStartPos = 0;
 inline constexpr std::size_t mRayDir = 12;
 inline constexpr std::size_t mType = 24;
+inline constexpr std::size_t mFacing = 28;
+inline constexpr std::size_t mBlockPos = 32;
 inline constexpr std::size_t mPos = 44;
-inline constexpr std::size_t mBlockPos = 56;
+inline constexpr int TypeBlock = 0;
 inline constexpr int TypeEntity = 1;
-inline constexpr int TypeEntityOutOfRange = 3;
+inline constexpr int TypeEntityOutOfRange = 2;
+inline constexpr int TypeNoHit = 3;
 }
 
 namespace HitResultWrapper {

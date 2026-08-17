@@ -10,6 +10,8 @@ class HitResult {
 public:
     int type() const { return field<int>(this, offsets::HitResult::mType); }
     const Vec3& startPosition() const { return field<Vec3>(this, offsets::HitResult::mStartPos); }
+    const Vec3& rayDirection() const { return field<Vec3>(this, offsets::HitResult::mRayDir); }
+    const BlockPos& blockPosition() const { return field<BlockPos>(this, offsets::HitResult::mBlockPos); }
     const Vec3& position() const { return field<Vec3>(this, offsets::HitResult::mPos); }
 };
 
