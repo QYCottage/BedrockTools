@@ -28,6 +28,11 @@ public:
     uint32_t eyeLineColor = 0xFFFF0000;  
     uint32_t lookLineColor = 0xFF0000FF; 
 
+    bool hitboxIndicator = false;             
+    uint32_t indicatorDefaultColor = 0xFFFFFFFF; 
+    uint32_t indicatorActiveColor = 0xFFFF0000;  
+    float hitRange = 3.0f;                         
+
 private:
     bool m_patched;
     void* m_patchTarget;
