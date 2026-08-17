@@ -378,32 +378,38 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
         uint32_t boxColor = g_hitboxMod->hitboxColor;
         if (g_hitboxMod->hitboxIndicator) {
-            // Closest-point distance from the local player to the entity's
-            // AABB. Using a clamp (rather than face/center distance) means
-            // tall or wide actors register as "in hitrange" the moment the
-            // player is within reach of any part of them, which matches
-            // how MCBE melee reach is measured.
-            float cx = localPos.x;
-            if (cx < aabb.min.x) cx = aabb.min.x;
-            if (cx > aabb.max.x) cx = aabb.max.x;
+            // The indicator may only become active for the entity currently
+            // under the crosshair. Nearby entities that the player is not
+            // looking at must keep the default indicator color.
+            boxColor = g_hitboxMod->indicatorDefaultColor;
+            if (ent == selectedEntity) {
+                // Closest-point distance from the local player to the entity's
+                // AABB. Using a clamp (rather than face/center distance) means
+                // tall or wide actors register as "in hitrange" the moment the
+                // player is within reach of any part of them, which matches
+                // how MCBE melee reach is measured.
+                float cx = localPos.x;
+                if (cx < aabb.min.x) cx = aabb.min.x;
+                if (cx > aabb.max.x) cx = aabb.max.x;
 
-            float cy = localPos.y;
-            if (cy < aabb.min.y) cy = aabb.min.y;
-            if (cy > aabb.max.y) cy = aabb.max.y;
+                float cy = localPos.y;
+                if (cy < aabb.min.y) cy = aabb.min.y;
+                if (cy > aabb.max.y) cy = aabb.max.y;
 
-            float cz = localPos.z;
-            if (cz < aabb.min.z) cz = aabb.min.z;
-            if (cz > aabb.max.z) cz = aabb.max.z;
+                float cz = localPos.z;
+                if (cz < aabb.min.z) cz = aabb.min.z;
+                if (cz > aabb.max.z) cz = aabb.max.z;
 
-            float dxA = localPos.x - cx;
-            float dyA = localPos.y - cy;
-            float dzA = localPos.z - cz;
-            float distSq = dxA * dxA + dyA * dyA + dzA * dzA;
+                float dxA = localPos.x - cx;
+                float dyA = localPos.y - cy;
+                float dzA = localPos.z - cz;
+                float distSq = dxA * dxA + dyA * dyA + dzA * dzA;
 
-            const float range = g_hitboxMod->hitRange;
-            boxColor = (distSq <= range * range)
-                ? g_hitboxMod->indicatorActiveColor
-                : g_hitboxMod->indicatorDefaultColor;
+                const float range = g_hitboxMod->hitRange;
+                if (distSq <= range * range) {
+                    boxColor = g_hitboxMod->indicatorActiveColor;
+                }
+            }
         }
 
         drawBox(aabb, boxColor);
