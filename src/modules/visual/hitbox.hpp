@@ -30,8 +30,10 @@ public:
     float lineThickness = 1.0f;
 
     
-    uint32_t hitboxColor = 0xFFFFFFFF;   
-    uint32_t eyeLineColor = 0xFFFF0000;  
+    // Stored as AARRGGBB. Alpha is always forced opaque when loading,
+    // saving, and drawing so changing line thickness never washes the color out.
+    uint32_t hitboxColor = 0xFFFFFFFF;
+    uint32_t eyeLineColor = 0xFFFF0000;
     uint32_t lookLineColor = 0xFF0000FF; 
 
     bool hitboxIndicator = false;             

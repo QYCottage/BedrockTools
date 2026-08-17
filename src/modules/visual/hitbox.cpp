@@ -126,7 +126,12 @@ static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
 
 static MaterialPtr s_matSelection;
+static MaterialPtr s_matFill;
 static uintptr_t    s_renderMaterialGroup = 0;
+
+static uint32_t forceOpaqueColor(uint32_t color) {
+    return color | 0xFF000000u;
+}
 
 static void (*_renderLevel_orig)(void* _this, void* screenContext, void* a3);
 
@@ -160,10 +165,59 @@ static MaterialPtr getMaterial(const char* name) {
 }
 
 static void ensureMaterials() {
-    if (s_matSelection) return;
     if (!s_renderMaterialGroup) return;
 
     if (!s_matSelection) s_matSelection = getMaterial("selection_box");
+
+    // Thick geometry is drawn as filled quads. The selection overlay
+    // material is built for a translucent block highlight, so using it
+    // makes the hitbox color look washed-out as soon as line thickness
+    // goes above the hairline. Prefer a vertex-color fill instead.
+    if (!s_matFill) {
+        static const char* kFillNames[] = {
+            "ui_fill_color",
+            "ui_textured_and_glcolor",
+            "debug_filled_box",
+            "selection_box"
+        };
+        for (const char* name : kFillNames) {
+            s_matFill = getMaterial(name);
+            if (s_matFill) break;
+        }
+    }
+}
+
+static bool rayHitsAABB(float ox, float oy, float oz,
+                        float dx, float dy, float dz,
+                        const AABB& aabb,
+                        float maxDist,
+                        float& outDist) {
+    float tmin = 0.0f;
+    float tmax = maxDist;
+
+    auto slab = [&](float origin, float dir, float mn, float mx) -> bool {
+        if (fabsf(dir) < 1e-8f) {
+            return origin >= mn && origin <= mx;
+        }
+        float inv = 1.0f / dir;
+        float t1 = (mn - origin) * inv;
+        float t2 = (mx - origin) * inv;
+        if (t1 > t2) {
+            float tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        return tmin <= tmax;
+    };
+
+    if (!slab(ox, dx, aabb.min.x, aabb.max.x)) return false;
+    if (!slab(oy, dy, aabb.min.y, aabb.max.y)) return false;
+    if (!slab(oz, dz, aabb.min.z, aabb.max.z)) return false;
+    if (tmax < 0.0f) return false;
+    outDist = tmin > 0.0f ? tmin : 0.0f;
+    return true;
 }
 
 static AABB getActorAABB(void* actor) {
@@ -222,13 +276,13 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
     ensureMaterials();
 
-    void* matInner = s_matSelection ? (void*)&s_matSelection
-                                    : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
+    void* overlayMaterial = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
+    void* matInner = s_matSelection ? (void*)&s_matSelection : overlayMaterial;
 
-    // Filled geometry (thick lines) uses the embedded selection overlay
-    // material, the same one Breadcrumbs / Block Outline use for quads.
-    void* matFill = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
-    if (!matFill) matFill = matInner;
+    // Prefer an opaque vertex-color fill so raising line thickness keeps
+    // the chosen RGB solid instead of inheriting the overlay's alpha.
+    void* matFill = s_matFill ? (void*)&s_matFill : matInner;
+    if (!matFill) matFill = overlayMaterial;
 
     uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
     if (!colorHolderPtr || colorHolderPtr < 0x1000) return;
@@ -254,7 +308,10 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         float r = ((color >> 16) & 0xFF) / 255.0f;
         float g = ((color >>  8) & 0xFF) / 255.0f;
         float b = ((color      ) & 0xFF) / 255.0f;
-        float a = ((color >> 24) & 0xFF) / 255.0f;
+        // Hitbox lines stay fully opaque at every thickness. The menu
+        // color picker often stores #RRGGBB (alpha 0) or a low alpha,
+        // which used to make thicker geometry look transparent.
+        const float a = 1.0f;
 
         char pad[0x58];
 
@@ -371,6 +428,38 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     float dz = camZ - localPos.z;
     bool isThirdPerson = (dx*dx + dy*dy + dz*dz) > 0.05f;
 
+    ActorVec actors{};
+    if (s_actorFetchNearby) {
+        bedrocktools::sdk::Vec3 extent = {30.0f, 30.0f, 30.0f};
+        actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
+    }
+
+    void* selectedEntity = nullptr;
+    if (g_hitboxMod->hitboxIndicator && actors.begin && actors.end) {
+        bedrocktools::sdk::Vec2 lookRot = getActorRotation(g_localPlayerPtr);
+        static constexpr float kPi = 3.14159265f;
+        static constexpr float kDegToRad = kPi / 180.0f;
+        const float yawR = lookRot.y * kDegToRad;
+        const float pitchR = lookRot.x * kDegToRad;
+        const float lookX = -sinf(yawR) * cosf(pitchR);
+        const float lookY = -sinf(pitchR);
+        const float lookZ = cosf(yawR) * cosf(pitchR);
+        const float maxLook = g_hitboxMod->hitRange > 6.0f ? g_hitboxMod->hitRange + 3.0f : 8.0f;
+
+        float bestDist = 1e9f;
+        for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
+            void* ent = it->mActor;
+            if (!ent || ent == g_localPlayerPtr) continue;
+            AABB aabb = getActorAABB(ent);
+            float hitDist = 0.0f;
+            if (!rayHitsAABB(camX, camY, camZ, lookX, lookY, lookZ, aabb, maxLook, hitDist)) continue;
+            if (hitDist < bestDist) {
+                bestDist = hitDist;
+                selectedEntity = ent;
+            }
+        }
+    }
+
     auto renderActor = [&](void* ent) {
         AABB aabb = getActorAABB(ent);
         if (aabb.min.x == 0.f && aabb.min.y == 0.f && aabb.min.z == 0.f &&
@@ -461,28 +550,23 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         renderActor(g_localPlayerPtr);
     }
 
-    if (s_actorFetchNearby) {
-        bedrocktools::sdk::Vec3 extent = {30.0f, 30.0f, 30.0f};
-        ActorVec actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
+    if (actors.begin && actors.end) {
+        for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
+            void* ent = it->mActor;
+            if (!ent || ent == g_localPlayerPtr) continue;
 
-        if (actors.begin && actors.end) {
-            for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
-                void* ent = it->mActor;
-                if (!ent || ent == g_localPlayerPtr) continue;
-
-                bool isPlayer = false;
-                if (s_actorIsPlayer) {
-                    isPlayer = s_actorIsPlayer(ent);
-                }
-
-                if (isPlayer && !g_hitboxMod->showPlayers) continue;
-
-                if (!isPlayer && (!g_hitboxMod->showEntities || !hasCategory(ent, 2))) continue;
-
-                if (s_actorIsInvisible && s_actorIsInvisible(ent)) continue;
-
-                renderActor(ent);
+            bool isPlayer = false;
+            if (s_actorIsPlayer) {
+                isPlayer = s_actorIsPlayer(ent);
             }
+
+            if (isPlayer && !g_hitboxMod->showPlayers) continue;
+
+            if (!isPlayer && (!g_hitboxMod->showEntities || !hasCategory(ent, 2))) continue;
+
+            if (s_actorIsInvisible && s_actorIsInvisible(ent)) continue;
+
+            renderActor(ent);
         }
     }
 
@@ -590,12 +674,21 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     }
 
     auto parseColor = [&](const std::string& key, uint32_t& outColor) {
-        if (j.contains(key)) {
-            std::string hexStr = j[key].get<std::string>();
-            if (!hexStr.empty() && hexStr[0] == '#') {
-                try { outColor = std::stoul(hexStr.substr(1), nullptr, 16); } catch (...) {}
+        if (!j.contains(key) || !j[key].is_string()) return;
+        std::string hexStr = j[key].get<std::string>();
+        if (hexStr.empty()) return;
+        if (hexStr[0] == '#') hexStr = hexStr.substr(1);
+        else if (hexStr.size() > 1 && hexStr[0] == '0' && (hexStr[1] == 'x' || hexStr[1] == 'X')) hexStr = hexStr.substr(2);
+        try {
+            unsigned long parsed = std::stoul(hexStr, nullptr, 16);
+            if (hexStr.size() <= 6) {
+                // #RRGGBB from the color picker has no alpha byte.
+                outColor = 0xFF000000u | static_cast<uint32_t>(parsed);
+            } else {
+                // Keep RGB, drop any stored transparency.
+                outColor = forceOpaqueColor(static_cast<uint32_t>(parsed));
             }
-        }
+        } catch (...) {}
     };
 
     parseColor("hitboxColor", hitboxColor);
@@ -618,11 +711,11 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["hitRange"] = hitRange;
 
     char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12];
-    snprintf(hexH, sizeof(hexH), "#%08X", hitboxColor);
-    snprintf(hexE, sizeof(hexE), "#%08X", eyeLineColor);
-    snprintf(hexL, sizeof(hexL), "#%08X", lookLineColor);
-    snprintf(hexD, sizeof(hexD), "#%08X", indicatorDefaultColor);
-    snprintf(hexA, sizeof(hexA), "#%08X", indicatorActiveColor);
+    snprintf(hexH, sizeof(hexH), "#%08X", forceOpaqueColor(hitboxColor));
+    snprintf(hexE, sizeof(hexE), "#%08X", forceOpaqueColor(eyeLineColor));
+    snprintf(hexL, sizeof(hexL), "#%08X", forceOpaqueColor(lookLineColor));
+    snprintf(hexD, sizeof(hexD), "#%08X", forceOpaqueColor(indicatorDefaultColor));
+    snprintf(hexA, sizeof(hexA), "#%08X", forceOpaqueColor(indicatorActiveColor));
 
     j["hitboxColor"] = std::string(hexH);
     j["eyeLineColor"] = std::string(hexE);
