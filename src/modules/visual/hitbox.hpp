@@ -12,6 +12,7 @@ public:
     void onInit() override;
     void onEnable() override;
     void onDisable() override;
+    void onFrame() override;
     void loadConfig(const nlohmann::json& j) override;
     void saveConfig(nlohmann::json& j) override;
 
@@ -39,18 +40,17 @@ public:
     bool hitboxIndicator = false;             
     uint32_t indicatorDefaultColor = 0xFFFFFFFF; 
     uint32_t indicatorActiveColor = 0xFFFF0000;  
-    float hitRange = 3.0f;                         
 
-    // Crosshair indicator: recolors the game's own crosshair as soon as the
-    // player is aiming at a mob or another player that is close enough to
-    // actually be hit. Nothing extra is drawn -- the vanilla cursor itself is
-    // tinted while it renders.
+    // Crosshair indicator: while the player is aiming at a mob or another
+    // player that is close enough to actually be hit (the game's own hit
+    // result decides the reach, not a configurable range), a colored
+    // crosshair is drawn over the vanilla one in crosshairIndicatorColor.
+    // Nothing is drawn otherwise, so the vanilla cursor stays untouched.
     bool crosshairIndicator = false;
     uint32_t crosshairIndicatorColor = 0xFFFF0000;
 
 private:
     bool m_patched;
-    bool m_cursorHooked;
     void* m_patchTarget;
 
     void* m_tessBeginAddr;

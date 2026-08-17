@@ -1,10 +1,12 @@
 #include "hitbox.hpp"
+#include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <cstring>
@@ -161,9 +163,22 @@ static HitResult_getEntity_t s_hitResultGetEntity = nullptr;
 
 // True while the player is aiming at a mob or another player that is close
 // enough to actually be hit. Refreshed once per client tick (resolving the hit
-// result inside a render hook caused frame stalls), and read from the render
-// thread by the cursor hook, hence the atomic.
+// result inside a render hook caused frame stalls), and read by the HUD
+// overlay path on the render thread, hence the atomic.
 static std::atomic<bool> g_aimedEntityInRange{false};
+
+// Timestamp of the last tick where the flag above was refreshed. The overlay
+// only draws while this is recent: if the client stops ticking (singleplayer
+// pause, most menus) the indicator fades out instead of staying stuck on the
+// screen.
+static std::atomic<int64_t> g_aimRefreshTimeUs{0};
+
+static int64_t nowUs() {
+    return static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 static bool hasCategory(void* actor, uint32_t categoryBit);
 
@@ -199,52 +214,18 @@ static void s_updateAimedEntity(void* player) {
 // ---------------------------------------------------------------------------
 // Crosshair indicator
 //
-// Rather than drawing our own cross on top of the HUD, we recolor the game's
-// real cursor. Cursor::render() draws the crosshair through the ScreenContext
-// colour holder, the same RGBA vector every other renderer in this codebase
-// tints geometry with. Overwriting it for the duration of the original call
-// makes the vanilla crosshair itself come out red, and restoring it afterwards
-// keeps the rest of the HUD untouched.
+// The vanilla crosshair cannot be recolored in place: HudCursorRenderer draws
+// it with its own baked material/texture, and hooking its render just to tint
+// the ScreenContext colour holder has no effect on it (and the previous
+// attempt dereferenced an argument that is not the ScreenContext at all,
+// which crashed the game the moment the indicator activated).
+//
+// Instead, a colored crosshair is drawn *over* the vanilla one through the
+// launcher's HUD overlay (the same draw-command API the HUD modules use),
+// with the -20000 coordinate convention that places primitives at the exact
+// screen centre. It is only submitted while the aimed-entity flag above is
+// set, so the rest of the time the vanilla cursor is untouched.
 // ---------------------------------------------------------------------------
-typedef void (*HudCursorRender_t)(void* _this, void* a1, void* screenContext, void* a3);
-static HudCursorRender_t s_origCursorRender = nullptr;
-
-static void s_cursorRenderHook(void* _this, void* a1, void* screenContext, void* a3) {
-    bool tinted = false;
-    float* colorHolder = nullptr;
-    float savedColor[4] = {0.f, 0.f, 0.f, 0.f};
-
-    if (g_hitboxMod && g_hitboxMod->enabled && g_hitboxMod->crosshairIndicator &&
-        g_aimedEntityInRange.load(std::memory_order_relaxed) &&
-        screenContext && (uintptr_t)screenContext >= 0x1000) {
-
-        uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext +
-            bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
-        if (colorHolderPtr && colorHolderPtr >= 0x1000) {
-            colorHolder = (float*)colorHolderPtr;
-            savedColor[0] = colorHolder[0];
-            savedColor[1] = colorHolder[1];
-            savedColor[2] = colorHolder[2];
-            savedColor[3] = colorHolder[3];
-
-            const uint32_t color = forceOpaqueColor(g_hitboxMod->crosshairIndicatorColor);
-            colorHolder[0] = ((color >> 16) & 0xFF) / 255.0f;
-            colorHolder[1] = ((color >>  8) & 0xFF) / 255.0f;
-            colorHolder[2] = ((color      ) & 0xFF) / 255.0f;
-            colorHolder[3] = 1.0f;
-            tinted = true;
-        }
-    }
-
-    if (s_origCursorRender) s_origCursorRender(_this, a1, screenContext, a3);
-
-    if (tinted && colorHolder) {
-        colorHolder[0] = savedColor[0];
-        colorHolder[1] = savedColor[1];
-        colorHolder[2] = savedColor[2];
-        colorHolder[3] = savedColor[3];
-    }
-}
 
 static void s_hitboxTickCallback(void* _this) {
     if (!g_hitboxMod || !g_hitboxMod->enabled) {
@@ -253,6 +234,9 @@ static void s_hitboxTickCallback(void* _this) {
     }
     g_localPlayerPtr = _this;
     s_updateAimedEntity(_this);
+    if (g_aimedEntityInRange.load(std::memory_order_relaxed)) {
+        g_aimRefreshTimeUs.store(nowUs(), std::memory_order_relaxed);
+    }
     uintptr_t svc = *(uintptr_t*)((uintptr_t)_this + bedrocktools::sdk::offsets::Actor::mStateVectorComponent);
     if (svc != 0) {
         g_playerPos = *(bedrocktools::sdk::Vec3*)svc;
@@ -631,7 +615,8 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
     ActorVec actors{};
     if (s_actorFetchNearby) {
-        bedrocktools::sdk::Vec3 extent = {30.0f, 30.0f, 30.0f};
+        constexpr float kActorFetchRadius = 30.0f;
+        bedrocktools::sdk::Vec3 extent = {kActorFetchRadius, kActorFetchRadius, kActorFetchRadius};
         actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
     }
 
@@ -645,7 +630,10 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         const float lookX = -sinf(yawR) * cosf(pitchR);
         const float lookY = -sinf(pitchR);
         const float lookZ = cosf(yawR) * cosf(pitchR);
-        const float maxLook = g_hitboxMod->hitRange > 6.0f ? g_hitboxMod->hitRange + 3.0f : 8.0f;
+
+        // Pick the nearest actor along the look ray. No reach limit is
+        // applied: any fetched entity the crosshair touches gets selected.
+        constexpr float kSelectionRayLength = 30.0f;
 
         float bestDist = 1e9f;
         for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
@@ -653,7 +641,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
             if (!ent || ent == g_localPlayerPtr) continue;
             AABB aabb = getActorAABB(ent);
             float hitDist = 0.0f;
-            if (!rayHitsAABB(camX, camY, camZ, lookX, lookY, lookZ, aabb, maxLook, hitDist)) continue;
+            if (!rayHitsAABB(camX, camY, camZ, lookX, lookY, lookZ, aabb, kSelectionRayLength, hitDist)) continue;
             if (hitDist < bestDist) {
                 bestDist = hitDist;
                 selectedEntity = ent;
@@ -673,37 +661,12 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
         uint32_t boxColor = g_hitboxMod->hitboxColor;
         if (g_hitboxMod->hitboxIndicator) {
-            // The indicator may only become active for the entity currently
-            // under the crosshair. Nearby entities that the player is not
-            // looking at must keep the default indicator color.
+            // The indicator is active for the entity currently under the
+            // crosshair. Every other nearby entity keeps the default
+            // indicator color.
             boxColor = g_hitboxMod->indicatorDefaultColor;
             if (ent == selectedEntity) {
-                // Closest-point distance from the local player to the entity's
-                // AABB. Using a clamp (rather than face/center distance) means
-                // tall or wide actors register as "in hitrange" the moment the
-                // player is within reach of any part of them, which matches
-                // how MCBE melee reach is measured.
-                float cx = localPos.x;
-                if (cx < aabb.min.x) cx = aabb.min.x;
-                if (cx > aabb.max.x) cx = aabb.max.x;
-
-                float cy = localPos.y;
-                if (cy < aabb.min.y) cy = aabb.min.y;
-                if (cy > aabb.max.y) cy = aabb.max.y;
-
-                float cz = localPos.z;
-                if (cz < aabb.min.z) cz = aabb.min.z;
-                if (cz > aabb.max.z) cz = aabb.max.z;
-
-                float dxA = localPos.x - cx;
-                float dyA = localPos.y - cy;
-                float dzA = localPos.z - cz;
-                float distSq = dxA * dxA + dyA * dyA + dzA * dzA;
-
-                const float range = g_hitboxMod->hitRange;
-                if (distSq <= range * range) {
-                    boxColor = g_hitboxMod->indicatorActiveColor;
-                }
+                boxColor = g_hitboxMod->indicatorActiveColor;
             }
         }
 
@@ -787,8 +750,11 @@ HitboxModule::HitboxModule()
 
     showInMenu = true;
 
+    // The crosshair-indicator overlay is drawn by the launcher at the screen
+    // centre; it must not show up as a draggable element in the HUD editor.
+    hideInHudEditor = true;
+
     m_patched = false;
-    m_cursorHooked = false;
     m_patchTarget = nullptr;
     m_tessBeginAddr = nullptr;
     m_tessColorAddr = nullptr;
@@ -851,16 +817,6 @@ void HitboxModule::onInit() {
     uintptr_t hge = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
     if (hge) s_hitResultGetEntity = (HitResult_getEntity_t)hge;
 
-    // Tint the vanilla crosshair in place instead of drawing our own overlay.
-    if (!m_cursorHooked) {
-        uintptr_t cursor = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HudCursor);
-        if (cursor) {
-            bedrocktools::hooks::install((void*)cursor, (void*)s_cursorRenderHook,
-                                         (void**)&s_origCursorRender);
-            m_cursorHooked = true;
-        }
-    }
-
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([](auto& event) { s_hitboxTickCallback(event.player); });
 }
 
@@ -876,6 +832,72 @@ void HitboxModule::onEnable() {
 
 void HitboxModule::onDisable() {
     g_aimedEntityInRange.store(false, std::memory_order_relaxed);
+    g_aimRefreshTimeUs.store(0, std::memory_order_relaxed);
+    // Clear the indicator crosshair immediately; onFrame stops running for
+    // disabled modules, so this is the only chance to remove the overlay.
+    submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
+}
+
+void HitboxModule::onFrame() {
+    // The aimed-entity flag must be fresh: it is refreshed once per client
+    // tick, so a stale flag means ticking stopped (singleplayer pause or a
+    // menu) and the crosshair overlay should not linger.
+    constexpr int64_t kMaxStaleUs = 500000; // 500 ms, i.e. ~10 missed ticks
+    const int64_t lastRefresh = g_aimRefreshTimeUs.load(std::memory_order_relaxed);
+    const bool aimFresh =
+        g_aimedEntityInRange.load(std::memory_order_relaxed) &&
+        lastRefresh > 0 && (nowUs() - lastRefresh) <= kMaxStaleUs;
+
+    if (!enabled || !crosshairIndicator || !aimFresh) {
+        submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
+        return;
+    }
+
+    // HUD overlay coordinates: values <= -19000 are interpreted by the
+    // launcher relative to the screen centre, with -20000 being the exact
+    // centre. Every coordinate below stays inside that window so the
+    // crosshair is always drawn dead-centre, the same convention the
+    // debug-menu crosshair uses.
+    constexpr float kCenter = -20000.0f;
+    constexpr float kArmLength = 8.0f;
+    constexpr float kThickness = 2.0f;
+    constexpr float kGap = 2.0f;
+    constexpr uint32_t kOutlineColor = 0xC8000000;
+
+    auto addArms = [&](float thickness, uint32_t color) {
+        std::vector<PLModMenu_DrawCommand> arms;
+        auto arm = [&](float x, float y, float dx, float dy) {
+            PLModMenu_DrawCommand cmd = {};
+            cmd.type = PL_DRAW_LINE;
+            cmd.x = x;
+            cmd.y = y;
+            cmd.w = dx;
+            cmd.h = dy;
+            cmd.size = thickness;
+            cmd.color = color;
+            arms.push_back(cmd);
+        };
+        // Four arms with a small gap in the middle, mirroring the vanilla
+        // crosshair so the colored overlay covers it completely.
+        arm(kCenter, kCenter - kGap, 0.0f, -kArmLength);        // top
+        arm(kCenter, kCenter + kGap, 0.0f, kArmLength);         // bottom
+        arm(kCenter - kGap, kCenter, -kArmLength, 0.0f);        // left
+        arm(kCenter + kGap, kCenter, kArmLength, 0.0f);         // right
+        return arms;
+    };
+
+    std::vector<PLModMenu_DrawCommand> cmds;
+
+    // Dark outline first, then the colored arms, so the crosshair stays
+    // readable against bright skies (the debug menu uses the same trick).
+    std::vector<PLModMenu_DrawCommand> outline = addArms(kThickness + 2.0f, kOutlineColor);
+    cmds.insert(cmds.end(), outline.begin(), outline.end());
+
+    const uint32_t color = forceOpaqueColor(crosshairIndicatorColor);
+    std::vector<PLModMenu_DrawCommand> inner = addArms(kThickness, color);
+    cmds.insert(cmds.end(), inner.begin(), inner.end());
+
+    submitDrawCommands(moduleId, cmds);
 }
 
 void HitboxModule::loadConfig(const nlohmann::json& j) {
@@ -895,9 +917,6 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
 
     if (j.contains("hitboxIndicator")) {
         hitboxIndicator = j["hitboxIndicator"].get<bool>();
-    }
-    if (j.contains("hitRange")) {
-        try { hitRange = j["hitRange"].get<float>(); } catch (...) {}
     }
     if (j.contains("crosshairIndicator")) {
         try { crosshairIndicator = j["crosshairIndicator"].get<bool>(); } catch (...) {}
@@ -939,7 +958,6 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["lookLineLength"] = lookLineLength;
     j["lineThickness"] = lineThickness;
     j["hitboxIndicator"] = hitboxIndicator;
-    j["hitRange"] = hitRange;
     j["crosshairIndicator"] = crosshairIndicator;
 
     char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12], hexC[12];
