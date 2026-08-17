@@ -137,6 +137,14 @@ static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
 static BlockSource_isSolidBlockingBlock_t s_isSolidBlockingBlock = nullptr;
 
+// Crosshair indicator plumbing. HudCursorRenderer's render (the function
+// that draws the vanilla crosshair) and the original Tessellator::color,
+// both filled in by HitboxModule::onInit. See the "Crosshair indicator"
+// section below for how they cooperate.
+typedef void (*HudCursorRender_t)(void* _this, void* a1, void* a2, void* a3);
+static HudCursorRender_t s_cursorRenderOrig = nullptr;
+static Tessellator_color_t s_tessColorOrig = nullptr;
+
 static MaterialPtr s_matSelection;
 static MaterialPtr s_matFill;
 static uintptr_t    s_renderMaterialGroup = 0;
@@ -214,18 +222,119 @@ static void s_updateAimedEntity(void* player) {
 // ---------------------------------------------------------------------------
 // Crosshair indicator
 //
-// The vanilla crosshair cannot be recolored in place: HudCursorRenderer draws
-// it with its own baked material/texture, and hooking its render just to tint
-// the ScreenContext colour holder has no effect on it (and the previous
-// attempt dereferenced an argument that is not the ScreenContext at all,
-// which crashed the game the moment the indicator activated).
+// The indicator recolors the *vanilla* crosshair (the crosshair.png the game
+// itself draws through HudCursorRenderer) instead of stacking a second
+// crosshair on top of it. Two chained hooks cooperate:
 //
-// Instead, a colored crosshair is drawn *over* the vanilla one through the
-// launcher's HUD overlay (the same draw-command API the HUD modules use),
-// with the -20000 coordinate convention that places primitives at the exact
-// screen centre. It is only submitted while the aimed-entity flag above is
-// set, so the rest of the time the vanilla cursor is untouched.
+//   * HudCursorRenderer's render (the same function the debug menu hooks;
+//     pl::memory::hook chains multiple detours per target safely). While
+//     the aimed-entity flag below is fresh, the crosshair it is about to
+//     draw must appear in crosshairIndicatorColor.
+//   * Tessellator::color. A thread-local window is opened around the
+//     original HudCursorRenderer call, and every color submitted inside
+//     that window has its RGB replaced with the indicator color (the
+//     game-chosen alpha is kept), so the game ends up drawing its own
+//     crosshair red.
+//
+// If the running game build ever stops routing the cursor color through
+// Tessellator::color (no tinted call observed across several cursor
+// renders), the hook latches into a fallback: it hides the vanilla
+// crosshair while the indicator is active and onFrame submits a
+// same-shaped red crosshair through the HUD overlay. Either way exactly
+// one crosshair is on screen - never one painted over the other.
 // ---------------------------------------------------------------------------
+
+enum class CursorTintState : uint32_t {
+    Probing = 0,         // tinting not confirmed yet; probe each active draw
+    Tinting = 1,         // in-place tinting works; no overlay is submitted
+    OverlayFallback = 2, // tinting impossible: hide vanilla, overlay replace
+};
+
+static std::atomic<uint32_t> s_cursorTintState{static_cast<uint32_t>(CursorTintState::Probing)};
+static std::atomic<int32_t>  s_cursorTintProbeMisses{0};
+static std::atomic<int64_t>  g_lastCursorRenderUs{0};
+
+// Set only around the original HudCursorRenderer call on the render thread,
+// so the Tessellator::color detour knows it is recoloring the crosshair.
+static thread_local bool    tl_inCursorRender = false;
+static thread_local int32_t tl_cursorColorCalls = 0;
+
+// True while the module is on, the option is enabled and the aimed-entity
+// flag is fresh. A stale flag means ticking stopped (singleplayer pause,
+// most menus), so the crosshair must return to its vanilla color.
+static bool s_indicatorActiveNow() {
+    if (!g_hitboxMod || !g_hitboxMod->enabled || !g_hitboxMod->crosshairIndicator) return false;
+    constexpr int64_t kMaxStaleUs = 500000; // 500 ms, i.e. ~10 missed ticks
+    const int64_t lastRefresh = g_aimRefreshTimeUs.load(std::memory_order_relaxed);
+    return g_aimedEntityInRange.load(std::memory_order_relaxed) &&
+           lastRefresh > 0 && (nowUs() - lastRefresh) <= kMaxStaleUs;
+}
+
+// True when the vanilla cursor renderer ran very recently, i.e. the HUD is
+// actually showing a crosshair right now. Guards the fallback overlay so it
+// never paints a crosshair the game itself would not draw (third person,
+// menus, touch layouts without a crosshair).
+static bool s_cursorRenderRecent() {
+    constexpr int64_t kMaxAgeUs = 100000; // 100 ms, ~6 frames at 60 fps
+    const int64_t last = g_lastCursorRenderUs.load(std::memory_order_relaxed);
+    return last > 0 && (nowUs() - last) <= kMaxAgeUs;
+}
+
+static void s_cursorRenderHook(void* _this, void* a1, void* a2, void* a3) {
+    if (!s_cursorRenderOrig) return;
+
+    if (!s_indicatorActiveNow()) {
+        s_cursorRenderOrig(_this, a1, a2, a3);
+        return;
+    }
+
+    g_lastCursorRenderUs.store(nowUs(), std::memory_order_relaxed);
+
+    if (s_cursorTintState.load(std::memory_order_relaxed) ==
+        static_cast<uint32_t>(CursorTintState::OverlayFallback)) {
+        // In-place tinting does not work on this build. Skip the vanilla
+        // draw entirely; onFrame submits the red replacement through the
+        // HUD overlay, so still exactly one crosshair shows.
+        return;
+    }
+
+    // Let the game draw its crosshair, recoloring every Tessellator::color
+    // submitted while the window below is open: the vanilla crosshair
+    // itself comes out in the indicator color.
+    tl_cursorColorCalls = 0;
+    tl_inCursorRender = true;
+    s_cursorRenderOrig(_this, a1, a2, a3);
+    tl_inCursorRender = false;
+
+    if (tl_cursorColorCalls > 0) {
+        s_cursorTintState.store(static_cast<uint32_t>(CursorTintState::Tinting),
+                                std::memory_order_relaxed);
+        s_cursorTintProbeMisses.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    // This cursor draw never went through Tessellator::color. The renderer
+    // is also invoked for frames where nothing ends up drawn, so give the
+    // probe several misses before latching the overlay fallback in.
+    if (s_cursorTintProbeMisses.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
+        s_cursorTintState.store(static_cast<uint32_t>(CursorTintState::OverlayFallback),
+                                std::memory_order_relaxed);
+    }
+}
+
+static void s_tessColorHook(void* tessellator, float r, float g, float b, float a) {
+    if (tl_inCursorRender) {
+        // Recolor the vanilla crosshair in place: keep the alpha the game
+        // chose, replace the RGB channels with the indicator color.
+        ++tl_cursorColorCalls;
+        const uint32_t color =
+            g_hitboxMod ? forceOpaqueColor(g_hitboxMod->crosshairIndicatorColor) : 0xFFFF0000u;
+        r = ((color >> 16) & 0xFF) / 255.0f;
+        g = ((color >>  8) & 0xFF) / 255.0f;
+        b = ((color      ) & 0xFF) / 255.0f;
+    }
+    s_tessColorOrig(tessellator, r, g, b, a);
+}
 
 static void s_hitboxTickCallback(void* _this) {
     if (!g_hitboxMod || !g_hitboxMod->enabled) {
@@ -750,8 +859,10 @@ HitboxModule::HitboxModule()
 
     showInMenu = true;
 
-    // The crosshair-indicator overlay is drawn by the launcher at the screen
-    // centre; it must not show up as a draggable element in the HUD editor.
+    // The crosshair indicator recolors the vanilla crosshair in place (it
+    // only submits a HUD-overlay element when in-place tinting turns out to
+    // be impossible), so it must never show up as a draggable element in
+    // the HUD editor.
     hideInHudEditor = true;
 
     m_patched = false;
@@ -760,6 +871,8 @@ HitboxModule::HitboxModule()
     m_tessColorAddr = nullptr;
     m_tessVertexAddr = nullptr;
     m_renderMaterialGroupAddr = nullptr;
+    m_cursorHooked = false;
+    m_tessColorHooked = false;
     g_hitboxMod = this;
 }
 
@@ -817,6 +930,27 @@ void HitboxModule::onInit() {
     uintptr_t hge = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
     if (hge) s_hitResultGetEntity = (HitResult_getEntity_t)hge;
 
+    // Crosshair-indicator hooks. Both are installed once for the whole
+    // session (pl::memory::hook chains multiple detours per target, and the
+    // debug menu already hooks the cursor renderer) and are cheap to leave
+    // in place: the detours pass straight through whenever the indicator is
+    // not active.
+    if (!m_cursorHooked) {
+        uintptr_t cursor = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HudCursor);
+        if (cursor &&
+            bedrocktools::hooks::install((void*)cursor, (void*)s_cursorRenderHook,
+                                         (void**)&s_cursorRenderOrig)) {
+            m_cursorHooked = true;
+        }
+    }
+
+    if (!m_tessColorHooked && s_tessColor) {
+        if (bedrocktools::hooks::install((void*)s_tessColor, (void*)s_tessColorHook,
+                                         (void**)&s_tessColorOrig)) {
+            m_tessColorHooked = true;
+        }
+    }
+
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([](auto& event) { s_hitboxTickCallback(event.player); });
 }
 
@@ -839,16 +973,18 @@ void HitboxModule::onDisable() {
 }
 
 void HitboxModule::onFrame() {
-    // The aimed-entity flag must be fresh: it is refreshed once per client
-    // tick, so a stale flag means ticking stopped (singleplayer pause or a
-    // menu) and the crosshair overlay should not linger.
-    constexpr int64_t kMaxStaleUs = 500000; // 500 ms, i.e. ~10 missed ticks
-    const int64_t lastRefresh = g_aimRefreshTimeUs.load(std::memory_order_relaxed);
-    const bool aimFresh =
-        g_aimedEntityInRange.load(std::memory_order_relaxed) &&
-        lastRefresh > 0 && (nowUs() - lastRefresh) <= kMaxStaleUs;
+    // Preferred mode: the game's own crosshair is tinted in place by the
+    // HudCursorRenderer + Tessellator::color hooks and nothing is submitted
+    // to the HUD overlay at all. The replacement crosshair below only runs
+    // when in-place tinting proved impossible on this build and the fallback
+    // state has latched in, so the indicator can never paint a second
+    // crosshair over the vanilla one.
+    const bool overlayFallback =
+        s_cursorTintState.load(std::memory_order_relaxed) ==
+        static_cast<uint32_t>(CursorTintState::OverlayFallback);
 
-    if (!enabled || !crosshairIndicator || !aimFresh) {
+    if (!enabled || !crosshairIndicator || !overlayFallback ||
+        !s_indicatorActiveNow() || !s_cursorRenderRecent()) {
         submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
         return;
     }
@@ -878,7 +1014,9 @@ void HitboxModule::onFrame() {
             arms.push_back(cmd);
         };
         // Four arms with a small gap in the middle, mirroring the vanilla
-        // crosshair so the colored overlay covers it completely.
+        // crosshair shape. This is only the fallback path: the vanilla
+        // crosshair itself is hidden for these frames, so the replacement
+        // matches what the game would have drawn, just recolored.
         arm(kCenter, kCenter - kGap, 0.0f, -kArmLength);        // top
         arm(kCenter, kCenter + kGap, 0.0f, kArmLength);         // bottom
         arm(kCenter - kGap, kCenter, -kArmLength, 0.0f);        // left

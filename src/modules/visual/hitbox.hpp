@@ -43,9 +43,13 @@ public:
 
     // Crosshair indicator: while the player is aiming at a mob or another
     // player that is close enough to actually be hit (the game's own hit
-    // result decides the reach, not a configurable range), a colored
-    // crosshair is drawn over the vanilla one in crosshairIndicatorColor.
-    // Nothing is drawn otherwise, so the vanilla cursor stays untouched.
+    // result decides the reach, not a configurable range), the vanilla
+    // crosshair itself is recolored in place to crosshairIndicatorColor via
+    // the HudCursorRenderer + Tessellator::color hooks - no second
+    // crosshair is drawn over it. If the running game build makes in-place
+    // tinting impossible, the vanilla crosshair is hidden while the
+    // indicator is active and a matching crosshair is drawn instead, so
+    // there is never a stacked crosshair either way.
     bool crosshairIndicator = false;
     uint32_t crosshairIndicatorColor = 0xFFFF0000;
 
@@ -57,6 +61,11 @@ private:
     void* m_tessColorAddr;
     void* m_tessVertexAddr;
     void* m_renderMaterialGroupAddr;
+
+    // Crosshair-indicator hooks (installed once in onInit, chainable with
+    // the debug menu's HudCursor hook).
+    bool m_cursorHooked;
+    bool m_tessColorHooked;
 
     void applyPatch();
 };
