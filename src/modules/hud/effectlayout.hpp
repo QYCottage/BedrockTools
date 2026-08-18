@@ -127,6 +127,12 @@ inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t 
         const auto id = readU32(record, 0);
         const auto duration = readInt(record, 4);
 
+        // Bedrock keeps a "no effect" placeholder (id 0) in the vector when an
+        // effect slot is empty or has just been removed/expired, and
+        // readRecords() skips those. They carry no evidence for or against a
+        // stride, so ignore them here instead of rejecting the whole buffer.
+        if (id == 0) continue;
+
         if (id >= 1 && id <= 64) score += 8;          // vanilla effect id range
         else if (id >= 65 && id <= 255) score -= 6;   // possible modded id
         else return -1000;                            // definitely not an id
@@ -140,7 +146,7 @@ inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t 
         }
         if (seenCount < kMaxRecords) seen[seenCount++] = id;
 
-        if (id != 0 && duration != 0) ++active;
+        if (duration != 0) ++active;
     }
 
     if (active == 0) score -= 8;
@@ -178,6 +184,10 @@ inline int scoreAmplifier(
     bool anyLevelAboveOne = false;
     for (std::size_t index = 0; index < count; ++index) {
         const auto* record = data + index * stride;
+        // Skip the same "no effect" (id 0) placeholders that scoreStride() and
+        // readRecords() ignore; their tail bytes may not look like an effect.
+        if (readU32(record, 0) == 0) continue;
+
         const auto duration = readInt(record, 4);
         const auto amplifier = readInt(record, amplifierOffset);
 
