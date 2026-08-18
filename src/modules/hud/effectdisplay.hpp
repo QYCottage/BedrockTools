@@ -13,10 +13,16 @@ namespace bedrocktools::sdk { class Player; }
 
 class EffectDisplayModule final : public Module {
 public:
+    // A single active status effect. `amplifier` is the raw Bedrock amplifier
+    // (0 == level I) or -1 when the game build's memory layout did not allow
+    // reading it with confidence; the level is then hidden instead of guessed.
     struct ActiveEffect {
         std::uint32_t id = 0;
         int durationTicks = 0;
-        int amplifier = 0;
+        int amplifier = -1;
+
+        bool hasLevel() const { return amplifier >= 0; }
+        int level() const { return amplifier + 1; }
     };
 
     // Per-effect bookkeeping used for animations and the remaining-time bar.
@@ -25,6 +31,7 @@ public:
         std::chrono::steady_clock::time_point appearAt{};
         std::chrono::steady_clock::time_point lastSeenAt{};
         int maxDurationTicks = 0;   // longest observed duration (bar reference)
+        int amplifier = -1;         // potency the timing above was learned for
     };
 
     EffectDisplayModule();
@@ -61,6 +68,8 @@ private:
     bool m_showBackground = true;
     bool m_showIcons = true;
     bool m_showLevel = true;
+    bool m_romanLevels = true;
+    bool m_hideLevelOne = false;
     bool m_showProgressBar = true;
     bool m_animate = true;
     bool m_preview = false;
