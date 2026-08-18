@@ -20,6 +20,7 @@
 #include "misc/forceglobalrp.hpp"
 #include "misc/cpslimiter.hpp"
 #include "hud/speeddisplay.hpp"
+#include "hud/effectdisplay.hpp"
 #include "hud/debugmenu.hpp"
 #include "visual/viewmodel.hpp"
 #include "hud/keystrokes.hpp"
@@ -113,6 +114,7 @@ void registerAllModules() {
     registry.emplace<NoTouchBorderModule>();
     registry.emplace<CpsLimiterModule>();
     registry.emplace<SpeedDisplayModule>();
+    registry.emplace<EffectDisplayModule>();
     registry.emplace<DebugMenuModule>();
     registry.emplace<ViewModelModule>();
     registry.emplace<KeystrokesModule>();
