@@ -14,9 +14,12 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <pl/ModMenu.hpp>
 
 namespace {
 
@@ -143,6 +146,12 @@ void CommandHotkeyModule::onEnable() {
     syncNativeButtons();
 }
 
+void CommandHotkeyModule::onDisable() {
+    unregisterAllNativeButtons();
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingCommands.clear();
+}
+
 void CommandHotkeyModule::onLauncherRegistered() {
     // The module is now visible to the launcher's Mod Menu bridge, so this is
     // the earliest safe point to register the native overlay buttons (before
@@ -152,11 +161,20 @@ void CommandHotkeyModule::onLauncherRegistered() {
     syncNativeButtons();
 }
 
+void CommandHotkeyModule::unregisterAllNativeButtons() {
+    for (std::size_t i = 0; i < MaxCommands; ++i) {
+        if (!m_nativeButtonRegistered[i]) continue;
+        pl::modmenu::unregisterButton(moduleId + ".command" + std::to_string(i));
+        m_nativeButtonRegistered[i] = false;
+        m_nativeButtonLabel[i].clear();
+    }
+}
+
 void CommandHotkeyModule::syncNativeButtons() {
     // The launcher's native overlay buttons are rendered and hit-tested by the
     // launcher itself (real Android views), so they respond while the game is
     // running and the player is in a world, independent of the game's input
-    // pipeline. Slots that fail to register keep the classic drawn buttons.
+    // pipeline.
     struct SlotState {
         bool want = false;
         std::string label;
@@ -168,7 +186,7 @@ void CommandHotkeyModule::syncNativeButtons() {
 
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         const auto& binding = m_commands[i];
-        states[i].want = nativeButtonsEnabled && binding.enabled &&
+        states[i].want = enabled && nativeButtonsEnabled && binding.enabled &&
                          binding.screen && !binding.command.empty();
         states[i].label = truncateUtf8(defaultLabel(binding, i), 32);
         states[i].textColor = binding.textColor & 0x00FFFFFFu;
@@ -236,7 +254,21 @@ void CommandHotkeyModule::execute(std::size_t index) {
     const auto command = normalizeCommand(binding.command);
     if (command.empty()) return;
 
-    sendCommandPacket(command);
+    // Queue for the game thread. Native overlay clicks arrive on the
+    // launcher UI thread; building CommandRequestPacket there is ignored
+    // or races the client instance.
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingCommands.push_back(command);
+}
+
+void CommandHotkeyModule::flushPendingCommands() {
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        pending.swap(m_pendingCommands);
+    }
+    for (const auto& command : pending)
+        sendCommandPacket(command);
 }
 
 bool CommandHotkeyModule::onKeyEvent(int key, bool isDown) {
@@ -251,159 +283,21 @@ bool CommandHotkeyModule::onKeyEvent(int key, bool isDown) {
     return false;
 }
 
-bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
-    if (!enabled) return false;
-
-    // HUD edit mode: drag individual buttons instead of executing
-    if (m_hudEditMode) {
-        if (isDown) {
-            // Touch down -> try to grab a button
-            for (std::size_t i = 0; i < MaxCommands; ++i) {
-                const auto& binding = m_commands[i];
-                if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
-                if (!inside(binding, x, y)) continue;
-                m_draggingIndex = static_cast<int>(i);
-                m_dragOffsetX = x - (binding.x + hudPosX);
-                m_dragOffsetY = y - (binding.y + hudPosY);
-                return true;
-            }
-            m_draggingIndex = -1;
-            return false;
-        } else {
-            // Move / Up -> if dragging, update position
-            if (m_draggingIndex >= 0 && m_draggingIndex < static_cast<int>(MaxCommands)) {
-                auto& b = m_commands[m_draggingIndex];
-                if (!b.enabled) {
-                    m_draggingIndex = -1;
-                    return false;
-                }
-                float newAbsX = x - m_dragOffsetX;
-                float newAbsY = y - m_dragOffsetY;
-                // Clamp absolute position 0..10000 then convert to relative
-                float clampedAbsX = std::clamp(newAbsX, 0.0f, 10000.0f);
-                float clampedAbsY = std::clamp(newAbsY, 0.0f, 10000.0f);
-                b.x = clampedAbsX - hudPosX;
-                b.y = clampedAbsY - hudPosY;
-                // also clamp relative to keep inside reasonable range
-                b.x = std::clamp(b.x, -5000.0f, 10000.0f);
-                b.y = std::clamp(b.y, -5000.0f, 10000.0f);
-                normalizeBindings();
-                bedrocktools::config::ConfigManager::get().save();
-                return true;
-            }
-            return false;
-        }
-    }
-
-    // Normal mode: execute on tap down
-    if (!isDown) return false;
-
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
-        if (!inside(binding, x, y)) continue;
-        execute(i);
-        return true;
-    }
+bool CommandHotkeyModule::onTouchEvent(float, float, bool) {
+    // Overlay buttons are launcher-native views; the game no longer owns
+    // the old drawn hitboxes.
     return false;
 }
 
 void CommandHotkeyModule::onFrame() {
+    flushPendingCommands();
+
     if (m_nativeButtonsDirty)
         syncNativeButtons();
 
-    if (!enabled) {
-        std::vector<PLModMenu_DrawCommand> empty;
-        submitDrawCommands(moduleId, empty);
-        return;
-    }
-
-    std::vector<PLModMenu_DrawCommand> commands;
-    commands.reserve(MaxCommands * 3 + 1);
-    std::vector<std::string> labels;
-    labels.reserve(MaxCommands);
-
-    // HUD editor group hitbox: compute union of all screen buttons and add transparent bg so gaps are draggable
-    {
-        float minRelX = std::numeric_limits<float>::max();
-        float minRelY = std::numeric_limits<float>::max();
-        float maxRelX = std::numeric_limits<float>::lowest();
-        float maxRelY = std::numeric_limits<float>::lowest();
-        bool hasAny = false;
-        for (std::size_t j = 0; j < MaxCommands; ++j) {
-            const auto& b = m_commands[j];
-            if (!b.enabled || !b.screen || m_nativeButtonRegistered[j]) continue;
-            minRelX = std::min(minRelX, b.x);
-            minRelY = std::min(minRelY, b.y);
-            maxRelX = std::max(maxRelX, b.x + b.width);
-            maxRelY = std::max(maxRelY, b.y + b.height);
-            hasAny = true;
-        }
-        if (hasAny) {
-            PLModMenu_DrawCommand groupBg{};
-            groupBg.type = PL_DRAW_RECT_FILLED;
-            groupBg.x = hudPosX + minRelX;
-            groupBg.y = hudPosY + minRelY;
-            groupBg.w = maxRelX - minRelX;
-            groupBg.h = maxRelY - minRelY;
-            groupBg.x3 = m_buttonRadius;
-            groupBg.color = 0x02000000; // nearly transparent, makes whole group draggable in HUD editor
-            commands.push_back(groupBg);
-        }
-    }
-
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
-
-        float absX = binding.x + hudPosX;
-        float absY = binding.y + hudPosY;
-
-        PLModMenu_DrawCommand rect{};
-        rect.type = PL_DRAW_RECT_FILLED;
-        rect.x = absX;
-        rect.y = absY;
-        rect.w = binding.width;
-        rect.h = binding.height;
-        rect.x3 = m_buttonRadius;
-        // Highlight dragging button in HUD edit mode
-        if (m_hudEditMode && m_draggingIndex == static_cast<int>(i)) {
-            rect.color = colorWithAlpha(0x4AE0A0, 0.95f);
-        } else {
-            rect.color = colorWithAlpha(m_buttonColor, m_buttonOpacity);
-        }
-        commands.push_back(rect);
-
-        // In HUD edit mode draw an outline to indicate draggable
-        if (m_hudEditMode) {
-            PLModMenu_DrawCommand outline{};
-            outline.type = PL_DRAW_RECT;
-            outline.x = absX;
-            outline.y = absY;
-            outline.w = binding.width;
-            outline.h = binding.height;
-            outline.x3 = m_buttonRadius;
-            outline.color = 0xFF4AE0A0;
-            outline.size = 1.0f;
-            commands.push_back(outline);
-        }
-
-        labels.push_back(defaultLabel(binding, i));
-        PLModMenu_DrawCommand text{};
-        text.type = PL_DRAW_TEXT;
-        text.x = absX;
-        text.y = absY;
-        text.w = binding.width;
-        text.h = binding.height;
-        // The overlay forwards this value to Android Paint.setTextSize(), so it
-        // must be a usable pixel size rather than the old 0.5–4 scale value.
-        text.size = binding.textSize;
-        text.color = 0xFF000000u | (binding.textColor & 0x00FFFFFFu);
-        text.text = labels.back().c_str();
-        commands.push_back(text);
-    }
-
-    submitDrawCommands(moduleId, commands);
+    // Never draw the old in-mod rectangles; the launcher owns the buttons.
+    std::vector<PLModMenu_DrawCommand> empty;
+    submitDrawCommands(moduleId, empty);
 }
 
 void CommandHotkeyModule::applyDefaultBindings() {
