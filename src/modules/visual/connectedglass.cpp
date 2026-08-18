@@ -3,6 +3,7 @@
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
+#include <bedrocktools/sdk/render/Block.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 
@@ -12,81 +13,56 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace {
 
-enum class GlassFace : uint8_t {
-    Down = 0,
-    Up = 1,
-    North = 2,
-    South = 3,
-    West = 4,
-    East = 5,
-};
+using bedrocktools::sdk::field;
 
-enum class TextureEdge : uint8_t {
-    U0,
-    U1,
-    V0,
-    V1,
-};
+enum class GlassFace : uint8_t { Down = 0, Up, North, South, West, East };
+enum class TextureEdge : uint8_t { U0, U1, V0, V1 };
+enum class GlassShape : uint8_t { None, Block, Pane };
 
-enum class GlassShape : uint8_t {
-    None,
-    Block,
-    Pane,
-};
-
-struct Vec3Raw {
-    float x;
-    float y;
-    float z;
-};
+struct Vec3Raw { float x, y, z; };
 
 struct BlockPosRaw {
-    int32_t x;
-    int32_t y;
-    int32_t z;
+    int32_t x, y, z;
+    friend BlockPosRaw operator+(const BlockPosRaw& a, const BlockPosRaw& b) {
+        return {a.x + b.x, a.y + b.y, a.z + b.z};
+    }
 };
+using BlockOffset = BlockPosRaw;
 
 struct GlassInfo {
     GlassShape shape = GlassShape::None;
     std::string_view name;
     const void* identity = nullptr;
-
-    bool valid() const {
-        return shape != GlassShape::None;
-    }
+    bool valid() const { return shape != GlassShape::None; }
 };
 
 struct CropEdges {
-    bool u0 = false;
-    bool u1 = false;
-    bool v0 = false;
-    bool v1 = false;
-
-    bool any() const {
-        return u0 || u1 || v0 || v1;
-    }
+    bool u0 = false, u1 = false, v0 = false, v1 = false;
+    bool any() const { return u0 || u1 || v0 || v1; }
 };
 
-struct BlockOffset {
-    int32_t x;
-    int32_t y;
-    int32_t z;
-};
+struct UvBounds { float u0, v0, u1, v1; };
 
-struct PaneContext {
-    void* tessellator = nullptr;
-    const void* block = nullptr;
-    BlockPosRaw pos{};
+struct PaneRenderContext {
     bool active = false;
+    void* tess = nullptr;
+    BlockPosRaw pos{};
+    CropEdges eastWest{}, northSouth{}, vertical{};
+    UvBounds source{};
+    bool haveSource = false;
 };
 
 using FaceFn = void (*)(void*, void*, const void*, const Vec3Raw*, const void*);
-using PaneFn = bool (*)(void*, void*, const void*, const BlockPosRaw*, bool);
+using PaneTessFn = bool (*)(void*, void*, const void*, const BlockPosRaw*, int32_t);
+using BgGetTextureFn = const void* (*)(void*, const BlockPosRaw*, size_t, uint32_t);
+using TessVertexFn = void (*)(void*, float, float, float);
+using BoUpdateRenderFaceFn = uint64_t (*)(void*, const void*, const BlockPosRaw*, const void*, uint8_t);
 using BlockSourceGetBlockFn = const void* (*)(void*, const BlockPosRaw*, int32_t);
 using BlockSourceIsSolidBlockingBlockFn = bool (*)(void*, const BlockPosRaw*);
 using TextureUVCopyCtorFn = void* (*)(void*, const void*);
@@ -109,21 +85,21 @@ std::atomic_bool g_affectTopFace{true};
 std::atomic_bool g_affectBottomFace{true};
 std::atomic<float> g_borderWidth{2.0f};
 
-FaceFn g_downOriginal = nullptr;
-FaceFn g_upOriginal = nullptr;
-FaceFn g_northOriginal = nullptr;
-FaceFn g_southOriginal = nullptr;
-FaceFn g_westOriginal = nullptr;
-FaceFn g_eastOriginal = nullptr;
-PaneFn g_paneOriginal = nullptr;
+struct FaceHook {
+    bedrocktools::hooks::Handle handle = nullptr;
+    FaceFn original = nullptr;
+};
+FaceHook g_faceHooks[6] = {};
 
-bedrocktools::hooks::Handle g_downHook = nullptr;
-bedrocktools::hooks::Handle g_upHook = nullptr;
-bedrocktools::hooks::Handle g_northHook = nullptr;
-bedrocktools::hooks::Handle g_southHook = nullptr;
-bedrocktools::hooks::Handle g_westHook = nullptr;
-bedrocktools::hooks::Handle g_eastHook = nullptr;
-bedrocktools::hooks::Handle g_paneHook = nullptr;
+bedrocktools::hooks::Handle g_paneTessHook = nullptr;
+bedrocktools::hooks::Handle g_bgGetTextureHook = nullptr;
+bedrocktools::hooks::Handle g_tessVertexHook = nullptr;
+bedrocktools::hooks::Handle g_boUpdateRenderFaceHook = nullptr;
+
+PaneTessFn g_paneTessOriginal = nullptr;
+BgGetTextureFn g_bgGetTextureOriginal = nullptr;
+TessVertexFn g_tessVertexOriginal = nullptr;
+BoUpdateRenderFaceFn g_boUpdateRenderFaceOriginal = nullptr;
 
 BlockSourceGetBlockFn g_getBlock = nullptr;
 BlockSourceIsSolidBlockingBlockFn g_isSolidBlockingBlock = nullptr;
@@ -131,17 +107,7 @@ TextureUVCopyCtorFn g_textureCopyCtor = nullptr;
 TextureUVDtorFn g_textureDtor = nullptr;
 SetAllDirtyFn g_setAllDirty = nullptr;
 
-thread_local PaneContext g_paneContext;
-
-template <typename T>
-T& field(void* base, size_t offset) {
-    return *reinterpret_cast<T*>(reinterpret_cast<uintptr_t>(base) + offset);
-}
-
-template <typename T>
-const T& field(const void* base, size_t offset) {
-    return *reinterpret_cast<const T*>(reinterpret_cast<uintptr_t>(base) + offset);
-}
+thread_local PaneRenderContext g_paneRc;
 
 std::string_view stripNamespace(std::string_view name) {
     constexpr std::string_view prefix = "minecraft:";
@@ -162,29 +128,18 @@ GlassInfo classifyGlassName(std::string_view rawName, const void* identity = nul
         || name == "stained_glass"
         || name == "hard_stained_glass"
         || name.ends_with("_stained_glass");
-
     if (pane) return {GlassShape::Pane, name, identity};
     if (block) return {GlassShape::Block, name, identity};
     return {};
 }
 
-std::string_view getBlockName(const void* block) {
-    if (!block) return {};
-
-    const uintptr_t blockType = field<uintptr_t>(block, bedrocktools::sdk::offsets::Block::mBlockType);
-    if (!blockType) return {};
-
-    const uintptr_t stringAddress = blockType
-        + bedrocktools::sdk::offsets::BlockType::mNameInfo
-        + bedrocktools::sdk::offsets::NameInfo::mFullName
-        + bedrocktools::sdk::offsets::HashedString::mString;
-    const auto* name = reinterpret_cast<const std::string*>(stringAddress);
-    if (name->size() > 256 || (!name->empty() && name->data() == nullptr)) return {};
-    return std::string_view(name->data(), name->size());
-}
-
 GlassInfo classifyGlass(const void* block) {
-    return classifyGlassName(getBlockName(block), block);
+    if (!block) return {};
+    const auto* blockObj = static_cast<const bedrocktools::sdk::Block*>(block);
+    const std::string* fullName = blockObj->fullName();
+    if (!fullName || fullName->size() > 256
+        || (!fullName->empty() && fullName->data() == nullptr)) return {};
+    return classifyGlassName({fullName->data(), fullName->size()}, block);
 }
 
 std::string_view shapeIndependentName(const GlassInfo& info) {
@@ -197,49 +152,24 @@ std::string_view shapeIndependentName(const GlassInfo& info) {
 }
 
 bool shapeEnabled(const GlassInfo& info) {
-    if (info.shape == GlassShape::Block) {
-        return g_connectGlassBlocks.load(std::memory_order_relaxed);
-    }
-    if (info.shape == GlassShape::Pane) {
-        return g_connectGlassPanes.load(std::memory_order_relaxed);
-    }
+    if (info.shape == GlassShape::Block) return g_connectGlassBlocks.load(std::memory_order_relaxed);
+    if (info.shape == GlassShape::Pane) return g_connectGlassPanes.load(std::memory_order_relaxed);
     return false;
 }
 
 bool compatibleGlass(const GlassInfo& current, const GlassInfo& neighbor) {
-    if (!current.valid() || !neighbor.valid() || !shapeEnabled(current) || !shapeEnabled(neighbor)) {
-        return false;
-    }
-
-    if (current.shape != neighbor.shape
-        && !g_connectPanesToBlocks.load(std::memory_order_relaxed)) {
-        return false;
-    }
-
+    if (!current.valid() || !neighbor.valid() || !shapeEnabled(current) || !shapeEnabled(neighbor)) return false;
+    if (current.shape != neighbor.shape && !g_connectPanesToBlocks.load(std::memory_order_relaxed)) return false;
     if (g_connectDifferentColors.load(std::memory_order_relaxed)) return true;
-
     if (current.shape == neighbor.shape && current.identity && neighbor.identity) {
         return current.identity == neighbor.identity;
     }
-
     return shapeIndependentName(current) == shapeIndependentName(neighbor);
 }
 
-BlockPosRaw add(const BlockPosRaw& pos, const BlockOffset& delta) {
-    return {pos.x + delta.x, pos.y + delta.y, pos.z + delta.z};
-}
-
-BlockOffset faceNormal(GlassFace face) {
-    switch (face) {
-    case GlassFace::Down: return {0, -1, 0};
-    case GlassFace::Up: return {0, 1, 0};
-    case GlassFace::North: return {0, 0, -1};
-    case GlassFace::South: return {0, 0, 1};
-    case GlassFace::West: return {-1, 0, 0};
-    case GlassFace::East: return {1, 0, 0};
-    }
-    return {0, 0, 0};
-}
+constexpr BlockOffset kFaceNormals[6] = {
+    {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0},
+};
 
 const void* getBlock(void* region, const BlockPosRaw& pos) {
     return region && g_getBlock ? g_getBlock(region, &pos, 0) : nullptr;
@@ -262,21 +192,17 @@ bool removeOuterBorder(GlassFace face, TextureEdge edge) {
 }
 
 bool isFaceExposed(void* region, const BlockPosRaw& pos, GlassFace face) {
-    const BlockPosRaw outsidePos = add(pos, faceNormal(face));
+    const BlockPosRaw outsidePos = pos + kFaceNormals[static_cast<size_t>(face)];
     const void* outsideBlock = getBlock(region, outsidePos);
     if (!outsideBlock || classifyGlass(outsideBlock).valid()) return false;
     return g_isSolidBlockingBlock && !g_isSolidBlockingBlock(region, &outsidePos);
 }
 
 bool shouldCropEdge(
-    void* region,
-    const BlockPosRaw& pos,
-    const GlassInfo& current,
-    GlassFace face,
-    TextureEdge edge,
-    const BlockOffset& neighborOffset
+    void* region, const BlockPosRaw& pos, const GlassInfo& current,
+    GlassFace face, TextureEdge edge, const BlockOffset& neighborOffset
 ) {
-    const BlockPosRaw neighborPos = add(pos, neighborOffset);
+    const BlockPosRaw neighborPos = pos + neighborOffset;
     const void* neighborBlock = getBlock(region, neighborPos);
     if (neighborBlock) {
         const GlassInfo neighbor = classifyGlass(neighborBlock);
@@ -290,64 +216,58 @@ bool shouldCropEdge(
     return removeOuterBorder(face, edge);
 }
 
+constexpr BlockOffset kEdgeDirs[6][4] = {
+    {{-1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, -1}},   // Down
+    {{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}},   // Up
+    {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}},   // North
+    {{-1, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, -1, 0}},   // South
+    {{0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, -1, 0}},   // West
+    {{0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}},   // East
+};
+
 CropEdges getCropEdges(void* region, const BlockPosRaw& pos, const GlassInfo& current, GlassFace face) {
-    CropEdges edges;
-    if (!faceEnabled(face)) return edges;
-
-    switch (face) {
-    case GlassFace::Down:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {-1, 0, 0});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {1, 0, 0});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 0, 1});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, 0, -1});
-        break;
-    case GlassFace::Up:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {-1, 0, 0});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {1, 0, 0});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 0, -1});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, 0, 1});
-        break;
-    case GlassFace::North:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {1, 0, 0});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {-1, 0, 0});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 1, 0});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, -1, 0});
-        break;
-    case GlassFace::South:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {-1, 0, 0});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {1, 0, 0});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 1, 0});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, -1, 0});
-        break;
-    case GlassFace::West:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {0, 0, -1});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {0, 0, 1});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 1, 0});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, -1, 0});
-        break;
-    case GlassFace::East:
-        edges.u0 = shouldCropEdge(region, pos, current, face, TextureEdge::U0, {0, 0, 1});
-        edges.u1 = shouldCropEdge(region, pos, current, face, TextureEdge::U1, {0, 0, -1});
-        edges.v0 = shouldCropEdge(region, pos, current, face, TextureEdge::V0, {0, 1, 0});
-        edges.v1 = shouldCropEdge(region, pos, current, face, TextureEdge::V1, {0, -1, 0});
-        break;
-    }
-
-    return edges;
+    if (!faceEnabled(face)) return {};
+    const auto& dirs = kEdgeDirs[static_cast<size_t>(face)];
+    return {
+        shouldCropEdge(region, pos, current, face, TextureEdge::U0, dirs[0]),
+        shouldCropEdge(region, pos, current, face, TextureEdge::U1, dirs[1]),
+        shouldCropEdge(region, pos, current, face, TextureEdge::V0, dirs[2]),
+        shouldCropEdge(region, pos, current, face, TextureEdge::V1, dirs[3]),
+    };
 }
 
-BlockPosRaw resolveBlockPosition(void* tessellator, const void* block, const Vec3Raw* position) {
-    if (g_paneContext.active
-        && g_paneContext.tessellator == tessellator
-        && g_paneContext.block == block) {
-        return g_paneContext.pos;
-    }
+bool paneNeighborConnected(void* region, const BlockPosRaw& pos, const GlassInfo& current, int dx, int dz) {
+    return compatibleGlass(current, classifyGlass(getBlock(region, {pos.x + dx, pos.y, pos.z + dz})));
+}
 
+CropEdges paneCropAxis(void* region, const BlockPosRaw& pos, const GlassInfo& current, int dx0, int dz0, int dx1, int dz1) {
     return {
-        static_cast<int32_t>(std::floor(position->x)),
-        static_cast<int32_t>(std::floor(position->y)),
-        static_cast<int32_t>(std::floor(position->z)),
+        paneNeighborConnected(region, pos, current, dx0, dz0),
+        paneNeighborConnected(region, pos, current, dx1, dz1),
+        false, false,
     };
+}
+
+CropEdges paneCropVertical(void* region, const BlockPosRaw& pos, const GlassInfo& current) {
+    const auto connected = [&](int dy) {
+        return compatibleGlass(current, classifyGlass(getBlock(region, {pos.x, pos.y + dy, pos.z})));
+    };
+    return {false, false, connected(1), connected(-1)};
+}
+
+float remapCroppedUv(float value, float start, float end, bool cropStart, bool cropEnd) {
+    const float borderPixels = std::clamp(g_borderWidth.load(std::memory_order_relaxed), 0.0f, 7.5f);
+    constexpr float logicalTextureSize = 16.0f;
+    if (std::abs(end - start) < 1.0e-7f) return value;
+    const float pixel = (end - start) / logicalTextureSize;
+    const float croppedStart = start + (cropStart ? pixel * borderPixels : 0.0f);
+    const float croppedEnd = end - (cropEnd ? pixel * borderPixels : 0.0f);
+    return croppedStart + (value - start) * (croppedEnd - croppedStart) / (end - start);
+}
+
+bool inUvRange(float value, float a, float b) {
+    constexpr float epsilon = 1.0e-5f;
+    return value >= std::min(a, b) - epsilon && value <= std::max(a, b) + epsilon;
 }
 
 class TextureCopy final {
@@ -358,21 +278,13 @@ public:
             m_constructed = true;
         }
     }
-
     ~TextureCopy() {
         if (m_constructed && g_textureDtor) g_textureDtor(m_storage.data());
     }
-
     TextureCopy(const TextureCopy&) = delete;
     TextureCopy& operator=(const TextureCopy&) = delete;
-
-    bool valid() const {
-        return m_constructed;
-    }
-
-    void* data() {
-        return m_storage.data();
-    }
+    bool valid() const { return m_constructed; }
+    void* data() { return m_storage.data(); }
 
 private:
     alignas(bedrocktools::sdk::offsets::TextureUVCoordinateSet::Alignment)
@@ -414,17 +326,11 @@ public:
                   + static_cast<size_t>(face) * bedrocktools::sdk::offsets::FlipFace::ElementSize
           )),
           m_xFlip(&field<uint8_t>(tessellator, bedrocktools::sdk::offsets::BlockTessellator::mXFlipTexture)),
-          m_oldFlip(*m_flip),
-          m_oldXFlip(*m_xFlip) {
+          m_oldFlip(*m_flip), m_oldXFlip(*m_xFlip) {
         *m_flip = bedrocktools::sdk::offsets::FlipFace::DontRotate;
         *m_xFlip = 0;
     }
-
-    ~FaceStateGuard() {
-        *m_flip = m_oldFlip;
-        *m_xFlip = m_oldXFlip;
-    }
-
+    ~FaceStateGuard() { *m_flip = m_oldFlip; *m_xFlip = m_oldXFlip; }
     FaceStateGuard(const FaceStateGuard&) = delete;
     FaceStateGuard& operator=(const FaceStateGuard&) = delete;
 
@@ -436,111 +342,164 @@ private:
 };
 
 void renderFace(
-    FaceFn original,
-    GlassFace face,
-    void* tessellator,
-    void* meshTessellator,
-    const void* block,
-    const Vec3Raw* position,
-    const void* inputTexture
+    FaceFn original, GlassFace face, void* tessellator, void* meshTessellator,
+    const void* block, const Vec3Raw* position, const void* inputTexture
 ) {
     if (!original) return;
 
-    const GlassInfo current = classifyGlass(block);
-    if (!g_enabled.load(std::memory_order_relaxed)
-        || !tessellator
-        || !block
-        || !position
-        || !inputTexture
-        || !g_getBlock
-        || !g_isSolidBlockingBlock
-        || !g_textureCopyCtor
-        || !g_textureDtor
-        || !current.valid()
-        || !shapeEnabled(current)) {
+    std::optional<TextureCopy> texture;
+    do {
+        if (!g_enabled.load(std::memory_order_relaxed)
+            || !tessellator || !block || !position || !inputTexture
+            || !g_getBlock || !g_isSolidBlockingBlock
+            || !g_textureCopyCtor || !g_textureDtor) break;
+        const GlassInfo current = classifyGlass(block);
+        if (!current.valid() || !shapeEnabled(current)) break;
+        const void* internalTexture = reinterpret_cast<const void*>(
+            reinterpret_cast<uintptr_t>(tessellator) + bedrocktools::sdk::offsets::BlockTessellator::mInternalTexture
+        );
+        if (field<uint8_t>(tessellator, bedrocktools::sdk::offsets::BlockTessellator::mUseInternalTexture) != 0
+            && inputTexture == internalTexture) break;
+        void* region = field<void*>(tessellator, bedrocktools::sdk::offsets::BlockTessellator::mRegion);
+        if (!region) break;
+        const BlockPosRaw pos = {
+            static_cast<int32_t>(std::floor(position->x)),
+            static_cast<int32_t>(std::floor(position->y)),
+            static_cast<int32_t>(std::floor(position->z)),
+        };
+        const GlassInfo worldBlock = classifyGlass(getBlock(region, pos));
+        if (!worldBlock.valid()) break;
+        const CropEdges edges = getCropEdges(region, pos, current, face);
+        if (!edges.any()) break;
+        texture.emplace(inputTexture);
+        if (!texture->valid()) { texture.reset(); break; }
+        cropTexture(texture->data(), edges);
+    } while (false);
+
+    if (!texture) {
         original(tessellator, meshTessellator, block, position, inputTexture);
         return;
     }
-
-    const void* internalTexture = reinterpret_cast<const void*>(
-        reinterpret_cast<uintptr_t>(tessellator) + bedrocktools::sdk::offsets::BlockTessellator::mInternalTexture
-    );
-    if (field<uint8_t>(tessellator, bedrocktools::sdk::offsets::BlockTessellator::mUseInternalTexture) != 0
-        && inputTexture == internalTexture) {
-        original(tessellator, meshTessellator, block, position, inputTexture);
-        return;
-    }
-
-    void* region = field<void*>(tessellator, bedrocktools::sdk::offsets::BlockTessellator::mRegion);
-    if (!region) {
-        original(tessellator, meshTessellator, block, position, inputTexture);
-        return;
-    }
-
-    const BlockPosRaw pos = resolveBlockPosition(tessellator, block, position);
-    const GlassInfo worldBlock = classifyGlass(getBlock(region, pos));
-    if (!worldBlock.valid()) {
-        original(tessellator, meshTessellator, block, position, inputTexture);
-        return;
-    }
-
-    const CropEdges edges = getCropEdges(region, pos, current, face);
-    if (!edges.any()) {
-        original(tessellator, meshTessellator, block, position, inputTexture);
-        return;
-    }
-
-    TextureCopy texture(inputTexture);
-    if (!texture.valid()) {
-        original(tessellator, meshTessellator, block, position, inputTexture);
-        return;
-    }
-
-    cropTexture(texture.data(), edges);
     FaceStateGuard state(tessellator, face);
-    original(tessellator, meshTessellator, block, position, texture.data());
+    original(tessellator, meshTessellator, block, position, texture->data());
 }
 
-void downHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_downOriginal, GlassFace::Down, a0, a1, a2, a3, a4);
+template <GlassFace Face>
+void faceHookTrampoline(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
+    renderFace(g_faceHooks[static_cast<size_t>(Face)].original, Face, a0, a1, a2, a3, a4);
 }
 
-void upHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_upOriginal, GlassFace::Up, a0, a1, a2, a3, a4);
-}
+constexpr std::array<bedrocktools::memory::SignatureId, 6> kFaceSigIds = {
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceDown,
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceUp,
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceNorth,
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceSouth,
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceWest,
+    bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceEast,
+};
 
-void northHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_northOriginal, GlassFace::North, a0, a1, a2, a3, a4);
-}
+constexpr std::array<FaceFn, 6> kFaceTrampolines = {
+    &faceHookTrampoline<GlassFace::Down>,
+    &faceHookTrampoline<GlassFace::Up>,
+    &faceHookTrampoline<GlassFace::North>,
+    &faceHookTrampoline<GlassFace::South>,
+    &faceHookTrampoline<GlassFace::West>,
+    &faceHookTrampoline<GlassFace::East>,
+};
 
-void southHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_southOriginal, GlassFace::South, a0, a1, a2, a3, a4);
-}
+bool paneTessDetour(void* tess, void* meshtess, const void* block, const BlockPosRaw* pos, int32_t layer) {
+    if (!g_paneTessOriginal) return false;
 
-void westHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_westOriginal, GlassFace::West, a0, a1, a2, a3, a4);
-}
+    bool shouldIntercept = false;
+    if (g_enabled.load(std::memory_order_relaxed)
+        && tess && block && pos && g_getBlock && g_isSolidBlockingBlock) {
+        const GlassInfo current = classifyGlass(block);
+        if (current.valid() && current.shape == GlassShape::Pane
+            && g_connectGlassPanes.load(std::memory_order_relaxed)) {
+            shouldIntercept = true;
+        }
+    }
 
-void eastHook(void* a0, void* a1, const void* a2, const Vec3Raw* a3, const void* a4) {
-    renderFace(g_eastOriginal, GlassFace::East, a0, a1, a2, a3, a4);
-}
-
-bool paneHook(void* a0, void* a1, const void* a2, const BlockPosRaw* a3, bool a4) {
-    const PaneContext previous = g_paneContext;
-    g_paneContext = {a0, a2, a3 ? *a3 : BlockPosRaw{}, true};
-    const bool result = g_paneOriginal ? g_paneOriginal(a0, a1, a2, a3, a4) : false;
-    g_paneContext = previous;
+    const PaneRenderContext saved = g_paneRc;
+    if (shouldIntercept) {
+        void* region = field<void*>(tess, bedrocktools::sdk::offsets::BlockTessellator::mRegion);
+        const GlassInfo current = classifyGlass(block);
+        g_paneRc = {
+            true, meshtess, *pos,
+            paneCropAxis(region, *pos, current, -1, 0, 1, 0),
+            paneCropAxis(region, *pos, current, 0, 1, 0, -1),
+            paneCropVertical(region, *pos, current),
+            {}, false,
+        };
+    }
+    const bool result = g_paneTessOriginal(tess, meshtess, block, pos, layer);
+    g_paneRc = saved;
     return result;
 }
 
-bedrocktools::hooks::Handle installFaceHook(bedrocktools::memory::SignatureId id, void* detour, FaceFn* original) {
+const void* bgGetTextureDetour(void* bgThis, const BlockPosRaw* pos, size_t faceIdx, uint32_t variant) {
+    if (!g_bgGetTextureOriginal) return nullptr;
+    const void* result = g_bgGetTextureOriginal(bgThis, pos, faceIdx, variant);
+    if (!g_paneRc.active || !result) return result;
+    if (faceIdx == 0 && !g_paneRc.haveSource) {
+        g_paneRc.source = {
+            field<float>(result, bedrocktools::sdk::offsets::TextureUVCoordinateSet::mU0),
+            field<float>(result, bedrocktools::sdk::offsets::TextureUVCoordinateSet::mV0),
+            field<float>(result, bedrocktools::sdk::offsets::TextureUVCoordinateSet::mU1),
+            field<float>(result, bedrocktools::sdk::offsets::TextureUVCoordinateSet::mV1),
+        };
+        g_paneRc.haveSource = true;
+    }
+    return result;
+}
+
+void tessVertexDetour(void* tess, float x, [[maybe_unused]] float y, float z) {
+    if (!g_tessVertexOriginal) return;
+    if (g_paneRc.active && g_paneRc.haveSource && g_paneRc.tess == tess) {
+        float& u = field<float>(tess, bedrocktools::sdk::offsets::Tessellator::mTextureU);
+        float& v = field<float>(tess, bedrocktools::sdk::offsets::Tessellator::mTextureV);
+        const UvBounds& src = g_paneRc.source;
+        if (inUvRange(u, src.u0, src.u1) && inUvRange(v, src.v0, src.v1)) {
+            const float dx = std::abs(x - (static_cast<float>(g_paneRc.pos.x) + 0.5f));
+            const float dz = std::abs(z - (static_cast<float>(g_paneRc.pos.z) + 0.5f));
+            if (std::abs(dx - dz) > 0.01f) {
+                const CropEdges& edges = dx > dz ? g_paneRc.eastWest : g_paneRc.northSouth;
+                u = remapCroppedUv(u, src.u0, src.u1, edges.u0, edges.u1);
+            }
+            v = remapCroppedUv(v, src.v0, src.v1, g_paneRc.vertical.v0, g_paneRc.vertical.v1);
+        }
+    }
+    g_tessVertexOriginal(tess, x, y, z);
+}
+
+uint64_t boUpdateRenderFaceDetour(
+    void* self, const void* block, const BlockPosRaw* pos, const void* aabb, uint8_t face
+) {
+    if (!g_boUpdateRenderFaceOriginal) return 0;
+    const uint64_t result = g_boUpdateRenderFaceOriginal(self, block, pos, aabb, face);
+    if (!g_enabled.load(std::memory_order_relaxed) || !g_paneRc.active || !pos) return result;
+    if (face != static_cast<uint8_t>(GlassFace::Up) && face != static_cast<uint8_t>(GlassFace::Down)) return result;
+
+    const GlassInfo current = classifyGlass(block);
+    if (!current.valid() || current.shape != GlassShape::Pane
+        || !g_connectGlassPanes.load(std::memory_order_relaxed)) {
+        return result;
+    }
+    const bool connected = (face == static_cast<uint8_t>(GlassFace::Up))
+        ? g_paneRc.vertical.v0
+        : g_paneRc.vertical.v1;
+    if (!connected) return result;
+
+    const uint64_t bit = 1ULL << face;
+    field<uint64_t>(self, 0) |= bit;
+    return result | bit;
+}
+
+template <typename Fn>
+bedrocktools::hooks::Handle installHook(bedrocktools::memory::SignatureId id, void* detour, Fn* original) {
     const uintptr_t address = bedrocktools::memory::resolve(id);
     if (!address) return nullptr;
     return bedrocktools::hooks::install(reinterpret_cast<void*>(address), detour, reinterpret_cast<void**>(original));
-}
-
-void requestChunkRebuild() {
-    g_rebuildPending.store(true, std::memory_order_release);
 }
 
 bool rebuildRenderChunks(void* clientInstance) {
@@ -566,7 +525,6 @@ bool rebuildRenderChunks(void* clientInstance) {
         }
         node = next;
     }
-
     return rebuilt;
 }
 
@@ -611,56 +569,45 @@ void ConnectedGlassModule::installHooks() {
     if (m_hooked) return;
 
     g_getBlock = reinterpret_cast<BlockSourceGetBlockFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceGetBlockForTessellation));
-    g_isSolidBlockingBlock = reinterpret_cast<BlockSourceIsSolidBlockingBlockFn>(
-        bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceIsSolidBlockingBlock)
-    );
-    g_textureCopyCtor = reinterpret_cast<TextureUVCopyCtorFn>(
-        bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::TextureUVCoordinateSetCopyCtor)
-    );
+    g_isSolidBlockingBlock = reinterpret_cast<BlockSourceIsSolidBlockingBlockFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceIsSolidBlockingBlock));
+    g_textureCopyCtor = reinterpret_cast<TextureUVCopyCtorFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::TextureUVCoordinateSetCopyCtor));
     g_textureDtor = reinterpret_cast<TextureUVDtorFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::TextureUVCoordinateSetDtor));
     g_setAllDirty = reinterpret_cast<SetAllDirtyFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::RenderChunkCoordinatorSetAllDirty));
 
-    if (!g_downHook) {
-        g_downHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceDown, reinterpret_cast<void*>(downHook), &g_downOriginal);
-    }
-    if (!g_upHook) {
-        g_upHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceUp, reinterpret_cast<void*>(upHook), &g_upOriginal);
-    }
-    if (!g_northHook) {
-        g_northHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceNorth, reinterpret_cast<void*>(northHook), &g_northOriginal);
-    }
-    if (!g_southHook) {
-        g_southHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceSouth, reinterpret_cast<void*>(southHook), &g_southOriginal);
-    }
-    if (!g_westHook) {
-        g_westHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceWest, reinterpret_cast<void*>(westHook), &g_westOriginal);
-    }
-    if (!g_eastHook) {
-        g_eastHook = installFaceHook(bedrocktools::memory::SignatureId::BlockTessellatorTessellateFaceEast, reinterpret_cast<void*>(eastHook), &g_eastOriginal);
-    }
-    if (!g_paneHook) {
-        const uintptr_t paneAddress = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockTessellatorTessellatePane);
-        if (paneAddress) {
-            g_paneHook = bedrocktools::hooks::install(
-                reinterpret_cast<void*>(paneAddress),
-                reinterpret_cast<void*>(paneHook),
-                reinterpret_cast<void**>(&g_paneOriginal)
+    for (size_t i = 0; i < 6; ++i) {
+        if (!g_faceHooks[i].handle) {
+            g_faceHooks[i].handle = installHook(
+                kFaceSigIds[i],
+                reinterpret_cast<void*>(kFaceTrampolines[i]),
+                &g_faceHooks[i].original
             );
         }
     }
 
-    m_hooked = g_getBlock
-        && g_isSolidBlockingBlock
-        && g_textureCopyCtor
-        && g_textureDtor
-        && g_setAllDirty
-        && g_downHook
-        && g_upHook
-        && g_northHook
-        && g_southHook
-        && g_westHook
-        && g_eastHook
-        && g_paneHook;
+    if (!g_paneTessHook) {
+        g_paneTessHook = installHook(
+            bedrocktools::memory::SignatureId::BlockTessellatorTessellateDoubleThinFenceInWorld,
+            reinterpret_cast<void*>(paneTessDetour), &g_paneTessOriginal);
+    }
+    if (!g_bgGetTextureHook) {
+        g_bgGetTextureHook = installHook(
+            bedrocktools::memory::SignatureId::BlockGraphicsGetTexture,
+            reinterpret_cast<void*>(bgGetTextureDetour), &g_bgGetTextureOriginal);
+    }
+    if (!g_tessVertexHook) {
+        g_tessVertexHook = installHook(
+            bedrocktools::memory::SignatureId::TessellatorVertex,
+            reinterpret_cast<void*>(tessVertexDetour), &g_tessVertexOriginal);
+    }
+    if (!g_boUpdateRenderFaceHook) {
+        g_boUpdateRenderFaceHook = installHook(
+            bedrocktools::memory::SignatureId::BlockOccluderUpdateRenderFace,
+            reinterpret_cast<void*>(boUpdateRenderFaceDetour), &g_boUpdateRenderFaceOriginal);
+    }
+
+    m_hooked = g_getBlock && g_isSolidBlockingBlock && g_textureCopyCtor && g_textureDtor && g_setAllDirty;
+    for (const auto& h : g_faceHooks) m_hooked = m_hooked && h.handle;
+    m_hooked = m_hooked && g_paneTessHook && g_bgGetTextureHook && g_tessVertexHook && g_boUpdateRenderFaceHook;
 }
 
 void ConnectedGlassModule::onInit() {
@@ -675,12 +622,12 @@ void ConnectedGlassModule::onEnable() {
     applySettings();
     if (!m_hooked) installHooks();
     g_enabled.store(m_hooked, std::memory_order_release);
-    if (m_hooked) requestChunkRebuild();
+    if (m_hooked) g_rebuildPending.store(true, std::memory_order_release);
 }
 
 void ConnectedGlassModule::onDisable() {
     g_enabled.store(false, std::memory_order_release);
-    if (m_hooked) requestChunkRebuild();
+    if (m_hooked) g_rebuildPending.store(true, std::memory_order_release);
 }
 
 void ConnectedGlassModule::loadConfig(const nlohmann::json& j) {
@@ -693,16 +640,13 @@ void ConnectedGlassModule::loadConfig(const nlohmann::json& j) {
     removeCornerBorders = j.value("removeCornerBorders", removeCornerBorders);
     removeOuterVerticalBorders = j.value("removeOuterVerticalBorders", removeOuterVerticalBorders);
     removeOuterHorizontalBorders = j.value("removeOuterHorizontalBorders", removeOuterHorizontalBorders);
-    removeOuterTopBottomFaceBorders = j.value(
-        "removeOuterTopBottomFaceBorders",
-        removeOuterTopBottomFaceBorders
-    );
+    removeOuterTopBottomFaceBorders = j.value("removeOuterTopBottomFaceBorders", removeOuterTopBottomFaceBorders);
     affectSideFaces = j.value("affectSideFaces", affectSideFaces);
     affectTopFace = j.value("affectTopFace", affectTopFace);
     affectBottomFace = j.value("affectBottomFace", affectBottomFace);
     borderWidth = j.value("borderWidth", borderWidth);
     applySettings();
-    if (enabled && m_hooked) requestChunkRebuild();
+    if (enabled && m_hooked) g_rebuildPending.store(true, std::memory_order_release);
 }
 
 void ConnectedGlassModule::saveConfig(nlohmann::json& j) {

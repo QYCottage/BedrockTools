@@ -108,7 +108,10 @@ enum class SignatureId : std::uint16_t {
     GuiDataDisplayWhisperMessage,
     GuiDataAddMessage,
     ResourcePacksInfoPacketHandle,
-    ResourcePackStackPacketHandle,
+    ResourcePackStackPacketHandle,    
+    BlockTessellatorTessellateDoubleThinFenceInWorld,
+    BlockGraphicsGetTexture,
+    BlockOccluderUpdateRenderFace,
     FluxSwing,
     MobGetModifiedSwingDuration,
     Count

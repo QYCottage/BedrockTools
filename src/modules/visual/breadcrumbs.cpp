@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 #include <utility>
+#include <mutex>
 
 typedef void (*Tessellator_begin_t)(void* tessellator, void* debugCallback, int primitiveMode, int vertexCount, int noIndices);
 typedef void (*Tessellator_color_t)(void* tessellator, float r, float g, float b, float a);
@@ -40,7 +41,33 @@ private:
 };
 
 struct MaterialPtr {
-    void* sharedPtrData[2];
+    void* sharedPtrData[2]{nullptr, nullptr};
+
+    MaterialPtr() = default;
+    MaterialPtr(const MaterialPtr&) = delete;
+    MaterialPtr& operator=(const MaterialPtr&) = delete;
+
+    MaterialPtr(MaterialPtr&& other) noexcept
+        : sharedPtrData{other.sharedPtrData[0], other.sharedPtrData[1]} {
+        other.sharedPtrData[0] = nullptr;
+        other.sharedPtrData[1] = nullptr;
+    }
+
+    MaterialPtr& operator=(MaterialPtr&& other) noexcept {
+        if (this != &other) {
+            sharedPtrData[0] = other.sharedPtrData[0];
+            sharedPtrData[1] = other.sharedPtrData[1];
+            other.sharedPtrData[0] = nullptr;
+            other.sharedPtrData[1] = nullptr;
+        }
+        return *this;
+    }
+
+    ~MaterialPtr() {}
+
+    explicit operator bool() const {
+        return sharedPtrData[0] != nullptr;
+    }
 };
 
 static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) {
@@ -73,13 +100,14 @@ static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) 
 }
 
 static BreadcrumbsModule* g_breadcrumbsMod = nullptr;
+static std::mutex s_pointsMutex;
 
 static Tessellator_begin_t                s_tessBegin = nullptr;
 static Tessellator_color_t                s_tessColor = nullptr;
 static Tessellator_vertex_t               s_tessVertex = nullptr;
 static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 
-static MaterialPtr* s_matSelection = nullptr;
+static MaterialPtr s_matSelection;
 static uintptr_t    s_renderMaterialGroup = 0;
 
 static void (*_renderLevel_orig)(void* _this, void* screenContext, void* a3);
@@ -116,6 +144,8 @@ static void s_breadcrumbsTickCallback(void* _this) {
             bedrocktools::sdk::Vec3 pos = *(bedrocktools::sdk::Vec3*)svc;
             AABB aabb = getActorAABB(_this);
             pos.y = aabb.min.y;
+
+            std::lock_guard<std::mutex> lock(s_pointsMutex);
             
             bool shouldAdd = true;
             if (!g_breadcrumbsMod->points.empty()) {
@@ -134,23 +164,29 @@ static void s_breadcrumbsTickCallback(void* _this) {
             
             if (shouldAdd) {
                 g_breadcrumbsMod->points.push_back(pos);
-                if (g_breadcrumbsMod->points.size() > static_cast<size_t>(g_breadcrumbsMod->maxPoints)) {
-                    g_breadcrumbsMod->points.erase(g_breadcrumbsMod->points.begin());
+                size_t pointLimit = g_breadcrumbsMod->maxPoints > 0
+                    ? static_cast<size_t>(g_breadcrumbsMod->maxPoints)
+                    : 1;
+                if (g_breadcrumbsMod->points.size() > pointLimit) {
+                    size_t excess = g_breadcrumbsMod->points.size() - pointLimit;
+                    g_breadcrumbsMod->points.erase(
+                        g_breadcrumbsMod->points.begin(),
+                        g_breadcrumbsMod->points.begin() + excess);
                 }
             }
         }
     }
 }
 
-static MaterialPtr* getMaterial(const char* name) {
-    if (!s_renderMaterialGroup) return nullptr;
+static MaterialPtr getMaterial(const char* name) {
+    if (!s_renderMaterialGroup) return {};
 
     HashedString hs(name);
 
     void** vtable = *reinterpret_cast<void***>(s_renderMaterialGroup);
-    if (!vtable || !vtable[2]) return nullptr;
+    if (!vtable || !vtable[2]) return {};
 
-    using getMat_t = MaterialPtr*(*)(void*, const HashedString*);
+    using getMat_t = MaterialPtr(*)(void*, const HashedString*);
     return reinterpret_cast<getMat_t>(vtable[2])((void*)s_renderMaterialGroup, &hs);
 }
 
@@ -170,6 +206,13 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     if (!s_tessBegin || !s_tessColor || !s_tessVertex || !s_renderMesh) return;
     if (!screenContext || (uintptr_t)screenContext < 0x1000) return;
 
+    std::vector<bedrocktools::sdk::Vec3> points;
+    {
+        std::lock_guard<std::mutex> lock(s_pointsMutex);
+        points = g_breadcrumbsMod->points;
+    }
+    if (points.empty()) return;
+
     uintptr_t tessellatorPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mTessellator);
     if (!tessellatorPtr || tessellatorPtr < 0x1000) return;
     void* tessellator = (void*)tessellatorPtr;
@@ -183,8 +226,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
     ensureMaterials();
 
-    void* matOutline = s_matSelection ? (void*)s_matSelection : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
-    void* matFill = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial); 
+    void* matOutline = s_matSelection ? (void*)&s_matSelection : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
 
     uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
     if (!colorHolderPtr || colorHolderPtr < 0x1000) return;
@@ -193,7 +235,6 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     float savedColor[4] = { colorHolder[0], colorHolder[1], colorHolder[2], colorHolder[3] };
     colorHolder[0] = 1.0f; colorHolder[1] = 1.0f; colorHolder[2] = 1.0f; colorHolder[3] = 1.0f;
 
-    const auto& points = g_breadcrumbsMod->points;
     if (!points.empty()) {
         uint32_t color = g_breadcrumbsMod->trailColor;
         float r = ((color >> 16) & 0xFF) / 255.0f;
@@ -203,43 +244,6 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
         char pad[0x58];
 
-        
-        s_tessBegin(tessellator, nullptr, 1, points.size() * 8, 0);
-        for (size_t i = 0; i < points.size(); ++i) {
-            bedrocktools::sdk::Vec3 p = points[i];
-            float bx = std::floor(p.x);
-            float by = p.y + 0.05f; 
-            float bz = std::floor(p.z);
-            
-            float alphaFactor = 0.1f + 0.9f * ((float)(i + 1) / points.size());
-            s_tessColor(tessellator, r, g, b, baseA * alphaFactor * 0.4f); 
-            
-            bedrocktools::sdk::Vec3 v1 = {bx, by, bz};
-            bedrocktools::sdk::Vec3 v2 = {bx + 1.0f, by, bz};
-            bedrocktools::sdk::Vec3 v3 = {bx + 1.0f, by, bz + 1.0f};
-            bedrocktools::sdk::Vec3 v4 = {bx, by, bz + 1.0f};
-            
-            v1.x -= camX; v1.y -= camY; v1.z -= camZ;
-            v2.x -= camX; v2.y -= camY; v2.z -= camZ;
-            v3.x -= camX; v3.y -= camY; v3.z -= camZ;
-            v4.x -= camX; v4.y -= camY; v4.z -= camZ;
-
-            
-            s_tessVertex(tessellator, v1.x, v1.y, v1.z);
-            s_tessVertex(tessellator, v2.x, v2.y, v2.z);
-            s_tessVertex(tessellator, v3.x, v3.y, v3.z);
-            s_tessVertex(tessellator, v4.x, v4.y, v4.z);
-            
-            
-            s_tessVertex(tessellator, v4.x, v4.y, v4.z);
-            s_tessVertex(tessellator, v3.x, v3.y, v3.z);
-            s_tessVertex(tessellator, v2.x, v2.y, v2.z);
-            s_tessVertex(tessellator, v1.x, v1.y, v1.z);
-        }
-        memset(pad, 0, sizeof(pad));
-        s_renderMesh(screenContext, tessellator, matFill, pad);
-
-        
         int lineCount = points.size() * 4; 
         if (points.size() > 1) {
             lineCount += (points.size() - 1); 
@@ -441,5 +445,6 @@ void BreadcrumbsModule::saveConfig(nlohmann::json& j) {
 }
 
 void BreadcrumbsModule::clearTrail() {
+    std::lock_guard<std::mutex> lock(s_pointsMutex);
     points.clear();
 }

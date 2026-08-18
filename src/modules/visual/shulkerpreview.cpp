@@ -174,6 +174,7 @@ struct ShulkerSlotCache {
     std::uint8_t count;
     bool valid;
     bool enchanted;
+    int bundleWeight; // 0..64 for bundles, -1 = not a bundle
 };
 
 struct CachedUiTextures {
@@ -275,6 +276,13 @@ void* getListTag(void* compound, const char (&key)[N]) {
     return nodePayload(node);
 }
 
+template <std::size_t N>
+void* getCompoundTag(void* compound, const char (&key)[N]) {
+    void* node = treeFindNode(compound, key, N - 1);
+    if (!node || nodeType(node) != 10) return nullptr;
+    return nodePayload(node);
+}
+
 int listSize(ListTagLayout* list) {
     if (!list || !list->begin || !list->end) return 0;
     auto difference = reinterpret_cast<std::byte*>(list->end) - reinterpret_cast<std::byte*>(list->begin);
@@ -314,6 +322,15 @@ bool readIntTag(void* compound, const char (&key)[N], int& output) {
         default:
             return false;
     }
+}
+
+// tag -> bundle_weight (0..64), -1 if not a bundle
+int readBundleWeight(void* itemTag) {
+    if (!itemTag) return -1;
+    void* tagCompound = getCompoundTag(itemTag, "tag");
+    if (!tagCompound) return -1;
+    int weight = 0;
+    return readIntTag(tagCompound, "bundle_weight", weight) ? weight : -1;
 }
 
 bool getShulkerColorCode(std::uint16_t id, char& code) {
@@ -515,6 +532,21 @@ void* getMinecraftGame(void* client) {
     return *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(client) + bedrocktools::sdk::offsets::ShulkerPreview::ClientInstanceMinecraftGame);
 }
 
+void* getClientLocalPlayer(void* client) {
+    if (!client) return nullptr;
+    void** vtable = getVtable(client);
+    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::ClientInstanceGetLocalPlayer]) return nullptr;
+    return reinterpret_cast<void* (*)(void*)>(vtable[bedrocktools::sdk::offsets::VTable::ClientInstanceGetLocalPlayer])(client);
+}
+
+unsigned int getItemAnimationFrame(Item* item, void* localPlayer, ItemStackBase* stack) {
+    if (!item || !localPlayer || !stack) return 0;
+    void** vtable = getVtable(item);
+    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::ItemGetAnimationFrameFor]) return 0;
+    using Fn = unsigned int (*)(Item*, void*, int, ItemStackBase*, int);
+    return reinterpret_cast<Fn>(vtable[bedrocktools::sdk::offsets::VTable::ItemGetAnimationFrameFor])(item, localPlayer, 0, stack, 1);
+}
+
 void destroyBaseActorRenderContext(void* context) {
     void** vtable = getVtable(context);
     if (vtable && vtable[0]) reinterpret_cast<void (*)(void*)>(vtable[0])(context);
@@ -535,6 +567,15 @@ void drawDurabilityBar(void* context, ItemStackBase* stack, float x, float y) {
     uiFillRectangle(context, {barX, barX + 13.0f * ratio, barY, barY + 1.0f}, {1.0f - ratio, ratio, 0.0f, 1.0f}, 1.0f);
 }
 
+void drawBundleFullnessBar(void* context, float x, float y, int weight) {
+    float ratio = std::clamp(static_cast<float>(weight) / 64.0f, 0.0f, 1.0f);
+    float barX = x + 2.0f;
+    float barY = y + 13.0f;
+    mce::Color fill = weight >= 64 ? mce::Color{1.0f, 0.40f, 0.40f, 1.0f} : mce::Color{0.40f, 0.40f, 1.0f, 1.0f};
+    uiFillRectangle(context, {barX, barX + 13.0f, barY, barY + 2.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, 1.0f);
+    uiFillRectangle(context, {barX, barX + 13.0f * ratio, barY, barY + 1.0f}, fill, 1.0f);
+}
+
 void drawIcons(void* context, int cacheIndex, float originX, float originY) {
     if (!baseActorRenderContextCtor || !itemRendererRenderGuiItemNew) return;
     void* client = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(context) + bedrocktools::sdk::offsets::ShulkerPreview::MinecraftUIRenderContextClient);
@@ -549,21 +590,29 @@ void drawIcons(void* context, int cacheIndex, float originX, float originY) {
         destroyBaseActorRenderContext(baseActorRenderContext);
         return;
     }
+    void* localPlayer = getClientLocalPlayer(client);
     forEachSlot(originX, originY, [&](int slot, float x, float y) {
         ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
-        if (stack) itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, 0, 0, 0, x + ItemInset, y + ItemInset, 1.0f, 1.0f, 1.0f);
+        if (!stack) return;
+        unsigned int aux = localPlayer ? getItemAnimationFrame(getStackItem(stack), localPlayer, stack) : 0;
+        itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, aux, 0, 0, x + ItemInset, y + ItemInset, 1.0f, 1.0f, 1.0f);
     });
     if (hasEnchantedItem(cacheIndex)) {
         forEachSlot(originX, originY, [&](int slot, float x, float y) {
             ShulkerSlotCache& cache = shulkerCache[cacheIndex][slot];
             if (!cache.enchanted) return;
             ItemStackBase* stack = getCachedStack(cache);
-            if (stack) itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, 0, 1, 0, x + ItemInset, y + ItemInset, 1.0f, 1.0f, 1.0f);
+            if (!stack) return;
+            unsigned int aux = localPlayer ? getItemAnimationFrame(getStackItem(stack), localPlayer, stack) : 0;
+            itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, aux, 1, 1, x + ItemInset, y + ItemInset, 1.0f, 1.0f, 1.0f);
         });
     }
     forEachSlot(originX, originY, [&](int slot, float x, float y) {
-        ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
-        if (stack) drawDurabilityBar(context, stack, x, y);
+        ShulkerSlotCache& cache = shulkerCache[cacheIndex][slot];
+        ItemStackBase* stack = getCachedStack(cache);
+        if (!stack) return;
+        drawDurabilityBar(context, stack, x, y);
+        if (cache.bundleWeight >= 0) drawBundleFullnessBar(context, x, y, cache.bundleWeight);
     });
     destroyBaseActorRenderContext(baseActorRenderContext);
     static const HashedString material("ui_flush");
@@ -630,6 +679,7 @@ void clearCache(int cacheIndex) {
         shulkerCache[cacheIndex][slot].valid = false;
         shulkerCache[cacheIndex][slot].enchanted = false;
         shulkerCache[cacheIndex][slot].count = 0;
+        shulkerCache[cacheIndex][slot].bundleWeight = -1;
     }
 }
 
@@ -660,6 +710,7 @@ bool loadSelectedShulker(ItemStackBase* stack) {
                 cache.count = static_cast<std::uint8_t>(countValue);
                 void* loadedUserData = getStackUserData(asStack(cache.stack));
                 cache.enchanted = hasEnchantmentData(tag) || hasEnchantmentData(loadedUserData);
+                cache.bundleWeight = readBundleWeight(tag);
                 cache.valid = true;
             }
         }

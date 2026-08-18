@@ -63,6 +63,11 @@ inline constexpr std::size_t mTextureOverride = 0x17C;
 inline constexpr std::size_t mCurrentShapeBB = 0x5F0;
 }
 
+namespace Tessellator {
+inline constexpr std::size_t mTextureU = 0x17C;
+inline constexpr std::size_t mTextureV = 0x180;
+}
+
 namespace Block {
 inline constexpr std::size_t mBlockType = 0x68;
 }

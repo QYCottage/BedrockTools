@@ -51,7 +51,33 @@ private:
 };
 
 struct MaterialPtr {
-    void* sharedPtrData[2];
+    void* sharedPtrData[2]{nullptr, nullptr};
+
+    MaterialPtr() = default;
+    MaterialPtr(const MaterialPtr&) = delete;
+    MaterialPtr& operator=(const MaterialPtr&) = delete;
+
+    MaterialPtr(MaterialPtr&& other) noexcept
+        : sharedPtrData{other.sharedPtrData[0], other.sharedPtrData[1]} {
+        other.sharedPtrData[0] = nullptr;
+        other.sharedPtrData[1] = nullptr;
+    }
+
+    MaterialPtr& operator=(MaterialPtr&& other) noexcept {
+        if (this != &other) {
+            sharedPtrData[0] = other.sharedPtrData[0];
+            sharedPtrData[1] = other.sharedPtrData[1];
+            other.sharedPtrData[0] = nullptr;
+            other.sharedPtrData[1] = nullptr;
+        }
+        return *this;
+    }
+
+    ~MaterialPtr() {}
+
+    explicit operator bool() const {
+        return sharedPtrData[0] != nullptr;
+    }
 };
 
 static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) {
@@ -88,7 +114,7 @@ static Tessellator_color_t                s_tessColor = nullptr;
 static Tessellator_vertex_t               s_tessVertex = nullptr;
 static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 
-static MaterialPtr* s_matSelection = nullptr;
+static MaterialPtr s_matSelection;
 static uintptr_t    s_renderMaterialGroup = 0;
 
 static void (*_renderLevel_orig)(void* _this, void* screenContext, void* a3);
@@ -105,12 +131,12 @@ static void s_lightOverlayTickCallback(void* _this) {
     }
 }
 
-static MaterialPtr* getMaterial(const char* name) {
-    if (!s_renderMaterialGroup) return nullptr;
+static MaterialPtr getMaterial(const char* name) {
+    if (!s_renderMaterialGroup) return {};
     HashedString hs(name);
     void** vtable = *reinterpret_cast<void***>(s_renderMaterialGroup);
-    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::RenderMaterialGroup_getMaterial]) return nullptr;
-    using getMat_t = MaterialPtr*(*)(void*, const HashedString*);
+    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::RenderMaterialGroup_getMaterial]) return {};
+    using getMat_t = MaterialPtr(*)(void*, const HashedString*);
     return reinterpret_cast<getMat_t>(vtable[bedrocktools::sdk::offsets::VTable::RenderMaterialGroup_getMaterial])((void*)s_renderMaterialGroup, &hs);
 }
 
@@ -242,7 +268,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
                 ensureMaterials();
 
-                void* matOutline = s_matSelection ? (void*)s_matSelection : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
+                void* matOutline = s_matSelection ? (void*)&s_matSelection : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
                 
                 uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
                 if (colorHolderPtr && colorHolderPtr >= 0x1000) {

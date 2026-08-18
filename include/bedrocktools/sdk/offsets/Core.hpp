@@ -17,7 +17,9 @@ inline constexpr std::size_t MinecraftUIRenderContextFlushImages = 10;
 inline constexpr std::size_t MinecraftUIRenderContextFillRectangle = 16;
 inline constexpr std::size_t MinecraftUIRenderContextGetTexture = 32;
 inline constexpr std::size_t ClientInstanceGetMinecraftGame = 83;
+inline constexpr std::size_t ClientInstanceGetLocalPlayer = 32;
 inline constexpr std::size_t ItemGetMaxDamage = 37;
+inline constexpr std::size_t ItemGetAnimationFrameFor = 120;
 }
 
 namespace ClientInstance {
