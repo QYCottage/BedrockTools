@@ -742,7 +742,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
         // Pick the nearest actor along the look ray. No reach limit is
         // applied: any fetched entity the crosshair touches gets selected.
-        constexpr float kSelectionRayLength = 30.0f;
+        constexpr float kSelectionRayLength = 3.0f;
 
         float bestDist = 1e9f;
         for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
