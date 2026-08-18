@@ -252,6 +252,31 @@ int main() {
         }
     }
 
+    // Regression: a single effect whose id is outside the vanilla 1..64 range
+    // (a modded effect, or a newer vanilla id) used to score negatively and be
+    // rejected entirely, so the HUD stayed on "No Effects" until several
+    // effects were active. A lone valid effect of any id must still show.
+    std::printf("single modded effect (id 65-255) still resolves\n");
+    {
+        Buffer buffer(0x88, 1);
+        buffer.putInt(0, 0x00, 200);     // modded effect id
+        buffer.putInt(0, 0x04, 600);
+        buffer.putInt(0, 0x20, 1);
+        buffer.putByte(0, 0x24, 1);
+        buffer.putByte(0, 0x27, 1);
+        for (std::size_t offset = 0x28; offset + 4 <= buffer.stride; offset += 4) {
+            buffer.putInt(0, offset, static_cast<std::int32_t>(0x40000000 + offset * 7));
+        }
+
+        const auto layout = effects::resolveLayout(buffer.data(), buffer.size());
+        check(layout.valid(), "modded effect: layout resolves");
+        if (layout.valid()) {
+            const auto records = effects::readRecords(buffer.data(), buffer.size(), layout);
+            check(records.size() == 1 && records[0].id == 200,
+                  "modded effect: single modded effect is read");
+        }
+    }
+
     std::printf("garbage buffer is rejected\n");
     {
         std::vector<std::uint8_t> junk(0x88 * 3);

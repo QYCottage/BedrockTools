@@ -134,7 +134,7 @@ inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t 
         if (id == 0) continue;
 
         if (id >= 1 && id <= 64) score += 8;          // vanilla effect id range
-        else if (id >= 65 && id <= 255) score -= 6;   // possible modded id
+        else if (id >= 65 && id <= 255) score += 2;   // possible modded id (still a valid effect id)
         else return -1000;                            // definitely not an id
 
         if (plausibleDuration(duration)) score += 4;
