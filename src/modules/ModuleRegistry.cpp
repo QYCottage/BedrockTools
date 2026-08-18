@@ -38,7 +38,6 @@
 #include "player/autoreq.hpp"
 #include "misc/commentkey.hpp"
 #include "misc/commandhotkey.hpp"
-#include "visual/blockoutline.hpp"
 
 
 ModuleRegistry& ModuleRegistry::get() {
@@ -133,5 +132,4 @@ void registerAllModules() {
     registry.emplace<ForceGlobalRPModule>();
     registry.emplace<CommentKey>();
     registry.emplace<CommandHotkeyModule>();
-    registry.emplace<BlockOutlineModule>();
 }
