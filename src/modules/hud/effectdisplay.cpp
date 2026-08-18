@@ -1,6 +1,8 @@
 #include "effectdisplay.hpp"
 
 #include "effecticons.hpp"
+#include "effectformat.hpp"
+#include "effectlayout.hpp"
 #include "core/Runtime.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/events/EventBus.hpp>
@@ -111,34 +113,6 @@ void ensureEffectIcon(std::uint32_t id) {
     pl::modmenu::registerImage(imageIdFor(id), icon, kIconSize, kIconSize);
 }
 
-std::string romanNumeral(int value) {
-    if (value <= 0) return {};
-    if (value > 20) return std::to_string(value);
-    static constexpr std::array<std::pair<int, const char*>, 5> numerals{{
-        {10, "X"}, {9, "IX"}, {5, "V"}, {4, "IV"}, {1, "I"}
-    }};
-    std::string result;
-    for (const auto& [amount, text] : numerals) {
-        while (value >= amount) {
-            result += text;
-            value -= amount;
-        }
-    }
-    return result;
-}
-
-std::string formatDuration(int ticks) {
-    if (ticks < 0 || ticks >= std::numeric_limits<int>::max() / 4) return "infinite";
-    const int seconds = std::max(0, (ticks + 19) / 20);
-    const int hours = seconds / 3600;
-    const int minutes = (seconds / 60) % 60;
-    const int remaining = seconds % 60;
-    char output[24]{};
-    if (hours > 0) std::snprintf(output, sizeof(output), "%d:%02d:%02d", hours, minutes, remaining);
-    else std::snprintf(output, sizeof(output), "%d:%02d", minutes, remaining);
-    return output;
-}
-
 // ---------------------------------------------------------------------------
 // Time helpers for the countdown colors, progress bars and entrance
 // animations. All animations run off a steady clock so they stay smooth
@@ -169,121 +143,58 @@ std::uint32_t withAlpha(std::uint32_t color, float alpha) {
     return (a << 24) | (color & 0x00FFFFFF);
 }
 
-int secondsRemaining(int ticks) {
-    if (ticks < 0) return -1;
-    return std::max(0, (ticks + 19) / 20);
-}
+namespace effectlayout = bedrocktools::hud::effects;
 
-// Colors the remaining-time text by urgency. Below ten seconds the text
-// pulses so an about-to-expire effect is hard to miss. `pulsePhase` is a
-// small accumulated phase (radians), not an absolute timestamp, so the
-// oscillation stays smooth and precise.
-std::uint32_t durationColor(int ticks, float pulsePhase, float& alphaOut) {
-    alphaOut = 1.0f;
-    const int seconds = secondsRemaining(ticks);
-    if (seconds < 0) return 0xFF7FE8E0;      // infinite
-    if (seconds >= 60) return 0xFFD8D8D8;    // plenty of time
-    if (seconds >= 10) return 0xFFFFC94D;    // running out
-    alphaOut = 0.55f + 0.45f * (0.5f + 0.5f * std::sin(pulsePhase));
-    return 0xFFFF5A5A;                       // about to expire
-}
+// Shared formatting helpers (level, duration, urgency color).
+using bedrocktools::hud::effects::durationColor;
+using bedrocktools::hud::effects::formatDuration;
+using bedrocktools::hud::effects::isInfiniteDuration;
+using bedrocktools::hud::effects::levelSuffix;
 
-struct LayoutCandidate {
-    std::size_t stride = 0;
-    std::size_t amplifierOffset = 0;
-};
+// Amplifier value meaning "the level could not be determined". The row then
+// shows only the effect name, which is far better than a wrong level.
+constexpr int kUnknownAmplifier = effectlayout::kUnknownAmplifier;
 
-bool plausibleDuration(int ticks) {
-    return ticks == -1 || (ticks >= 0 && ticks < 2'000'000'000);
-}
+// Resolves (and caches) the MobEffectInstance layout for the running game
+// build, then reads the active effects out of the component's vector.
+//
+// The layout is re-validated on every read and only cached once it has been
+// confirmed a few times in a row, so a wrong guess made on a half-initialized
+// component cannot stick around for the rest of the session.
+struct LayoutCache {
+    effectlayout::InstanceLayout layout{};
+    int confirmations = 0;
 
-bool plausibleAmplifier(int amplifier) {
-    return amplifier >= 0 && amplifier <= 255;
-}
+    // Number of consecutive confirmations after which the cached layout is
+    // trusted enough to survive a single contradicting read.
+    static constexpr int kTrustedConfirmations = 4;
 
-bool isActiveEffect(std::uint32_t id, int duration, int amplifier) {
-    return id != 0 && id <= 255 && duration != 0 && plausibleAmplifier(amplifier);
-}
-
-int scoreLayout(std::uintptr_t begin, std::size_t count, const LayoutCandidate& layout) {
-    int score = 0;
-    int active = 0;
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto address = begin + index * layout.stride;
-        const auto id = *reinterpret_cast<const std::uint32_t*>(address);
-        const auto duration = *reinterpret_cast<const int*>(address + 4);
-        const auto amplifier = *reinterpret_cast<const int*>(address + layout.amplifierOffset);
-        if (id >= 1 && id <= 64) score += 5;
-        else if (id != 0) score -= 25;
-        if (plausibleDuration(duration)) score += 2;
-        else score -= 8;
-        if (plausibleAmplifier(amplifier)) score += 2;
-        else score -= 8;
-        if (id == static_cast<std::uint32_t>(index) || id == static_cast<std::uint32_t>(index + 1)) ++score;
-        if (isActiveEffect(id, duration, amplifier)) ++active;
-    }
-    if (active > 0) score += active * 4;
-    else score -= 6;
-    return score;
-}
-
-std::vector<EffectDisplayModule::ActiveEffect> collectEffects(
-    std::uintptr_t begin,
-    std::size_t count,
-    const LayoutCandidate& layout
-) {
-    std::vector<EffectDisplayModule::ActiveEffect> result;
-    result.reserve(std::min<std::size_t>(count, 36));
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto address = begin + index * layout.stride;
-        const auto id = *reinterpret_cast<const std::uint32_t*>(address);
-        const auto duration = *reinterpret_cast<const int*>(address + 4);
-        const auto amplifier = *reinterpret_cast<const int*>(address + layout.amplifierOffset);
-        if (!isActiveEffect(id, duration, amplifier)) continue;
-        result.push_back({id, duration, amplifier});
-    }
-    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
-        return left.id < right.id;
-    });
-    result.erase(std::unique(result.begin(), result.end(), [](const auto& left, const auto& right) {
-        return left.id == right.id;
-    }), result.end());
-    return result;
-}
-
-// Windows/MSVC MobEffectInstance is 0x88 because std::function is 64 bytes
-// there. Android/libc++ uses a 32-byte std::function, so the same struct is
-// 0x68. Scan every 8-byte stride instead of a short Windows-only list.
-LayoutCandidate detectLayout(std::uintptr_t begin, std::size_t bytes) {
-    static LayoutCandidate cached{};
-    if (cached.stride != 0 && bytes % cached.stride == 0) {
-        const auto count = bytes / cached.stride;
-        if (count && count <= 128 && scoreLayout(begin, count, cached) > 0) return cached;
-    }
-
-    LayoutCandidate best{};
-    int bestScore = 0;
-    constexpr std::array<std::size_t, 7> amplifierOffsets{{0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28}};
-
-    for (std::size_t stride = 0x28; stride <= 0xC0; stride += 8) {
-        if (bytes % stride != 0) continue;
-        const auto count = bytes / stride;
-        if (!count || count > 128) continue;
-
-        for (const auto amplifierOffset : amplifierOffsets) {
-            if (amplifierOffset + sizeof(int) > stride) continue;
-            const LayoutCandidate candidate{stride, amplifierOffset};
-            const int score = scoreLayout(begin, count, candidate);
-            if (score > bestScore) {
-                best = candidate;
-                bestScore = score;
-            }
+    const effectlayout::InstanceLayout* resolve(const std::uint8_t* data, std::size_t bytes) {
+        // Fast path: the cached layout still explains this buffer. This is a
+        // cheap re-check, not a full search, because it runs every tick.
+        if (effectlayout::validateLayout(data, bytes, layout)) {
+            if (confirmations < kTrustedConfirmations * 2) ++confirmations;
+            return &layout;
         }
-    }
 
-    if (best.stride != 0) cached = best;
-    return best;
-}
+        // The buffer no longer matches. Search again; a well-confirmed layout
+        // survives one bad read (a torn vector during a resize, for example).
+        const auto fresh = effectlayout::resolveLayout(data, bytes);
+        if (!fresh.valid()) {
+            if (confirmations >= kTrustedConfirmations) {
+                --confirmations;
+                return nullptr;   // skip this tick, keep the learned layout
+            }
+            layout = {};
+            confirmations = 0;
+            return nullptr;
+        }
+
+        layout = fresh;
+        confirmations = 1;
+        return &layout;
+    }
+};
 
 std::vector<EffectDisplayModule::ActiveEffect> readComponent(const MobEffectsComponent& component) {
     if (!component.begin || component.end < component.begin || component.capacity < component.end) return {};
@@ -291,9 +202,32 @@ std::vector<EffectDisplayModule::ActiveEffect> readComponent(const MobEffectsCom
     const std::size_t bytes = component.end - component.begin;
     if (!bytes || bytes > 64 * 1024) return {};
 
-    const auto layout = detectLayout(component.begin, bytes);
-    if (layout.stride == 0) return {};
-    return collectEffects(component.begin, bytes / layout.stride, layout);
+    static LayoutCache cache;
+    const auto* data = reinterpret_cast<const std::uint8_t*>(component.begin);
+    const auto* layout = cache.resolve(data, bytes);
+    if (!layout) return {};
+
+    const auto records = effectlayout::readRecords(data, bytes, *layout);
+
+    std::vector<EffectDisplayModule::ActiveEffect> result;
+    result.reserve(records.size());
+    for (const auto& record : records) {
+        result.push_back({
+            record.id,
+            record.durationTicks,
+            layout->hasAmplifier ? record.amplifier : kUnknownAmplifier
+        });
+    }
+
+    // Effects are unique per entity; keep them in a stable id order so the HUD
+    // rows do not jump around between ticks.
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        return left.id < right.id;
+    });
+    result.erase(std::unique(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        return left.id == right.id;
+    }), result.end());
+    return result;
 }
 
 void effectTickCallback(bedrocktools::sdk::Player* player) {
@@ -355,18 +289,13 @@ void EffectDisplayModule::updateEffects(bedrocktools::sdk::Player* player) {
     std::lock_guard lock(m_mutex);
 
     // Detect any change in the active effect set so the panel can re-animate.
+    // Both entries are sorted by id, so a straight pairwise comparison is
+    // enough; the level is part of the identity, so upgrading Speed I to
+    // Speed II counts as a change.
     bool changed = next.size() != m_effects.size();
     if (!changed) {
-        bool seen[256] = {};
-        bool nextSeen[256] = {};
-        for (const auto& effect : m_effects) {
-            if (effect.id < 256) seen[effect.id] = true;
-        }
-        for (const auto& effect : next) {
-            if (effect.id < 256) nextSeen[effect.id] = true;
-        }
-        for (int id = 1; id < 256; ++id) {
-            if (seen[id] != nextSeen[id]) {
+        for (std::size_t i = 0; i < next.size(); ++i) {
+            if (next[i].id != m_effects[i].id || next[i].amplifier != m_effects[i].amplifier) {
                 changed = true;
                 break;
             }
@@ -375,16 +304,23 @@ void EffectDisplayModule::updateEffects(bedrocktools::sdk::Player* player) {
 
     // Track appearance time and longest observed duration per effect. The max
     // duration is the reference for the remaining-time bar and is relearned
-    // whenever an effect goes missing for a moment (new potion, etc.).
+    // whenever the effect goes missing for a moment, its level changes, or its
+    // duration jumps back up (a fresh potion of the same effect).
     for (const auto& effect : next) {
         auto it = m_timing.find(effect.id);
         if (it == m_timing.end()) {
-            m_timing.emplace(effect.id, EffectTiming{now, now, std::max(effect.durationTicks, 0)});
-        } else {
-            it->second.lastSeenAt = now;
-            if (effect.durationTicks > it->second.maxDurationTicks) {
-                it->second.maxDurationTicks = effect.durationTicks;
-            }
+            m_timing.emplace(effect.id, EffectTiming{now, now, std::max(effect.durationTicks, 0), effect.amplifier});
+            continue;
+        }
+
+        it->second.lastSeenAt = now;
+        if (it->second.amplifier != effect.amplifier) {
+            // A different potency is effectively a new effect instance.
+            it->second.amplifier = effect.amplifier;
+            it->second.appearAt = now;
+            it->second.maxDurationTicks = std::max(effect.durationTicks, 0);
+        } else if (effect.durationTicks > it->second.maxDurationTicks) {
+            it->second.maxDurationTicks = std::max(effect.durationTicks, 0);
         }
     }
     for (auto it = m_timing.begin(); it != m_timing.end();) {
@@ -419,9 +355,20 @@ void EffectDisplayModule::onFrame() {
 
     // HUD-editor preview: a believable spread of effects.
     if (effects.empty() && m_preview) {
-        effects = {{1, 68 * 20, 1}, {12, 191 * 20, 0}, {13, 50 * 20, 0}, {14, 213 * 20, 0}};
+        effects = {
+            {1, 68 * 20, 1},                                  // Speed II
+            {12, 191 * 20, 0},                                // Fire Resistance I
+            {13, 50 * 20, 2},                                 // Water Breathing III
+            {14, std::numeric_limits<int>::max(), 0},         // Invisibility, endless
+        };
         for (const auto& effect : effects) {
-            timing.emplace(effect.id, EffectTiming{now - std::chrono::seconds(1), now, effect.durationTicks * 2});
+            const int reference = isInfiniteDuration(effect.durationTicks)
+                ? effect.durationTicks
+                : effect.durationTicks * 2;
+            timing.emplace(
+                effect.id,
+                EffectTiming{now - std::chrono::seconds(1), now, reference, effect.amplifier}
+            );
         }
     }
 
@@ -550,8 +497,8 @@ void EffectDisplayModule::onFrame() {
 
         std::string name = definitionFor(effect.id).name;
         if (name.empty()) name = "Unknown Effect";
-        if (m_showLevel && effect.amplifier >= 0) {
-            const auto level = romanNumeral(effect.amplifier + 1);
+        if (m_showLevel) {
+            const auto level = levelSuffix(effect.amplifier, m_romanLevels, m_hideLevelOne);
             if (!level.empty()) name += " " + level;
         }
         const std::string duration = formatDuration(effect.durationTicks);
@@ -586,9 +533,12 @@ void EffectDisplayModule::onFrame() {
 
         // Remaining-time progress bar, tinted with the effect's own color.
         if (m_showProgressBar) {
+            // Endless effects always show a full bar; timed ones are measured
+            // against the longest duration seen for this exact effect+level.
             float fraction = 1.0f;
             const auto it = timing.find(effect.id);
-            if (it != timing.end() && it->second.maxDurationTicks > 0 && effect.durationTicks >= 0) {
+            if (!isInfiniteDuration(effect.durationTicks) &&
+                it != timing.end() && it->second.maxDurationTicks > 0) {
                 fraction = std::clamp(
                     static_cast<float>(effect.durationTicks) / static_cast<float>(it->second.maxDurationTicks),
                     0.0f,
@@ -636,6 +586,8 @@ void EffectDisplayModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_showBackground")) m_showBackground = j["m_showBackground"].get<bool>();
     if (j.contains("m_showIcons")) m_showIcons = j["m_showIcons"].get<bool>();
     if (j.contains("m_showLevel")) m_showLevel = j["m_showLevel"].get<bool>();
+    if (j.contains("m_romanLevels")) m_romanLevels = j["m_romanLevels"].get<bool>();
+    if (j.contains("m_hideLevelOne")) m_hideLevelOne = j["m_hideLevelOne"].get<bool>();
     if (j.contains("m_showProgressBar")) m_showProgressBar = j["m_showProgressBar"].get<bool>();
     if (j.contains("m_animate")) m_animate = j["m_animate"].get<bool>();
     if (j.contains("m_preview")) m_preview = j["m_preview"].get<bool>();
@@ -653,6 +605,8 @@ void EffectDisplayModule::saveConfig(nlohmann::json& j) {
     j["m_showBackground"] = m_showBackground;
     j["m_showIcons"] = m_showIcons;
     j["m_showLevel"] = m_showLevel;
+    j["m_romanLevels"] = m_romanLevels;
+    j["m_hideLevelOne"] = m_hideLevelOne;
     j["m_showProgressBar"] = m_showProgressBar;
     j["m_animate"] = m_animate;
     j["m_preview"] = m_preview;

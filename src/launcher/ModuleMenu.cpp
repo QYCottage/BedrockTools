@@ -24,6 +24,11 @@ static const ExplicitDependency kExplicitDependencies[] = {
     // indicator itself is enabled.
     {"indicatorDefaultColor", "hitboxIndicator"},
     {"indicatorActiveColor", "hitboxIndicator"},
+
+    // Effect Display: how the level is rendered only matters while the level
+    // is shown at all.
+    {"m_romanLevels", "m_showLevel"},
+    {"m_hideLevelOne", "m_showLevel"},
 };
 
 static const char* explicitParentFor(const std::string& key) {
@@ -248,9 +253,13 @@ void registerModulesWithLauncher() {
 
                 for (auto& entry : configs) {
             std::string k = entry.key;
-            if (entry.type != pl::modmenu::ConfigType::Toggle) {
+            // A toggle can still be owned by another toggle, but only through
+            // an explicit mapping: the name-prefix heuristic below would
+            // otherwise nest unrelated toggles under each other.
+            const char* explicitParent = explicitParentFor(k);
+            if (entry.type != pl::modmenu::ConfigType::Toggle || explicitParent != nullptr) {
                 std::string bestParent = "";
-                if (const char* explicitParent = explicitParentFor(k)) {
+                if (explicitParent) {
                     for (const auto& parentCandidate : configs) {
                         if (parentCandidate.type == pl::modmenu::ConfigType::Toggle &&
                             parentCandidate.key == explicitParent) {
@@ -259,7 +268,7 @@ void registerModulesWithLauncher() {
                         }
                     }
                 }
-                if (bestParent.empty()) {
+                if (bestParent.empty() && entry.type != pl::modmenu::ConfigType::Toggle) {
                     for (const auto& parentCandidate : configs) {
                         if (parentCandidate.type == pl::modmenu::ConfigType::Toggle) {
                             std::string pKey = parentCandidate.key;
