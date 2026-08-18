@@ -214,6 +214,44 @@ int main() {
         }
     }
 
+    // Regression: Bedrock keeps a "no effect" placeholder (id 0) in the vector
+    // when an effect slot has just been removed or expired. The resolver must
+    // skip those the same way readRecords() does, otherwise a single placeholder
+    // makes the whole HUD stop reading effects (they appear "stuck"/untracked).
+    std::printf("id-0 no-effect placeholders are skipped, not fatal\n");
+    {
+        // Two real effects plus one id-0 placeholder whose tail is garbage, so
+        // only the id-0 skip (not a lucky tail) can make this resolve.
+        Buffer buffer(0x88, 3);
+        const std::uint32_t ids[]{1, 10, 0};
+        const std::int32_t durations[]{3600, 900, 0};
+        const std::int32_t amplifiers[]{1, 0, 0};
+        for (std::size_t i = 0; i < 3; ++i) {
+            buffer.putInt(i, 0x00, static_cast<std::int32_t>(ids[i]));
+            buffer.putInt(i, 0x04, durations[i]);
+            buffer.putInt(i, 0x20, amplifiers[i]);
+            buffer.putByte(i, 0x24, 1);
+            buffer.putByte(i, 0x27, 1);
+            for (std::size_t offset = 0x28; offset + 4 <= buffer.stride; offset += 4) {
+                // id 0 placeholder gets garbage tail bytes.
+                buffer.putInt(i, offset, static_cast<std::int32_t>(ids[i] == 0 ? 0xDEADBEEF : (0x40000000 + offset * 7 + i)));
+            }
+        }
+        const auto layout = effects::resolveLayout(buffer.data(), buffer.size());
+        check(layout.valid(), "id-0 placeholder: layout still resolves");
+        if (layout.valid()) {
+            check(layout.stride == 0x88, "id-0 placeholder: stride is the real one");
+            const auto records = effects::readRecords(buffer.data(), buffer.size(), layout);
+            check(records.size() == 2, "id-0 placeholder: only the 2 real effects are read");
+            if (records.size() == 2) {
+                check(records[0].id == 1 && records[1].id == 10,
+                      "id-0 placeholder: Speed and Regeneration survive, placeholder skipped");
+            }
+            check(effects::validateLayout(buffer.data(), buffer.size(), layout),
+                  "id-0 placeholder: cached layout revalidates");
+        }
+    }
+
     std::printf("garbage buffer is rejected\n");
     {
         std::vector<std::uint8_t> junk(0x88 * 3);
