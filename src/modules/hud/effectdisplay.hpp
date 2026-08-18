@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace bedrocktools::sdk { class Player; }
+namespace bedrocktools::hooks { struct State; }
 
 class EffectDisplayModule final : public Module {
 public:
@@ -47,6 +48,11 @@ public:
 
 private:
     void registerResources();
+    void installVanillaBarHook();
+
+    // Detour used to suppress the vanilla status-effect (potion) bar. It is a
+    // static member so it can read private state (m_hideVanillaHud) directly.
+    static void renderPotionEffectsDetour(void* self, void* renderContext, void* screenView, float posX, float posY);
 
     std::mutex m_mutex;
     std::vector<ActiveEffect> m_effects;
@@ -62,6 +68,11 @@ private:
     float hudPosY = 70.0f;
     bool isHudModule = true;
 
+    // While enabled, the vanilla status-effect (potion) bar of the game is not
+    // drawn, so it can never overlap this module's own effect panel. This only
+    // has an effect while the module itself is enabled; it defaults to true.
+    bool m_hideVanillaHud = true;
+
     float m_scale = 1.0f;
     float m_width = 210.0f;
     float m_backgroundOpacity = 0.82f;
@@ -74,4 +85,10 @@ private:
     bool m_animate = true;
     bool m_preview = false;
     int m_maxVisible = 36;
+
+    // Vanilla potion-bar hook (installed once in onInit). The hook itself is
+    // kept installed for the whole session; the detour decides per-frame
+    // whether to skip the vanilla draw call.
+    bedrocktools::hooks::State* m_vanillaBarHook = nullptr;
+    bool m_vanillaBarHooked = false;
 };

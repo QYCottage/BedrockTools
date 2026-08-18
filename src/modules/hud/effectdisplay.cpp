@@ -4,8 +4,10 @@
 #include "effectformat.hpp"
 #include "effectlayout.hpp"
 #include "core/Runtime.hpp"
+#include "core/memory/Hooks.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/events/EventBus.hpp>
+#include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/world/Actor.hpp>
 #include <entt/entt.hpp>
 #include <pl/ModMenu.hpp>
@@ -234,7 +236,57 @@ void effectTickCallback(bedrocktools::sdk::Player* player) {
     if (g_effectDisplay && g_effectDisplay->enabled) g_effectDisplay->updateEffects(player);
 }
 
+// ---------------------------------------------------------------------------
+// Vanilla potion-bar hook
+// ---------------------------------------------------------------------------
+// Bedrock draws the built-in status-effect (potion) bar from
+// `HudScreen::_renderStatusEffects(MinecraftUIRenderContext&, ScreenView&,
+// float, float)`. Hooking it lets this module skip the draw call entirely, so
+// the vanilla bar cannot overlap this module's own panel.
+//
+// The address is located through `SignatureId::RenderPotionEffects` (see
+// src/core/memory/Signatures.cpp). The pattern registered there is a clearly
+// marked placeholder: until it is replaced with the real ARM64 byte pattern of
+// `_renderStatusEffects` for the target game build, `resolve()` returns 0,
+// `installVanillaBarHook()` bails out quietly and the vanilla bar stays
+// visible. The module itself remains fully functional either way.
+//
+// The prototype below matches Bedrock's `_renderStatusEffects` signature on
+// the builds the rest of this codebase targets. If a different build renames
+// or re-shapes this function, only the prototype (and the pattern) need to be
+// updated here — the early-return logic stays the same.
+using RenderPotionEffectsFn = void (*)(void* self, void* renderContext, void* screenView, float posX, float posY);
+
+RenderPotionEffectsFn g_origRenderPotionEffects = nullptr;
+
 } // namespace
+
+void EffectDisplayModule::renderPotionEffectsDetour(void* self, void* renderContext, void* screenView, float posX, float posY) {
+    // Suppress the vanilla potion bar while the module is enabled and the
+    // "hide vanilla HUD" option is active. Return immediately so the game
+    // never reaches its own drawing code for the bar.
+    if (g_effectDisplay && g_effectDisplay->enabled && g_effectDisplay->m_hideVanillaHud) {
+        return;
+    }
+
+    // Otherwise behave exactly like the original function.
+    if (g_origRenderPotionEffects) {
+        g_origRenderPotionEffects(self, renderContext, screenView, posX, posY);
+    }
+}
+
+void EffectDisplayModule::installVanillaBarHook() {
+    if (m_vanillaBarHooked) return;
+
+    const auto address = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::RenderPotionEffects);
+    if (!address) return;   // placeholder pattern / build mismatch: skip quietly
+
+    m_vanillaBarHook = bedrocktools::hooks::install(
+        reinterpret_cast<void*>(address),
+        reinterpret_cast<void*>(&EffectDisplayModule::renderPotionEffectsDetour),
+        reinterpret_cast<void**>(&g_origRenderPotionEffects));
+    m_vanillaBarHooked = m_vanillaBarHook != nullptr;
+}
 
 EffectDisplayModule::EffectDisplayModule()
     : Module("Effect Display", "Shows every active status effect with its icon, level, and remaining duration.") {
@@ -243,6 +295,9 @@ EffectDisplayModule::EffectDisplayModule()
 
 EffectDisplayModule::~EffectDisplayModule() {
     if (g_effectDisplay == this) g_effectDisplay = nullptr;
+    if (m_vanillaBarHook) bedrocktools::hooks::remove(m_vanillaBarHook);
+    m_vanillaBarHook = nullptr;
+    m_vanillaBarHooked = false;
 }
 
 void EffectDisplayModule::registerResources() {
@@ -263,6 +318,7 @@ void EffectDisplayModule::registerResources() {
 
 void EffectDisplayModule::onInit() {
     registerResources();
+    installVanillaBarHook();
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([](auto& event) {
         effectTickCallback(event.player);
     });
@@ -589,6 +645,7 @@ void EffectDisplayModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_romanLevels")) m_romanLevels = j["m_romanLevels"].get<bool>();
     if (j.contains("m_hideLevelOne")) m_hideLevelOne = j["m_hideLevelOne"].get<bool>();
     if (j.contains("m_showProgressBar")) m_showProgressBar = j["m_showProgressBar"].get<bool>();
+    if (j.contains("m_hideVanillaHud")) m_hideVanillaHud = j["m_hideVanillaHud"].get<bool>();
     if (j.contains("m_animate")) m_animate = j["m_animate"].get<bool>();
     if (j.contains("m_preview")) m_preview = j["m_preview"].get<bool>();
     if (j.contains("m_maxVisible")) m_maxVisible = j["m_maxVisible"].get<int>();
@@ -608,6 +665,7 @@ void EffectDisplayModule::saveConfig(nlohmann::json& j) {
     j["m_romanLevels"] = m_romanLevels;
     j["m_hideLevelOne"] = m_hideLevelOne;
     j["m_showProgressBar"] = m_showProgressBar;
+    j["m_hideVanillaHud"] = m_hideVanillaHud;
     j["m_animate"] = m_animate;
     j["m_preview"] = m_preview;
     j["m_maxVisible"] = m_maxVisible;

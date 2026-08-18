@@ -18,6 +18,9 @@ enum class SignatureId : std::uint16_t {
     SetTime,
     EduMultiplayer,
     HudCursor,
+    // HudScreen::_renderStatusEffects — draws the vanilla status-effect
+    // (potion) bar in the HUD. Used by the Effect Display module to hide it.
+    RenderPotionEffects,
     LevelInit,
     LevelDtor,
     ActorManagerList,
