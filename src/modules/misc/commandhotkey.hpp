@@ -3,6 +3,7 @@
 #include "../Module.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -20,7 +21,8 @@ public:
         float width = 110.0f;
         float height = 40.0f;
         float textSize = 20.0f;
-        std::uint32_t textColor = 0xFFFFFF;
+        // Launcher keycap text color.
+        std::uint32_t textColor = 0x373737;
         std::string label;
     };
 
@@ -39,9 +41,14 @@ public:
 
 private:
     std::array<Binding, MaxCommands> m_commands{};
-    float m_buttonOpacity = 0.78f;
-    float m_buttonRadius = 7.0f;
-    std::uint32_t m_buttonColor = 0x202020;
+    // Launcher on-screen button look ("keycap" preset used by the launcher's
+    // own overlay buttons): light gray face, dark 2px border, tiny corner
+    // radius and 0.85 alpha.
+    float m_buttonOpacity = 0.85f;
+    float m_buttonRadius = 2.0f;
+    std::uint32_t m_buttonColor = 0x8B8B8B;
+    std::uint32_t m_buttonBorderColor = 0x373737;
+    float m_buttonBorderWidth = 2.0f;
 
     // HUD editor integration - group position
     float hudPosX = 0.0f;
@@ -51,10 +58,14 @@ private:
     // per-command drag via HUD edit mode (inside mod)
     bool m_hudEditMode = false;
     int m_draggingIndex = -1;
+    // Short pressed highlight, mirroring the launcher's active button state.
+    int m_pressedIndex = -1;
+    std::chrono::steady_clock::time_point m_pressedTime{};
     float m_dragOffsetX = 0.0f;
     float m_dragOffsetY = 0.0f;
 
     void execute(std::size_t index);
+    bool isPressed(std::size_t index) const;
     void applyDefaultBindings();
     void normalizeBindings();
 

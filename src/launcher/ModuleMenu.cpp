@@ -195,6 +195,10 @@ void registerModulesWithLauncher() {
                     maxVal = 5.0f;
                 } else if (kLower == "borderwidth") {
                     maxVal = 4.0f;
+                } else if (kLower.find("borderwidth") != std::string::npos) {
+                    // Outline thickness in pixels (e.g. the launcher-style
+                    // border around the Command Hotkey buttons).
+                    maxVal = 8.0f;
                 } else if (kLower.find("width") != std::string::npos) {
                     maxVal = 1000.0f;
                 } else if (kLower.find("position") != std::string::npos ||
