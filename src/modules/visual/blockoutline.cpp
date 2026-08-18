@@ -1,282 +1,329 @@
 #include "blockoutline.hpp"
 
-#include <bedrocktools/memory/Signatures.hpp>
-#include "core/memory/Hooks.hpp"
-#include <bedrocktools/sdk/Offsets.hpp>
-#include <bedrocktools/sdk/Types.hpp>
 #include <bedrocktools/events/EventBus.hpp>
+#include <bedrocktools/events/LocalPlayerTickEvent.hpp>
+#include <bedrocktools/memory/Signatures.hpp>
+#include <bedrocktools/sdk/Memory.hpp>
+#include <bedrocktools/sdk/Offsets.hpp>
+#include <bedrocktools/sdk/world/Actor.hpp>
+#include <bedrocktools/sdk/world/Level.hpp>
+
+#include "core/memory/Hooks.hpp"
 
 #include <algorithm>
-#include <cstdio>
-#include <vector>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
-#include <string>
-#include <utility>
+#include <vector>
 
 namespace {
 
-using TessBeginFn = void (*)(void*, void*, int, int, int);
-using TessColorFn = void (*)(void*, float, float, float, float);
-using TessVertexFn = void (*)(void*, float, float, float);
+using namespace bedrocktools;
+using bedrocktools::blockoutline::BlockHitSnapshot;
+
+using TessellatorBeginFn = void (*)(void*, void*, int, int, int);
+using TessellatorColorFn = void (*)(void*, float, float, float, float);
+using TessellatorVertexFn = void (*)(void*, float, float, float);
 using RenderMeshFn = void (*)(void*, void*, void*, char*);
-using GetHitResultFn = void* (*)(void*);
+using RenderLevelFn = void (*)(void*, void*, void*);
 
-struct HashedString {
-    uint64_t hash = 0;
-    std::string string;
-    const HashedString* lastMatch = nullptr;
-
-    explicit HashedString(const char* value) : string(value ? value : "") {
-        constexpr uint64_t offset = 0xCBF29CE484222325ULL;
-        constexpr uint64_t prime = 0x100000001B3ULL;
-        hash = offset;
-        for (unsigned char c : string)
-            hash = static_cast<uint64_t>(c) ^ (prime * hash);
-    }
-};
-
-// This is the same small smart-pointer representation already used by the
-// working ChunkBorder/Hitbox renderers in this project. We deliberately do
-// not construct or destroy the game's material; the game owns it.
 struct MaterialPtr {
-    void* data[2] = {nullptr, nullptr};
+    void* data[2]{nullptr, nullptr};
     explicit operator bool() const { return data[0] != nullptr; }
 };
 
+struct HashedString {
+    uint64_t hash = 0;
+    std::string value;
+    const HashedString* lastMatch = nullptr;
+
+    explicit HashedString(const char* text) : value(text ? text : "") {
+        constexpr uint64_t offset = 0xCBF29CE484222325ULL;
+        constexpr uint64_t prime = 0x100000001B3ULL;
+        hash = offset;
+        for (unsigned char c : value)
+            hash = c ^ (prime * hash);
+    }
+};
+
 static BlockOutlineModule* g_module = nullptr;
-static TessBeginFn g_tessBegin = nullptr;
-static TessColorFn g_tessColor = nullptr;
-static TessVertexFn g_tessVertex = nullptr;
+static TessellatorBeginFn g_begin = nullptr;
+static TessellatorColorFn g_color = nullptr;
+static TessellatorVertexFn g_vertex = nullptr;
 static RenderMeshFn g_renderMesh = nullptr;
-static GetHitResultFn g_getHitResult = nullptr;
-static void* g_localPlayer = nullptr;
 static uintptr_t g_materialGroup = 0;
-static MaterialPtr g_selectionMaterial;
+static MaterialPtr g_fillMaterial;
+static RenderLevelFn g_renderLevelOriginal = nullptr;
 
-static void (*g_renderLevelOriginal)(void*, void*, void*) = nullptr;
+static bool validPtr(uintptr_t p) {
+    return p >= 0x10000ULL;
+}
 
-static uintptr_t resolveADRP(uint32_t* code, size_t count, uint32_t reg) {
-    for (size_t i = 0; i < count; ++i) {
-        const uint32_t insn = code[i];
-        if ((insn & 0x1F) != reg) continue;
+// Resolves the address a function computes with ADRP + ADD (immediate).
+// Mirrors the proven helper shared by the other render modules (hitbox,
+// breadcrumbs, chunkborder, lightoverlay): scans up to `count` instructions
+// for an ADRP writing targetReg, then the following ADD (immediate) to the
+// same register, and returns the computed page + imm12 address.
+static uintptr_t resolveADRP(uint32_t* insns, size_t count, uint32_t targetReg) {
+    for (size_t i = 0; i < count; i++) {
+        uint32_t insn = insns[i];
+        if ((insn & 0x1F) != targetReg) continue;
 
         if ((insn & 0x9F000000) == 0x90000000) {
-            const uintptr_t page =
-                ((uintptr_t)&code[i] & ~0xFFFULL) +
-                ((int64_t)((uint64_t)(((insn >> 3) & 0x1FFFFC) |
-                                      ((insn >> 29) & 3)) << 43) >> 31);
+            uintptr_t page = ((uintptr_t)&insns[i] & ~0xFFFULL)
+                           + ((int64_t)((uint64_t)((insn >> 3) & 0x1FFFFC | (insn >> 29) & 3) << 43) >> 31);
 
-            for (size_t j = i + 1; j < count; ++j) {
-                const uint32_t add = code[j];
+            for (size_t j = i + 1; j < count; j++) {
+                uint32_t add = insns[j];
                 if ((add & 0xFF000000) == 0x91000000 &&
-                    ((add >> 5) & 0x1F) == reg &&
-                    (add & 0x1F) == reg) {
+                    ((add >> 5) & 0x1F) == targetReg &&
+                    (add & 0x1F) == targetReg) {
                     uint32_t imm12 = (add >> 10) & 0xFFF;
                     if (add & 0x400000) imm12 <<= 12;
                     return page + imm12;
                 }
-                if ((add & 0x1F) == reg) break;
+                if ((add & 0x1F) == targetReg) break;
             }
         }
-
         if ((insn & 0x9F000000) == 0x10000000) {
-            const int64_t imm =
-                (int64_t)((uint64_t)(((insn >> 3) & 0x1FFFFC) |
-                                     ((insn >> 29) & 3)) << 43) >> 43;
-            return (uintptr_t)&code[i] + imm;
+            int64_t imm = (int64_t)((uint64_t)((insn >> 3) & 0x1FFFFC | (insn >> 29)) << 43) >> 43;
+            return (uintptr_t)&insns[i] + imm;
         }
     }
     return 0;
 }
 
 static MaterialPtr getMaterial(const char* name) {
-    if (!g_materialGroup || !name) return {};
-
+    if (!validPtr(g_materialGroup)) return {};
     void** vtable = *reinterpret_cast<void***>(g_materialGroup);
-    if (!vtable || !vtable[2]) return {};
-
+    if (!validPtr(reinterpret_cast<uintptr_t>(vtable)) || !vtable[2] ||
+        !validPtr(reinterpret_cast<uintptr_t>(vtable[2]))) return {};
     using GetMaterialFn = MaterialPtr (*)(void*, const HashedString*);
+    HashedString key(name);
     return reinterpret_cast<GetMaterialFn>(vtable[2])(
-        reinterpret_cast<void*>(g_materialGroup), HashedString(name));
+        reinterpret_cast<void*>(g_materialGroup), &key);
 }
 
-static bool validPtr(const void* p) {
-    return reinterpret_cast<uintptr_t>(p) >= 0x10000ULL;
-}
-
-static uint32_t rgbColor(uint32_t base, float speed) {
-    if (!g_module || !g_module->rgb) return base;
-
-    static float hue = 0.0f;
-    hue += 0.0015f * std::max(0.0f, speed);
-    if (hue >= 1.0f) hue -= std::floor(hue);
-
-    const float h = hue * 6.0f;
-    const int i = static_cast<int>(std::floor(h));
-    const float f = h - static_cast<float>(i);
-    const float q = 1.0f - f;
-
-    float r = 0.0f, g = 0.0f, b = 0.0f;
-    switch (i % 6) {
-        case 0: r = 1; g = f; b = 0; break;
-        case 1: r = q; g = 1; b = 0; break;
-        case 2: r = 0; g = 1; b = f; break;
-        case 3: r = 0; g = q; b = 1; break;
-        case 4: r = f; g = 0; b = 1; break;
-        default: r = 1; g = 0; b = q; break;
-    }
-
-    return (base & 0xFF000000u) |
-           (static_cast<uint32_t>(r * 255.0f) << 16) |
-           (static_cast<uint32_t>(g * 255.0f) << 8) |
-           static_cast<uint32_t>(b * 255.0f);
-}
-
-static void addBoxLines(std::vector<std::pair<bedrocktools::sdk::Vec3,
-                                               bedrocktools::sdk::Vec3>>& lines,
-                        const bedrocktools::sdk::Vec3& min,
-                        const bedrocktools::sdk::Vec3& max) {
-    const auto p = [](float x, float y, float z) {
-        return bedrocktools::sdk::Vec3{x, y, z};
+static void ensureMaterial() {
+    if (g_fillMaterial) return;
+    // The same vertex-colour capable material order used by Hitbox.
+    constexpr const char* names[] = {
+        "ui_fill_color",
+        "ui_textured_and_glcolor",
+        "debug_filled_box",
+        "selection_box"
     };
-
-    // Bottom.
-    lines.push_back({p(min.x,min.y,min.z), p(max.x,min.y,min.z)});
-    lines.push_back({p(max.x,min.y,min.z), p(max.x,min.y,max.z)});
-    lines.push_back({p(max.x,min.y,max.z), p(min.x,min.y,max.z)});
-    lines.push_back({p(min.x,min.y,max.z), p(min.x,min.y,min.z)});
-
-    // Top.
-    lines.push_back({p(min.x,max.y,min.z), p(max.x,max.y,min.z)});
-    lines.push_back({p(max.x,max.y,min.z), p(max.x,max.y,max.z)});
-    lines.push_back({p(max.x,max.y,max.z), p(min.x,max.y,max.z)});
-    lines.push_back({p(min.x,max.y,max.z), p(min.x,max.y,min.z)});
-
-    // Verticals.
-    lines.push_back({p(min.x,min.y,min.z), p(min.x,max.y,min.z)});
-    lines.push_back({p(max.x,min.y,min.z), p(max.x,max.y,min.z)});
-    lines.push_back({p(max.x,min.y,max.z), p(max.x,max.y,max.z)});
-    lines.push_back({p(min.x,min.y,max.z), p(min.x,max.y,max.z)});
+    for (const char* name : names) {
+        g_fillMaterial = getMaterial(name);
+        if (g_fillMaterial) break;
+    }
 }
 
-static void updateLocalPlayer(void* player) {
-    g_localPlayer = validPtr(player) ? player : nullptr;
-}
-
-static void renderBlockOutline(void* levelRenderer, void* screenContext) {
-    if (!g_module || !g_module->enabled) return;
-    if (!validPtr(levelRenderer) || !validPtr(screenContext)) return;
-    if (!validPtr(g_localPlayer)) return;
-    if (!g_tessBegin || !g_tessColor || !g_tessVertex || !g_renderMesh || !g_getHitResult)
+static void updateHitSnapshot(BlockOutlineModule* mod, sdk::Player* player) {
+    if (!mod || !player) {
+        if (mod) mod->m_hitValid.store(false, std::memory_order_release);
         return;
-    if (!g_selectionMaterial) return;
-
-    const uintptr_t sc = reinterpret_cast<uintptr_t>(screenContext);
-    const uintptr_t tessPtr = *reinterpret_cast<uintptr_t*>(
-        sc + bedrocktools::sdk::offsets::ScreenContext::mTessellator);
-    if (tessPtr < 0x10000ULL) return;
-
-    const uintptr_t lrp = *reinterpret_cast<uintptr_t*>(
-        reinterpret_cast<uintptr_t>(levelRenderer) +
-        bedrocktools::sdk::offsets::LevelRenderer::mLevelRendererPlayer);
-    if (lrp < 0x10000ULL) return;
-
-    const uintptr_t cam = lrp + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos;
-    const float camX = *reinterpret_cast<float*>(cam + 0);
-    const float camY = *reinterpret_cast<float*>(cam + 4);
-    const float camZ = *reinterpret_cast<float*>(cam + 8);
-    if (!std::isfinite(camX) || !std::isfinite(camY) || !std::isfinite(camZ)) return;
-
-    // The player -> Level relationship is already used throughout BedrockTools.
-    // We only call LevelGetHitResult after validating the cached player and
-    // Level pointer; no guessed render-object pointer chain is used.
-    const uintptr_t level = *reinterpret_cast<uintptr_t*>(
-        reinterpret_cast<uintptr_t>(g_localPlayer) + bedrocktools::sdk::offsets::Actor::mLevel);
-    if (level < 0x10000ULL) return;
-
-    void* hit = g_getHitResult(reinterpret_cast<void*>(level));
-    if (!validPtr(hit)) return;
-
-    const int type = *reinterpret_cast<int*>(
-        reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mType);
-    if (type != bedrocktools::sdk::offsets::HitResult::TypeBlock) return;
-
-    struct BlockPos { int x, y, z; };
-    const auto* block = reinterpret_cast<const BlockPos*>(
-        reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mBlockPos);
-    if (!block) return;
-    if (std::abs(block->x) > 30000000 || std::abs(block->z) > 30000000 ||
-        block->y < -2048 || block->y > 4096) return;
-
-    const float hitX = *reinterpret_cast<const float*>(
-        reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mPos + 0);
-    const float hitY = *reinterpret_cast<const float*>(
-        reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mPos + 4);
-    const float hitZ = *reinterpret_cast<const float*>(
-        reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mPos + 8);
-    if (!std::isfinite(hitX) || !std::isfinite(hitY) || !std::isfinite(hitZ)) return;
-
-    const float dx = hitX - camX;
-    const float dy = hitY - camY;
-    const float dz = hitZ - camZ;
-    const float distance = std::sqrt(dx*dx + dy*dy + dz*dz);
-    if (!std::isfinite(distance) || distance > g_module->range) return;
-
-    const float expand = std::clamp(g_module->lineThickness * 0.0025f, 0.001f, 0.02f);
-    const float x0 = static_cast<float>(block->x) - expand;
-    const float y0 = static_cast<float>(block->y) - expand;
-    const float z0 = static_cast<float>(block->z) - expand;
-    const float x1 = static_cast<float>(block->x + 1) + expand;
-    const float y1 = static_cast<float>(block->y + 1) + expand;
-    const float z1 = static_cast<float>(block->z + 1) + expand;
-
-    std::vector<std::pair<bedrocktools::sdk::Vec3, bedrocktools::sdk::Vec3>> lines;
-    lines.reserve(12);
-    addBoxLines(lines, {x0,y0,z0}, {x1,y1,z1});
-
-    uint32_t drawColor = rgbColor(g_module->color, g_module->rgbSpeed) | 0xFF000000u;
-    const float r = ((drawColor >> 16) & 0xFFu) / 255.0f;
-    const float g = ((drawColor >> 8) & 0xFFu) / 255.0f;
-    const float b = (drawColor & 0xFFu) / 255.0f;
-
-    void* tessellator = reinterpret_cast<void*>(tessPtr);
-    g_tessBegin(tessellator, nullptr, 4, static_cast<int>(lines.size() * 2), 0);
-    g_tessColor(tessellator, r, g, b, 1.0f);
-
-    for (const auto& line : lines) {
-        auto p1 = line.first;
-        auto p2 = line.second;
-        p1.x -= camX; p1.y -= camY; p1.z -= camZ;
-        p2.x -= camX; p2.y -= camY; p2.z -= camZ;
-        g_tessVertex(tessellator, p1.x, p1.y, p1.z);
-        g_tessVertex(tessellator, p2.x, p2.y, p2.z);
     }
 
+    const sdk::Vec3 playerPos = player->position();
+    mod->m_playerX.store(playerPos.x, std::memory_order_relaxed);
+    mod->m_playerY.store(playerPos.y, std::memory_order_relaxed);
+    mod->m_playerZ.store(playerPos.z, std::memory_order_relaxed);
+
+    sdk::Level* level = player->level();
+    if (!level) {
+        mod->m_hitValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    const sdk::HitResult* hit = level->storedHitResult();
+    if (!hit || hit->type() != sdk::offsets::HitResult::TypeBlock) {
+        mod->m_hitValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    const sdk::BlockPos pos = hit->blockPosition();
+    const sdk::Vec3 hitPos = hit->position();
+    BlockHitSnapshot snapshot{pos, hitPos, true};
+    if (!bedrocktools::blockoutline::validHitSnapshot(snapshot)) {
+        mod->m_hitValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    // Publish all fields first; the valid flag is the release/acquire fence.
+    mod->m_blockX.store(pos.x, std::memory_order_relaxed);
+    mod->m_blockY.store(pos.y, std::memory_order_relaxed);
+    mod->m_blockZ.store(pos.z, std::memory_order_relaxed);
+    mod->m_hitX.store(hitPos.x, std::memory_order_relaxed);
+    mod->m_hitY.store(hitPos.y, std::memory_order_relaxed);
+    mod->m_hitZ.store(hitPos.z, std::memory_order_relaxed);
+    mod->m_hitValid.store(true, std::memory_order_release);
+}
+
+static void drawCameraFacingLines(void* screenContext,
+                                  void* tessellator,
+                                  void* material,
+                                  const std::vector<bedrocktools::blockoutline::Line>& lines,
+                                  const bedrocktools::blockoutline::Rgb& rgb,
+                                  float lineThickness,
+                                  float camX, float camY, float camZ) {
+    if (!g_begin || !g_color || !g_vertex || !g_renderMesh || !material || lines.empty()) return;
+
+    const float halfWidth = std::clamp(lineThickness, 0.5f, 20.0f) * 0.005f;
+    const bool thick = lineThickness > 1.0f;
     char pad[0x58]{};
-    g_renderMesh(screenContext, tessellator, &g_selectionMaterial, pad);
+
+    // Thick mode is real geometry rather than glLineWidth, which is ignored
+    // or clamped by many Android GLES drivers.
+    if (thick) {
+        g_begin(tessellator, nullptr, 1, static_cast<int>(lines.size() * 8), 0);
+        g_color(tessellator, rgb.r, rgb.g, rgb.b, 1.0f);
+
+        for (const auto& line : lines) {
+            float p1x = line.a.x - camX, p1y = line.a.y - camY, p1z = line.a.z - camZ;
+            float p2x = line.b.x - camX, p2y = line.b.y - camY, p2z = line.b.z - camZ;
+
+            float dx = p2x - p1x, dy = p2y - p1y, dz = p2z - p1z;
+            const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (len < 1e-5f) continue;
+            dx /= len; dy /= len; dz /= len;
+
+            const float mx = (p1x + p2x) * 0.5f;
+            const float my = (p1y + p2y) * 0.5f;
+            const float mz = (p1z + p2z) * 0.5f;
+
+            float sx = dy * mz - dz * my;
+            float sy = dz * mx - dx * mz;
+            float sz = dx * my - dy * mx;
+            float sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+            if (sl < 1e-5f) {
+                if (std::fabs(dy) < 0.9f) {
+                    sx = -dz; sy = 0.0f; sz = dx;
+                } else {
+                    sx = 1.0f; sy = 0.0f; sz = 0.0f;
+                }
+                sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+            }
+            sx = sx / sl * halfWidth;
+            sy = sy / sl * halfWidth;
+            sz = sz / sl * halfWidth;
+
+            const float ex = dx * halfWidth;
+            const float ey = dy * halfWidth;
+            const float ez = dz * halfWidth;
+
+            const sdk::Vec3 q[4] = {
+                {p1x - ex - sx, p1y - ey - sy, p1z - ez - sz},
+                {p2x + ex - sx, p2y + ey - sy, p2z + ez - sz},
+                {p2x + ex + sx, p2y + ey + sy, p2z + ez + sz},
+                {p1x - ex + sx, p1y - ey + sy, p1z - ez + sz}
+            };
+
+            for (const auto& v : q) g_vertex(tessellator, v.x, v.y, v.z);
+            for (int i = 3; i >= 0; --i) g_vertex(tessellator, q[i].x, q[i].y, q[i].z);
+        }
+        g_renderMesh(screenContext, tessellator, material, pad);
+    }
+
+    // Hairline pass guarantees a crisp edge when the thick quad falls below
+    // a pixel at distance.
+    g_begin(tessellator, nullptr, 4, static_cast<int>(lines.size() * 2), 0);
+    g_color(tessellator, rgb.r, rgb.g, rgb.b, 1.0f);
+    for (const auto& line : lines) {
+        g_vertex(tessellator, line.a.x - camX, line.a.y - camY, line.a.z - camZ);
+        g_vertex(tessellator, line.b.x - camX, line.b.y - camY, line.b.z - camZ);
+    }
+    g_renderMesh(screenContext, tessellator, material, pad);
 }
 
 static void renderLevelHook(void* self, void* screenContext, void* a3) {
     if (g_renderLevelOriginal)
         g_renderLevelOriginal(self, screenContext, a3);
 
-    // Rendering code is deliberately kept behind a complete pointer/setting
-    // check. The original render function always runs first.
-    renderBlockOutline(self, screenContext);
+    BlockOutlineModule* mod = g_module;
+    if (!mod || !mod->enabled || !screenContext || !validPtr(reinterpret_cast<uintptr_t>(screenContext))) return;
+    if (!g_begin || !g_color || !g_vertex || !g_renderMesh) return;
+    if (!mod->m_hitValid.load(std::memory_order_acquire)) return;
+
+    const int bx = mod->m_blockX.load(std::memory_order_relaxed);
+    const int by = mod->m_blockY.load(std::memory_order_relaxed);
+    const int bz = mod->m_blockZ.load(std::memory_order_relaxed);
+    const float hx = mod->m_hitX.load(std::memory_order_relaxed);
+    const float hy = mod->m_hitY.load(std::memory_order_relaxed);
+    const float hz = mod->m_hitZ.load(std::memory_order_relaxed);
+
+    const float px = mod->m_playerX.load(std::memory_order_relaxed);
+    const float py = mod->m_playerY.load(std::memory_order_relaxed);
+    const float pz = mod->m_playerZ.load(std::memory_order_relaxed);
+    const float dx = hx - px, dy = hy - py, dz = hz - pz;
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!std::isfinite(distance) || distance > std::max(1.0f, mod->maxDistance)) return;
+
+    const uintptr_t sc = reinterpret_cast<uintptr_t>(screenContext);
+    const uintptr_t tessPtr = *reinterpret_cast<const uintptr_t*>(sc + sdk::offsets::ScreenContext::mTessellator);
+    if (!validPtr(tessPtr)) return;
+
+    const uintptr_t lrp = *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(self) + sdk::offsets::LevelRenderer::mLevelRendererPlayer);
+    if (!validPtr(lrp)) return;
+
+    const auto& cam = *reinterpret_cast<const sdk::Vec3*>(lrp + sdk::offsets::LevelRendererPlayer::mCamPos);
+
+    ensureMaterial();
+    void* material = g_fillMaterial ? reinterpret_cast<void*>(&g_fillMaterial)
+                                    : reinterpret_cast<void*>(lrp + sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
+    if (!material) return;
+
+    uintptr_t colorHolderPtr = *reinterpret_cast<const uintptr_t*>(sc + sdk::offsets::ScreenContext::mColorHolder);
+    if (!validPtr(colorHolderPtr)) return;
+    float* colorHolder = reinterpret_cast<float*>(colorHolderPtr);
+    const float saved[4] = {colorHolder[0], colorHolder[1], colorHolder[2], colorHolder[3]};
+    colorHolder[0] = colorHolder[1] = colorHolder[2] = colorHolder[3] = 1.0f;
+
+    uint32_t color = mod->outlineColor;
+    if (mod->rgb)
+        color = bedrocktools::blockoutline::cycleRgbColor(color, true, mod->m_rgbHue, mod->rgbSpeed);
+    const auto channels = bedrocktools::blockoutline::unpackArgb(color);
+
+    std::vector<bedrocktools::blockoutline::Line> lines;
+    std::vector<bedrocktools::blockoutline::Quad> unused;
+    bedrocktools::blockoutline::GeometryOptions opt;
+    opt.thickness = mod->lineThickness;
+    opt.threeD = mod->threeD;
+    bedrocktools::blockoutline::buildOutlineGeometry({bx, by, bz}, opt, lines, unused);
+
+    drawCameraFacingLines(screenContext, reinterpret_cast<void*>(tessPtr), material,
+                          lines, channels, mod->lineThickness,
+                          cam.x, cam.y, cam.z);
+
+    // 3D mode uses the volumetric beam quads generated by the shared core.
+    // This second pass keeps the far edges visible through the block.
+    if (mod->threeD && !unused.empty() && g_begin && g_color && g_vertex && g_renderMesh) {
+        char pad[0x58]{};
+        g_begin(reinterpret_cast<void*>(tessPtr), nullptr, 1,
+                static_cast<int>(unused.size() * 8), 0);
+        g_color(reinterpret_cast<void*>(tessPtr), channels.r, channels.g, channels.b, 1.0f);
+        for (const auto& quad : unused) {
+            for (int i = 0; i < 4; ++i) {
+                const auto& v = quad.v[i];
+                g_vertex(reinterpret_cast<void*>(tessPtr), v.x - cam.x, v.y - cam.y, v.z - cam.z);
+            }
+            for (int i = 3; i >= 0; --i) {
+                const auto& v = quad.v[i];
+                g_vertex(reinterpret_cast<void*>(tessPtr), v.x - cam.x, v.y - cam.y, v.z - cam.z);
+            }
+        }
+        g_renderMesh(screenContext, reinterpret_cast<void*>(tessPtr), material, pad);
+    }
+
+    std::memcpy(colorHolder, saved, sizeof(saved));
 }
 
 } // namespace
 
 BlockOutlineModule::BlockOutlineModule()
-    : Module("Block Outline", "Draws an outline around the block under the crosshair.") {
+    : Module("Block Outline", "Highlights the block under the crosshair with configurable RGB color and line size") {
     showInMenu = true;
-    color = 0xFFFFFFFF;
-    rgb = false;
-    rgbSpeed = 1.0f;
-    lineThickness = 1.0f;
-    range = 20.0f;
-    g_module = this;
+    hideInHudEditor = true;
 }
 
 BlockOutlineModule::~BlockOutlineModule() {
@@ -284,84 +331,136 @@ BlockOutlineModule::~BlockOutlineModule() {
 }
 
 void BlockOutlineModule::onInit() {
-    const uintptr_t renderLevel = bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::RenderLevel);
-    if (renderLevel)
-        m_patchTarget = reinterpret_cast<void*>(renderLevel);
+    if (m_initialized) return;
+    m_initialized = true;
+    g_module = this;
 
-    g_tessBegin = reinterpret_cast<TessBeginFn>(bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::TessellatorBegin));
-    g_tessColor = reinterpret_cast<TessColorFn>(bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::TessellatorColor));
-    g_tessVertex = reinterpret_cast<TessVertexFn>(bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::TessellatorVertex));
+    const uintptr_t render = memory::resolve(memory::SignatureId::RenderLevel);
+    const uintptr_t begin = memory::resolve(memory::SignatureId::TessellatorBegin);
+    const uintptr_t color = memory::resolve(memory::SignatureId::TessellatorColor);
+    const uintptr_t vertex = memory::resolve(memory::SignatureId::TessellatorVertex);
+    uintptr_t mesh = memory::resolve(memory::SignatureId::MeshHelpersRenderMeshImmediately2);
+    if (!mesh) mesh = memory::resolve(memory::SignatureId::MeshHelpersRenderMeshImmediately);
+    const uintptr_t group = memory::resolve(memory::SignatureId::RenderMaterialGroupCommon);
 
-    uintptr_t rm = bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately2);
-    if (!rm) {
-        rm = bedrocktools::memory::resolve(
-            bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately);
+    m_renderTarget = reinterpret_cast<void*>(render);
+    g_begin = reinterpret_cast<TessellatorBeginFn>(begin);
+    g_color = reinterpret_cast<TessellatorColorFn>(color);
+    g_vertex = reinterpret_cast<TessellatorVertexFn>(vertex);
+    g_renderMesh = reinterpret_cast<RenderMeshFn>(mesh);
+
+    if (group) {
+        // RenderMaterialGroupCommon loads the singleton pointer using
+        // ADRP + ADD. The ADD gives the address of the material-group owner
+        // object; the actual RenderMaterialGroup* field lives
+        // mRenderMaterialGroupOffset bytes into it. This offset is required:
+        // without it getMaterial() dereferenced unrelated memory and called
+        // a garbage vtable slot, which crashed the game on the first frame
+        // the module rendered. Every other render module (hitbox,
+        // breadcrumbs, chunkborder, lightoverlay) adds the same offset.
+        const uintptr_t groupAddr = resolveADRP(reinterpret_cast<uint32_t*>(group), 2, 0);
+        if (groupAddr)
+            g_materialGroup = groupAddr + bedrocktools::sdk::offsets::MaterialGroup::mRenderMaterialGroupOffset;
+        if (!g_materialGroup) {
+            // Fallback: RenderLevel already contains the selection material,
+            // so material lookup is optional. The renderer can still work.
+            g_materialGroup = 0;
+        }
     }
-    g_renderMesh = reinterpret_cast<RenderMeshFn>(rm);
 
-    g_getHitResult = reinterpret_cast<GetHitResultFn>(
-        bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LevelGetHitResult));
+    events::bus().subscribe<events::LocalPlayerTickEvent>(
+        [this](auto& event) { updateHitSnapshot(this, event.player); });
 
-    const uintptr_t rmg = bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::RenderMaterialGroupCommon);
-    if (rmg) {
-        const uintptr_t group = resolveADRP(reinterpret_cast<uint32_t*>(rmg), 2, 0);
-        if (group)
-            g_materialGroup = group + bedrocktools::sdk::offsets::MaterialGroup::mRenderMaterialGroupOffset;
+    verifyRuntime();
+}
+
+void BlockOutlineModule::installRenderHook() {
+    if (m_hookInstalled || !m_renderTarget || !runtimeReady()) return;
+    if (hooks::install(m_renderTarget, reinterpret_cast<void*>(renderLevelHook),
+                       reinterpret_cast<void**>(&g_renderLevelOriginal))) {
+        m_hookInstalled = true;
     }
+}
 
-    // Never install a render hook unless every primitive needed by the module
-    // was resolved. This is the main crash-prevention rule for this module.
-    if (m_patchTarget && g_tessBegin && g_tessColor && g_tessVertex &&
-        g_renderMesh && g_getHitResult && g_materialGroup) {
-        g_selectionMaterial = getMaterial("selection_box");
+bool BlockOutlineModule::runtimeReady() const {
+    return m_renderTarget && g_begin && g_color && g_vertex && g_renderMesh;
+}
+
+void BlockOutlineModule::verifyRuntime() {
+    const bool render = m_renderTarget != nullptr;
+    const bool begin = g_begin != nullptr;
+    const bool color = g_color != nullptr;
+    const bool vertex = g_vertex != nullptr;
+    const bool mesh = g_renderMesh != nullptr;
+    const bool all = render && begin && color && vertex && mesh;
+
+    if (all) {
+        m_verificationStatus = "PASS - RenderLevel + Tessellator + Mesh resolved";
+    } else if (!render) {
+        m_verificationStatus = "FAIL - RenderLevel signature not found";
+    } else if (!begin) {
+        m_verificationStatus = "FAIL - TessellatorBegin signature not found";
+    } else if (!color) {
+        m_verificationStatus = "FAIL - TessellatorColor signature not found";
+    } else if (!vertex) {
+        m_verificationStatus = "FAIL - TessellatorVertex signature not found";
+    } else {
+        m_verificationStatus = "FAIL - RenderMesh signature not found";
     }
-
-    bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
-        [](auto& event) { updateLocalPlayer(event.player); });
 }
 
 void BlockOutlineModule::onEnable() {
-    if (m_patched || !m_patchTarget || !g_selectionMaterial ||
-        !g_tessBegin || !g_tessColor || !g_tessVertex || !g_renderMesh ||
-        !g_getHitResult) {
-        return;
-    }
-
-    if (bedrocktools::hooks::install(m_patchTarget, reinterpret_cast<void*>(renderLevelHook),
-                                     reinterpret_cast<void**>(&g_renderLevelOriginal))) {
-        m_patched = true;
-    }
+    verifyRuntime();
+    installRenderHook();
 }
 
-void BlockOutlineModule::onDisable() {}
+void BlockOutlineModule::onDisable() {
+    // Hooks are intentionally left installed. The hook checks enabled before
+    // doing any rendering, matching the lifecycle used by the other render
+    // modules and avoiding an unsafe runtime unpatch on Android.
+}
 
 void BlockOutlineModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
-    if (j.contains("color")) {
-        try {
-            const std::string value = j["color"].get<std::string>();
-            if (!value.empty()) color = static_cast<uint32_t>(std::stoul(value[0] == '#' ? value.substr(1) : value, nullptr, 16));
-        } catch (...) {}
+
+    if (j.contains("outlineColor")) {
+        if (j["outlineColor"].is_string()) {
+            try {
+                std::string s = j["outlineColor"].get<std::string>();
+                if (!s.empty() && s[0] == '#') s.erase(0, 1);
+                if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) s.erase(0, 2);
+                outlineColor = static_cast<uint32_t>(std::stoul(s, nullptr, 16));
+            } catch (...) {}
+        } else if (j["outlineColor"].is_number_unsigned() || j["outlineColor"].is_number_integer()) {
+            outlineColor = j["outlineColor"].get<uint32_t>();
+        }
+    } else if (j.contains("color")) {
+        try { outlineColor = static_cast<uint32_t>(std::stoul(j["color"].get<std::string>(), nullptr, 16)); } catch (...) {}
     }
-    rgb = j.value("rgb", rgb);
-    rgbSpeed = std::clamp(j.value("rgbSpeed", rgbSpeed), 0.0f, 20.0f);
-    lineThickness = std::clamp(j.value("lineThickness", lineThickness), 0.5f, 5.0f);
-    range = std::clamp(j.value("range", range), 1.0f, 64.0f);
+
+    rgb = j.value("rgb", j.value("rainbow", rgb));
+    rgbSpeed = std::clamp(j.value("rgbSpeed", j.value("rainbowSpeed", rgbSpeed)), 0.05f, 5.0f);
+    lineThickness = std::clamp(j.value("lineThickness", j.value("thickness", lineThickness)), 0.5f, 20.0f);
+    maxDistance = std::clamp(j.value("maxDistance", j.value("range", maxDistance)), 1.0f, 180.0f);
+    threeD = j.value("threeD", j.value("3d", threeD));
+
+    verifyButton = j.value("verifyButton", false);
+    if (verifyButton) {
+        verifyRuntime();
+        verifyButton = false;
+    }
 }
 
 void BlockOutlineModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
-    char hex[12];
-    std::snprintf(hex, sizeof(hex), "#%08X", color);
-    j["color"] = std::string(hex);
+    char color[16];
+    std::snprintf(color, sizeof(color), "#%08X", outlineColor);
+    j["outlineColor"] = std::string(color);
     j["rgb"] = rgb;
     j["rgbSpeed"] = rgbSpeed;
     j["lineThickness"] = lineThickness;
-    j["range"] = range;
+    j["maxDistance"] = maxDistance;
+    j["threeD"] = threeD;
+    j["verifyButton"] = verifyButton;
+    j["verificationStatus"] = m_verificationStatus;
 }
