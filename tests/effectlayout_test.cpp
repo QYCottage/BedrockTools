@@ -252,6 +252,26 @@ int main() {
         }
     }
 
+    // Regression: a single MobEffectInstance whose sizeof is not a multiple of
+    // 8 never matched the stride search (it only steps by 8). The resolver
+    // must fall back to the buffer length / a modern Bedrock stride so one
+    // potion still appears in the HUD.
+    std::printf("single effect with a non-multiple-of-8 stride still resolves\n");
+    {
+        const std::vector<Effect> lone{{12, 3600, 0}};
+        const auto buffer = makeModern(lone, 0x8C);
+        const auto layout = effects::resolveLayout(buffer.data(), buffer.size());
+        check(layout.valid(), "odd-stride single: layout resolves");
+        check(layout.stride == 0x8C, "odd-stride single: stride is the record size");
+        if (layout.valid()) {
+            const auto records = effects::readRecords(buffer.data(), buffer.size(), layout);
+            check(records.size() == 1 && records[0].id == 12,
+                  "odd-stride single: the one effect is read");
+            check(effects::validateLayout(buffer.data(), buffer.size(), layout),
+                  "odd-stride single: cached layout revalidates");
+        }
+    }
+
     // Regression: a single effect whose id is outside the vanilla 1..64 range
     // (a modded effect, or a newer vanilla id) used to score negatively and be
     // rejected entirely, so the HUD stayed on "No Effects" until several

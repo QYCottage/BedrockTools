@@ -32,6 +32,12 @@
 // When the evidence is ambiguous it reports "amplifier unknown" so the HUD can
 // hide the level instead of printing a wrong one.
 //
+// A single active effect used to fail resolution: scoreStride() did not award
+// enough points for one id+duration pair, and the stride search returned an
+// empty layout. The scorer now treats one well-formed record as sufficient,
+// and resolveLayout() falls back to a documented modern Bedrock stride when
+// there are not enough samples to vote.
+//
 // The header is intentionally dependency-free so it can be unit tested and
 // reused by preview tooling.
 // ---------------------------------------------------------------------------
@@ -114,8 +120,22 @@ inline bool knownAmplifierOffset(std::size_t offset) {
     return false;
 }
 
+// True when the 8-byte header (mId + mDuration) of one record looks like a
+// MobEffectInstance. Used by the single-record fallback when there are not
+// enough samples for scoreStride() to vote.
+inline bool looksLikeEffectHeader(const std::uint8_t* record) {
+    const auto id = readU32(record, 0);
+    if (id < 1 || id > 255) return false;
+    return plausibleDuration(readInt(record, 4));
+}
+
 // Scores how well `stride` explains the buffer, using only the two fields whose
 // offsets never move (mId at 0x00 and mDuration at 0x04).
+//
+// Weights are intentionally high: a lone potion must produce a clearly
+// positive score. The previous 8+4 scheme left a single record (especially a
+// modded / high id) too close to the rejection threshold, so the HUD stayed
+// empty until two or three effects were active.
 inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t stride) {
     int score = 0;
     int active = 0;
@@ -133,12 +153,16 @@ inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t 
         // stride, so ignore them here instead of rejecting the whole buffer.
         if (id == 0) continue;
 
-        if (id >= 1 && id <= 64) score += 8;          // vanilla effect id range
-        else if (id >= 65 && id <= 255) score += 2;   // possible modded id (still a valid effect id)
+        if (id >= 1 && id <= 64) score += 16;         // vanilla effect id range
+        else if (id >= 65 && id <= 255) score += 10;  // modded / newer vanilla id
         else return -1000;                            // definitely not an id
 
-        if (plausibleDuration(duration)) score += 4;
+        if (plausibleDuration(duration)) score += 8;
         else return -1000;
+
+        // A matching id + duration pair is a complete instance header. Award
+        // it even when this is the only record in the vector.
+        score += 8;
 
         // Effects are unique per entity, so duplicate ids mean a wrong stride.
         for (std::size_t i = 0; i < seenCount; ++i) {
@@ -150,7 +174,50 @@ inline int scoreStride(const std::uint8_t* data, std::size_t count, std::size_t 
     }
 
     if (active == 0) score -= 8;
+    // One confirmed live record is enough evidence; do not require a crowd
+    // of effects before the HUD will light up.
+    if (seenCount == 1 && active >= 1) score += 12;
     return score;
+}
+
+// Observed sizeof(MobEffectInstance) on modern (1.20.60+) Bedrock builds.
+// The FactorCalculationData tail embeds a std::function, so the size depends
+// on the STL / ABI; these are the sizes we have actually seen.
+inline constexpr std::array<std::size_t, 8> kModernFallbackStrides{{
+    0xA0, 0x98, 0x90, 0x88, 0x80, 0x78, 0x70, 0x68
+}};
+
+// Picks a stride when the voting loop had too few samples (or none that
+// scored). Prefers a documented modern size; if the buffer itself is one
+// plausible instance, uses `bytes` even when that length is not a multiple
+// of 8 (the main search only steps by 8).
+inline std::size_t fallbackStride(const std::uint8_t* data, std::size_t bytes) {
+    if (data == nullptr || bytes < kMinStride) return 0;
+
+    auto consider = [&](std::size_t stride) -> bool {
+        if (stride < kMinStride || stride > kMaxStride) return false;
+        if (bytes % stride != 0) return false;
+        const auto count = bytes / stride;
+        if (count == 0 || count > kMaxRecords) return false;
+        if (!looksLikeEffectHeader(data)) return false;
+        for (std::size_t index = 1; index < count; ++index) {
+            const auto* record = data + index * stride;
+            if (readU32(record, 0) == 0) continue;
+            if (!looksLikeEffectHeader(record)) return false;
+        }
+        return true;
+    };
+
+    std::size_t found = 0;
+    for (const auto stride : kModernFallbackStrides) {
+        if (!consider(stride)) continue;
+        // Smallest matching modern size wins: a multiple of the real stride
+        // also "fits" but would skip every other record.
+        if (found == 0 || stride < found) found = stride;
+    }
+    if (found != 0) return found;
+    if (consider(bytes)) return bytes;
+    return 0;
 }
 
 // The amplifier can only sit directly after the id, the duration and the three
@@ -259,15 +326,16 @@ inline InstanceLayout resolveLayout(const std::uint8_t* data, std::size_t bytes)
     // ---- 1. Stride -------------------------------------------------------
     std::size_t bestStride = 0;
     int bestStrideScore = 0;
-    for (std::size_t stride = detail::kMinStride; stride <= detail::kMaxStride; stride += 8) {
-        if (bytes % stride != 0) continue;
+    auto considerStride = [&](std::size_t stride) {
+        if (stride < detail::kMinStride || stride > detail::kMaxStride) return;
+        if (bytes % stride != 0) return;
         const auto count = bytes / stride;
-        if (count == 0 || count > detail::kMaxRecords) continue;
+        if (count == 0 || count > detail::kMaxRecords) return;
 
         // Normalize by record count so a stride that happens to fit more
         // records does not win purely on volume.
         const int total = detail::scoreStride(data, count, stride);
-        if (total <= 0) continue;
+        if (total <= 0) return;
         const int normalized = static_cast<int>(total / static_cast<int>(count));
         // Strides are tried in ascending order and ties keep the smallest one.
         // Any multiple of the real stride also "fits" the buffer (it just skips
@@ -276,9 +344,28 @@ inline InstanceLayout resolveLayout(const std::uint8_t* data, std::size_t bytes)
             bestStrideScore = normalized;
             bestStride = stride;
         }
+    };
+
+    for (std::size_t stride = detail::kMinStride; stride <= detail::kMaxStride; stride += 8) {
+        considerStride(stride);
+    }
+    // A single MobEffectInstance is exactly `bytes` long. That size is not
+    // always a multiple of 8 (the search above only steps by 8), so give the
+    // exact length a vote of its own.
+    if (bytes % 8 != 0) considerStride(bytes);
+
+    // Too few samples (or none that scored): fall back to a documented modern
+    // Bedrock stride instead of returning an empty layout and stalling the HUD.
+    if (bestStride == 0) {
+        bestStride = detail::fallbackStride(data, bytes);
+        if (bestStride == 0) return result;
+        const auto count = bytes / bestStride;
+        const int total = detail::scoreStride(data, count, bestStride);
+        bestStrideScore = total > 0
+            ? static_cast<int>(total / static_cast<int>(count))
+            : 1;
     }
 
-    if (bestStride == 0) return result;
     result.stride = bestStride;
     result.score = bestStrideScore;
 
@@ -358,7 +445,12 @@ inline bool validateLayout(const std::uint8_t* data, std::size_t bytes, const In
 
     const auto count = bytes / layout.stride;
     if (count == 0 || count > detail::kMaxRecords) return false;
-    if (detail::scoreStride(data, count, layout.stride) <= 0) return false;
+    const int strideScore = detail::scoreStride(data, count, layout.stride);
+    if (strideScore <= 0) {
+        // A fallback layout is accepted on a single well-formed header so
+        // one active effect cannot drop the HUD back to "No Effects".
+        if (count != 1 || !detail::looksLikeEffectHeader(data)) return false;
+    }
     if (!layout.hasAmplifier) return true;
 
     return detail::scoreAmplifier(
