@@ -4,9 +4,7 @@
 
 #include <array>
 #include <cstdint>
-#include <mutex>
 #include <string>
-#include <vector>
 
 class CommandHotkeyModule final : public Module {
 public:
@@ -31,7 +29,6 @@ public:
 
     void onInit() override;
     void onEnable() override;
-    void onDisable() override;
     void onLauncherRegistered() override;
     void onFrame() override;
     bool onKeyEvent(int key, bool isDown) override;
@@ -42,9 +39,11 @@ public:
 
     static CommandHotkeyModule* instance();
 
-    // On-screen slots are always launcher-native overlay buttons (same
-    // Android views as Zoom / other launcher modules). There is no fallback
-    // to the old in-mod drawn rectangles.
+    // Render on-screen command slots as launcher-native overlay buttons.
+    // Native buttons are drawn and hit-tested by the launcher itself, so they
+    // keep working while the game is running and you are playing, even when
+    // the game's own input pipeline would swallow touches. Disable to fall
+    // back to the classic in-mod drawn buttons.
     bool nativeButtonsEnabled = true;
 
 private:
@@ -73,16 +72,11 @@ private:
     void execute(std::size_t index);
     void applyDefaultBindings();
     void normalizeBindings();
-    void flushPendingCommands();
-    void unregisterAllNativeButtons();
 
     // Registers/unregisters the launcher-native buttons for on-screen command
     // slots. Same threading model as the rest of this module (called from the
     // render thread via onFrame and from loadConfig).
     void syncNativeButtons();
-
-    std::mutex m_pendingMutex;
-    std::vector<std::string> m_pendingCommands;
 
     static std::string normalizeCommand(std::string command);
     static std::string defaultLabel(const Binding& binding, std::size_t index);
