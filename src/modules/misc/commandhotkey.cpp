@@ -54,16 +54,6 @@ std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
     return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
 }
 
-// Truncates text to fit the launcher's button label byte limit without
-// splitting a UTF-8 sequence.
-std::string truncateUtf8(const std::string& text, std::size_t maxBytes) {
-    if (text.size() <= maxBytes) return text;
-    std::size_t cut = maxBytes;
-    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
-        --cut;
-    return text.substr(0, cut);
-}
-
 std::string keyName(int key) {
     // Android KEYCODE_* values. Unknown values are still usable and are shown numerically.
     switch (key) {
@@ -137,97 +127,6 @@ void CommandHotkeyModule::onInit() {
     // Input hooks are installed once by Runtime. This module only consumes the events.
 }
 
-void CommandHotkeyModule::onEnable() {
-    m_nativeButtonsDirty = true;
-    m_nativeButtonRetries = 0;
-    syncNativeButtons();
-}
-
-void CommandHotkeyModule::onLauncherRegistered() {
-    // The module is now visible to the launcher's Mod Menu bridge, so this is
-    // the earliest safe point to register the native overlay buttons (before
-    // the launcher's first button refresh).
-    m_nativeButtonsDirty = true;
-    m_nativeButtonRetries = 0;
-    syncNativeButtons();
-}
-
-void CommandHotkeyModule::syncNativeButtons() {
-    // The launcher's native overlay buttons are rendered and hit-tested by the
-    // launcher itself (real Android views), so they respond while the game is
-    // running and the player is in a world, independent of the game's input
-    // pipeline. Slots that fail to register keep the classic drawn buttons.
-    struct SlotState {
-        bool want = false;
-        std::string label;
-        std::uint32_t textColor = 0xFFFFFF;
-        float width = 110.0f;
-        float height = 40.0f;
-    };
-    std::array<SlotState, MaxCommands> states{};
-
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const auto& binding = m_commands[i];
-        states[i].want = nativeButtonsEnabled && binding.enabled &&
-                         binding.screen && !binding.command.empty();
-        states[i].label = truncateUtf8(defaultLabel(binding, i), 32);
-        states[i].textColor = binding.textColor & 0x00FFFFFFu;
-        states[i].width = binding.width;
-        states[i].height = binding.height;
-    }
-
-    bool allSettled = true;
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const std::string id = moduleId + ".command" + std::to_string(i);
-
-        if (!states[i].want) {
-            if (m_nativeButtonRegistered[i]) {
-                pl::modmenu::unregisterButton(id);
-                m_nativeButtonRegistered[i] = false;
-                m_nativeButtonLabel[i].clear();
-            }
-            continue;
-        }
-
-        if (m_nativeButtonRegistered[i]) {
-            if (m_nativeButtonLabel[i] == states[i].label) continue;
-            // Label changed -> re-register so the launcher shows the new text.
-            pl::modmenu::unregisterButton(id);
-            m_nativeButtonRegistered[i] = false;
-        }
-
-        pl::modmenu::ButtonBuilder builder(id, "Command " + std::to_string(i + 1));
-        builder.moduleId(moduleId)
-            .label(states[i].label)
-            .behavior(pl::modmenu::ButtonBehavior::Click)
-            .defaultVisible(true)
-            .styleColors(colorWithAlpha(m_buttonColor, m_buttonOpacity),
-                         colorWithAlpha(0x4AE0A0, 0.95f))
-            .textColor(0xFF000000u | states[i].textColor)
-            .activeTextColor(0xFF000000u)
-            .sizeScale(std::clamp(states[i].width / 110.0f, 0.6f, 4.0f),
-                       std::clamp(states[i].height / 40.0f, 0.6f, 2.0f))
-            .onEvent([this, i](std::string_view, pl::modmenu::ButtonEvent event,
-                               float) {
-                if (event == pl::modmenu::ButtonEvent::Click) execute(i);
-            });
-        if (builder.registerButton()) {
-            m_nativeButtonRegistered[i] = true;
-            m_nativeButtonLabel[i] = states[i].label;
-        } else {
-            // Not ready yet (e.g. the module is not registered with the
-            // launcher yet right after startup); retry on the next frame.
-            allSettled = false;
-        }
-    }
-
-    if (!allSettled && ++m_nativeButtonRetries < 10) {
-        m_nativeButtonsDirty = true;
-        return;
-    }
-    m_nativeButtonsDirty = false;
-}
-
 void CommandHotkeyModule::execute(std::size_t index) {
     if (!enabled || index >= MaxCommands) return;
     auto& binding = m_commands[index];
@@ -252,7 +151,7 @@ bool CommandHotkeyModule::onKeyEvent(int key, bool isDown) {
 }
 
 bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
-    if (!enabled) return false;
+    if (!enabled || ModuleRegistry::get().keybindBlocked()) return false;
 
     // HUD edit mode: drag individual buttons instead of executing
     if (m_hudEditMode) {
@@ -260,7 +159,7 @@ bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
             // Touch down -> try to grab a button
             for (std::size_t i = 0; i < MaxCommands; ++i) {
                 const auto& binding = m_commands[i];
-                if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
+                if (!binding.enabled || !binding.screen) continue;
                 if (!inside(binding, x, y)) continue;
                 m_draggingIndex = static_cast<int>(i);
                 m_dragOffsetX = x - (binding.x + hudPosX);
@@ -300,7 +199,7 @@ bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
 
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
+        if (!binding.enabled || !binding.screen) continue;
         if (!inside(binding, x, y)) continue;
         execute(i);
         return true;
@@ -309,9 +208,6 @@ bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
 }
 
 void CommandHotkeyModule::onFrame() {
-    if (m_nativeButtonsDirty)
-        syncNativeButtons();
-
     if (!enabled) {
         std::vector<PLModMenu_DrawCommand> empty;
         submitDrawCommands(moduleId, empty);
@@ -332,7 +228,7 @@ void CommandHotkeyModule::onFrame() {
         bool hasAny = false;
         for (std::size_t j = 0; j < MaxCommands; ++j) {
             const auto& b = m_commands[j];
-            if (!b.enabled || !b.screen || m_nativeButtonRegistered[j]) continue;
+            if (!b.enabled || !b.screen) continue;
             minRelX = std::min(minRelX, b.x);
             minRelY = std::min(minRelY, b.y);
             maxRelX = std::max(maxRelX, b.x + b.width);
@@ -354,7 +250,7 @@ void CommandHotkeyModule::onFrame() {
 
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen || m_nativeButtonRegistered[i]) continue;
+        if (!binding.enabled || !binding.screen) continue;
 
         float absX = binding.x + hudPosX;
         float absY = binding.y + hudPosY;
@@ -499,8 +395,6 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     // override each slot with whatever is stored in the config.
     applyDefaultBindings();
 
-    if (j.contains("nativeButtons") && j["nativeButtons"].is_boolean())
-        nativeButtonsEnabled = j["nativeButtons"].get<bool>();
     if (j.contains("m_buttonOpacity")) m_buttonOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
     if (j.contains("m_buttonRadius")) m_buttonRadius = std::clamp(j["m_buttonRadius"].get<float>(), 0.0f, 40.0f);
     if (j.contains("m_buttonColor")) {
@@ -586,17 +480,11 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     }
 
     normalizeBindings();
-
-    // Keep the launcher-native overlay buttons in sync with the loaded slots.
-    m_nativeButtonsDirty = true;
-    m_nativeButtonRetries = 0;
-    syncNativeButtons();
 }
 
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
 
-    j["nativeButtons"] = nativeButtonsEnabled;
     j["m_buttonOpacity"] = m_buttonOpacity;
     j["m_buttonRadius"] = m_buttonRadius;
 

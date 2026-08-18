@@ -116,7 +116,6 @@ bool Runtime::install() {
     ModuleRegistry::get().initialize();
     bedrocktools::config::ConfigManager::get().load();
     registerModulesWithLauncher();
-    for (auto* mod : ModuleRegistry::get().modules()) mod->onLauncherRegistered();
     installed.store(true, std::memory_order_release);
     return true;
 }
