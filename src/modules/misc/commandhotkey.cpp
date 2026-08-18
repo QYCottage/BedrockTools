@@ -2,21 +2,16 @@
 
 #include "../ModuleRegistry.hpp"
 #include "core/GameHooks.hpp"
-#include "core/memory/Hooks.hpp"
-#include "config/ConfigManager.hpp"
 
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace {
 
@@ -54,72 +49,45 @@ std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
     return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
 }
 
+constexpr float kLauncherButtonBaseSize = 52.0f;
+
+// LeviLauncher derives an independent persisted HUD position from each stable
+// button ID ("external_button:<id>").
+std::string commandButtonId(std::size_t index) {
+    return "bedrocktools.CommandHotkey.Button" + std::to_string(index + 1);
+}
+
+std::string launcherLabel(std::string value) {
+    constexpr std::size_t maxBytes = 32;
+    if (value.size() <= maxBytes) return value;
+
+    std::size_t end = maxBytes;
+    while (end > 0 &&
+           (static_cast<unsigned char>(value[end]) & 0xC0u) == 0x80u) {
+        --end;
+    }
+    value.resize(end);
+    return value;
+}
+
 // Launcher overlay button palette (keycap preset).
 constexpr std::uint32_t kKeycapActiveBg = 0xC6C6C6;
-constexpr int kPressedHighlightMs = 130;
 
-std::string keyName(int key) {
-    // Android KEYCODE_* values. Unknown values are still usable and are shown numerically.
-    switch (key) {
-        case 4: return "BACK";
-        case 19: return "UP";
-        case 20: return "DOWN";
-        case 21: return "LEFT";
-        case 22: return "RIGHT";
-        case 23: return "ENTER";
-        case 24: return "VOL+";
-        case 25: return "VOL-";
-        case 61: return "TAB";
-        case 62: return "SPACE";
-        case 66: return "ENTER";
-        case 67: return "BACKSPACE";
-        case 82: return "MENU";
-        case 111: return "ESC";
-        case 113: return "CTRL_L";
-        case 114: return "CTRL_R";
-        case 115: return "CAPS";
-        case 116: return "SCROLL";
-        case 117: return "META_L";
-        case 118: return "META_R";
-        case 119: return "FUNCTION";
-        case 57: return "ALT_L";
-        case 58: return "ALT_R";
-        case 59: return "SHIFT_L";
-        case 60: return "SHIFT_R";
-        case 131: return "F1";
-        case 132: return "F2";
-        case 133: return "F3";
-        case 134: return "F4";
-        case 135: return "F5";
-        case 136: return "F6";
-        case 137: return "F7";
-        case 138: return "F8";
-        case 139: return "F9";
-        case 140: return "F10";
-        case 141: return "F11";
-        case 142: return "F12";
-        default:
-            if (key >= 7 && key <= 16) return std::string(1, static_cast<char>('0' + (key - 7)));
-            if (key >= 29 && key <= 54) return std::string(1, static_cast<char>('A' + (key - 29)));
-            return "KEY " + std::to_string(key);
-    }
-}
-
-}
+} // namespace
 
 CommandHotkeyModule::CommandHotkeyModule()
     : Module("Command Hotkey", "Run custom commands from keyboard keys or on-screen mobile buttons.") {
     g_instance = this;
     showInMenu = true;
-    hideInHudEditor = false;
-    isHudModule = true;
-    hudPosX = 0.0f;
-    hudPosY = 0.0f;
+    // On-screen commands are launcher overlay buttons. The parent module has
+    // no custom draw surface of its own in the HUD editor.
+    hideInHudEditor = true;
     // All command slots exist from the start (no "Add Command" button needed).
     applyDefaultBindings();
 }
 
 CommandHotkeyModule::~CommandHotkeyModule() {
+    unregisterOverlayButtons();
     if (g_instance == this) g_instance = nullptr;
 }
 
@@ -128,23 +96,15 @@ CommandHotkeyModule* CommandHotkeyModule::instance() {
 }
 
 void CommandHotkeyModule::onInit() {
-    // Input hooks are installed once by Runtime. This module only consumes the events.
-}
-
-bool CommandHotkeyModule::isPressed(std::size_t index) const {
-    if (m_pressedIndex != static_cast<int>(index)) return false;
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - m_pressedTime).count();
-    return elapsed >= 0 && elapsed < kPressedHighlightMs;
+    // Input hooks are installed once by Runtime. The launcher owns each
+    // on-screen button and its independent HUD-editor position.
+    syncOverlayButtons();
 }
 
 void CommandHotkeyModule::execute(std::size_t index) {
     if (!enabled || index >= MaxCommands) return;
     auto& binding = m_commands[index];
     if (!binding.enabled) return;
-
-    m_pressedIndex = static_cast<int>(index);
-    m_pressedTime = std::chrono::steady_clock::now();
 
     const auto command = normalizeCommand(binding.command);
     if (command.empty()) return;
@@ -164,196 +124,61 @@ bool CommandHotkeyModule::onKeyEvent(int key, bool isDown) {
     return false;
 }
 
-bool CommandHotkeyModule::onTouchEvent(float x, float y, bool isDown) {
-    if (!enabled || ModuleRegistry::get().keybindBlocked()) return false;
-
-    // HUD edit mode: drag individual buttons instead of executing
-    if (m_hudEditMode) {
-        if (isDown) {
-            // Touch down -> try to grab a button
-            for (std::size_t i = 0; i < MaxCommands; ++i) {
-                const auto& binding = m_commands[i];
-                if (!binding.enabled || !binding.screen) continue;
-                if (!inside(binding, x, y)) continue;
-                m_draggingIndex = static_cast<int>(i);
-                m_dragOffsetX = x - (binding.x + hudPosX);
-                m_dragOffsetY = y - (binding.y + hudPosY);
-                return true;
-            }
-            m_draggingIndex = -1;
-            return false;
-        } else {
-            // Move / Up -> if dragging, update position
-            if (m_draggingIndex >= 0 && m_draggingIndex < static_cast<int>(MaxCommands)) {
-                auto& b = m_commands[m_draggingIndex];
-                if (!b.enabled) {
-                    m_draggingIndex = -1;
-                    return false;
-                }
-                float newAbsX = x - m_dragOffsetX;
-                float newAbsY = y - m_dragOffsetY;
-                // Clamp absolute position 0..10000 then convert to relative
-                float clampedAbsX = std::clamp(newAbsX, 0.0f, 10000.0f);
-                float clampedAbsY = std::clamp(newAbsY, 0.0f, 10000.0f);
-                b.x = clampedAbsX - hudPosX;
-                b.y = clampedAbsY - hudPosY;
-                // also clamp relative to keep inside reasonable range
-                b.x = std::clamp(b.x, -5000.0f, 10000.0f);
-                b.y = std::clamp(b.y, -5000.0f, 10000.0f);
-                normalizeBindings();
-                bedrocktools::config::ConfigManager::get().save();
-                return true;
-            }
-            return false;
-        }
-    }
-
-    // Normal mode: execute on tap down
-    if (!isDown) return false;
-
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen) continue;
-        if (!inside(binding, x, y)) continue;
-        execute(i);
-        return true;
-    }
-    return false;
-}
-
-void CommandHotkeyModule::onFrame() {
-    if (!enabled) {
-        std::vector<PLModMenu_DrawCommand> empty;
-        submitDrawCommands(moduleId, empty);
-        return;
-    }
-
-    std::vector<PLModMenu_DrawCommand> commands;
-    commands.reserve(MaxCommands * 3 + 1);
-    std::vector<std::string> labels;
-    labels.reserve(MaxCommands);
-
-    // HUD editor group hitbox: compute union of all screen buttons and add transparent bg so gaps are draggable
-    {
-        float minRelX = std::numeric_limits<float>::max();
-        float minRelY = std::numeric_limits<float>::max();
-        float maxRelX = std::numeric_limits<float>::lowest();
-        float maxRelY = std::numeric_limits<float>::lowest();
-        bool hasAny = false;
-        for (std::size_t j = 0; j < MaxCommands; ++j) {
-            const auto& b = m_commands[j];
-            if (!b.enabled || !b.screen) continue;
-            minRelX = std::min(minRelX, b.x);
-            minRelY = std::min(minRelY, b.y);
-            maxRelX = std::max(maxRelX, b.x + b.width);
-            maxRelY = std::max(maxRelY, b.y + b.height);
-            hasAny = true;
-        }
-        if (hasAny) {
-            PLModMenu_DrawCommand groupBg{};
-            groupBg.type = PL_DRAW_RECT_FILLED;
-            groupBg.x = hudPosX + minRelX;
-            groupBg.y = hudPosY + minRelY;
-            groupBg.w = maxRelX - minRelX;
-            groupBg.h = maxRelY - minRelY;
-            groupBg.x3 = m_buttonRadius;
-            groupBg.color = 0x02000000; // nearly transparent, makes whole group draggable in HUD editor
-            commands.push_back(groupBg);
-        }
-    }
-
-    for (std::size_t i = 0; i < MaxCommands; ++i) {
-        const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen) continue;
-
-        float absX = binding.x + hudPosX;
-        float absY = binding.y + hudPosY;
-
-        const bool dragging = m_hudEditMode && m_draggingIndex == static_cast<int>(i);
-        const bool pressed = isPressed(i);
-
-        // Face: launcher keycap style (light gray face, 0.85 alpha, tiny radius).
-        PLModMenu_DrawCommand rect{};
-        rect.type = PL_DRAW_RECT_FILLED;
-        rect.x = absX;
-        rect.y = absY;
-        rect.w = binding.width;
-        rect.h = binding.height;
-        rect.x3 = m_buttonRadius;
-        if (dragging) {
-            rect.color = colorWithAlpha(0x4AE0A0, 0.95f);
-        } else if (pressed) {
-            rect.color = colorWithAlpha(kKeycapActiveBg, m_buttonOpacity);
-        } else {
-            rect.color = colorWithAlpha(m_buttonColor, m_buttonOpacity);
-        }
-        commands.push_back(rect);
-
-        // Border: same 2px dark stroke the launcher draws around its buttons.
-        PLModMenu_DrawCommand border{};
-        border.type = PL_DRAW_RECT;
-        border.x = absX;
-        border.y = absY;
-        border.w = binding.width;
-        border.h = binding.height;
-        border.x3 = m_buttonRadius;
-        border.size = std::max(1.0f, m_buttonBorderWidth);
-        border.color = dragging ? 0xFF4AE0A0
-                                : colorWithAlpha(m_buttonBorderColor, m_buttonOpacity);
-        commands.push_back(border);
-
-        labels.push_back(defaultLabel(binding, i));
-        PLModMenu_DrawCommand text{};
-        text.type = PL_DRAW_TEXT;
-        text.x = absX;
-        text.y = absY;
-        text.w = binding.width;
-        text.h = binding.height;
-        // The overlay forwards this value to Android Paint.setTextSize(), so it
-        // must be a usable pixel size rather than the old 0.5–4 scale value.
-        text.size = binding.textSize;
-        text.color = pressed ? 0xFF1F1F1Fu
-                             : (0xFF000000u | (binding.textColor & 0x00FFFFFFu));
-        text.text = labels.back().c_str();
-        commands.push_back(text);
-    }
-
-    submitDrawCommands(moduleId, commands);
-}
-
 void CommandHotkeyModule::applyDefaultBindings() {
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         m_commands[i] = Binding{};
         m_commands[i].enabled = true;
         m_commands[i].screen = true;
-        // positions are relative to hudPos
-        m_commands[i].x = 24.0f;
-        m_commands[i].y = 80.0f + static_cast<float>(i) * 52.0f;
         m_commands[i].width = 110.0f;
         m_commands[i].height = 40.0f;
         m_commands[i].label = "Command " + std::to_string(i + 1);
         m_commands[i].textColor = 0x373737;
     }
-    // Invalidate dragging
-    m_draggingIndex = -1;
 }
 
 void CommandHotkeyModule::normalizeBindings() {
-    // Clamp HUD position
-    hudPosX = std::clamp(hudPosX, -5000.0f, 10000.0f);
-    hudPosY = std::clamp(hudPosY, -5000.0f, 10000.0f);
+    for (auto& binding : m_commands) {
+        if (!binding.enabled) continue;
+        if (binding.command.size() > 256) binding.command.resize(256);
+        if (binding.label.size() > 64) binding.label.resize(64);
+        binding.width = std::clamp(binding.width, 40.0f, 600.0f);
+        binding.height = std::clamp(binding.height, 24.0f, 160.0f);
+        binding.textColor &= 0x00FFFFFFu;
+    }
+}
+
+void CommandHotkeyModule::unregisterOverlayButtons() {
+    for (std::size_t i = 0; i < MaxCommands; ++i)
+        pl::modmenu::unregisterButton(commandButtonId(i));
+}
+
+void CommandHotkeyModule::syncOverlayButtons() {
+    unregisterOverlayButtons();
     for (std::size_t i = 0; i < MaxCommands; ++i) {
-        auto& b = m_commands[i];
-        if (!b.enabled) continue;
-        if (b.command.size() > 256) b.command.resize(256);
-        if (b.label.size() > 64) b.label.resize(64);
-        b.width = std::clamp(b.width, 40.0f, 600.0f);
-        b.height = std::clamp(b.height, 24.0f, 160.0f);
-        b.textSize = std::clamp(b.textSize, 8.0f, 100.0f);
-        b.textColor &= 0x00FFFFFFu;
-        // keep relative x/y within reasonable range, absolute will be clamped on drag
-        b.x = std::clamp(b.x, -5000.0f, 10000.0f);
-        b.y = std::clamp(b.y, -5000.0f, 10000.0f);
+        const auto& binding = m_commands[i];
+        if (!binding.enabled || !binding.screen)
+            continue;
+
+        const std::string label = launcherLabel(defaultLabel(binding, i));
+        const std::string displayName = "Command " + std::to_string(i + 1);
+        pl::modmenu::ButtonBuilder builder(commandButtonId(i), displayName);
+        builder.moduleId(moduleId)
+            .label(label)
+            .behavior(pl::modmenu::ButtonBehavior::Click)
+            .defaultVisible(true)
+            .stylePreset(pl::modmenu::ButtonStylePreset::Keycap)
+            .styleColors(colorWithAlpha(m_buttonColor, m_buttonOpacity),
+                         colorWithAlpha(kKeycapActiveBg, m_buttonOpacity),
+                         colorWithAlpha(m_buttonBorderColor, m_buttonOpacity))
+            .textColor(0xFF000000u | (binding.textColor & 0x00FFFFFFu))
+            .activeTextColor(0xFF1F1F1Fu)
+            .sizeScale(binding.width / kLauncherButtonBaseSize,
+                       binding.height / kLauncherButtonBaseSize)
+            .onEvent([this, i](std::string_view, pl::modmenu::ButtonEvent event, float) {
+                if (event == pl::modmenu::ButtonEvent::Click)
+                    execute(i);
+            });
+        (void)builder.registerButton();
     }
 }
 
@@ -374,12 +199,6 @@ std::string CommandHotkeyModule::defaultLabel(const Binding& binding, std::size_
     return "Command " + std::to_string(index + 1);
 }
 
-bool CommandHotkeyModule::inside(const Binding& binding, float x, float y) const {
-    float absX = binding.x + hudPosX;
-    float absY = binding.y + hudPosY;
-    return x >= absX && x <= absX + binding.width &&
-           y >= absY && y <= absY + binding.height;
-}
 
 void CommandHotkeyModule::sendCommandPacket(const std::string& command) {
     if (!resolvePacketFunctions()) return;
@@ -421,8 +240,6 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     const bool legacyStyle = !j.contains("m_buttonBorderColor");
 
     if (!legacyStyle && j.contains("m_buttonOpacity")) m_buttonOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
-    if (!legacyStyle && j.contains("m_buttonRadius")) m_buttonRadius = std::clamp(j["m_buttonRadius"].get<float>(), 0.0f, 40.0f);
-    if (j.contains("m_buttonBorderWidth")) m_buttonBorderWidth = std::clamp(j["m_buttonBorderWidth"].get<float>(), 0.0f, 8.0f);
     if (j.contains("m_buttonBorderColor")) {
         const auto& v = j["m_buttonBorderColor"];
         if (v.is_string()) {
@@ -445,16 +262,6 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
             m_buttonColor = static_cast<std::uint32_t>(v.get<std::uint64_t>()) & 0x00FFFFFFu;
         }
     }
-    // HUD editor fields
-    if (j.contains("hudPosX")) hudPosX = j["hudPosX"].get<float>();
-    else if (j.contains("m_hudPosX")) hudPosX = j["m_hudPosX"].get<float>();
-    if (j.contains("hudPosY")) hudPosY = j["hudPosY"].get<float>();
-    else if (j.contains("m_hudPosY")) hudPosY = j["m_hudPosY"].get<float>();
-    if (j.contains("isHudModule")) isHudModule = j["isHudModule"].get<bool>();
-    if (j.contains("m_isHudModule")) isHudModule = j["m_isHudModule"].get<bool>();
-    if (j.contains("m_hudEditMode")) m_hudEditMode = j["m_hudEditMode"].get<bool>();
-    else if (j.contains("hudEditMode")) m_hudEditMode = j["hudEditMode"].get<bool>();
-
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         const std::string p = "m_command" + std::to_string(i + 1);
         auto& b = m_commands[i];
@@ -472,11 +279,8 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
         if (j.contains(p + "Command")) b.command = j[p + "Command"].get<std::string>();
         if (j.contains(p + "Keybind")) b.key = j[p + "Keybind"].get<int>();
         if (j.contains(p + "Screen")) b.screen = j[p + "Screen"].get<bool>();
-        if (j.contains(p + "X")) b.x = j[p + "X"].get<float>();
-        if (j.contains(p + "Y")) b.y = j[p + "Y"].get<float>();
         if (j.contains(p + "Width")) b.width = j[p + "Width"].get<float>();
         if (j.contains(p + "Height")) b.height = j[p + "Height"].get<float>();
-        if (j.contains(p + "TextSize")) b.textSize = j[p + "TextSize"].get<float>();
         if (!legacyStyle && j.contains(p + "TextColor")) {
             const auto& v = j[p + "TextColor"];
             if (v.is_string()) {
@@ -491,40 +295,14 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
         if (j.contains(p + "Label")) b.label = j[p + "Label"].get<std::string>();
     }
 
-    // Migration: old versions stored absolute positions with hudPos == 0.
-    // Convert to relative (hudPos + offset) so HUD editor group drag works correctly.
-    // After migration the group's bounding box left/top becomes hudPos and relative coords start at 0.
-    if (hudPosX == 0.0f && hudPosY == 0.0f) {
-        float minX = std::numeric_limits<float>::max();
-        float minY = std::numeric_limits<float>::max();
-        bool has = false;
-        for (auto &b : m_commands) if (b.enabled) {
-            minX = std::min(minX, b.x);
-            minY = std::min(minY, b.y);
-            has = true;
-        }
-        if (has && (minX != 0.0f || minY != 0.0f)) {
-            // Only migrate if min is not already 0 (avoid moving already-relative configs)
-            // Check that at least one binding's position equals absolute expected (e.g., 24,80)
-            // For safety, migrate only when hudPos was default 0 and we have absolute positions.
-            hudPosX = minX;
-            hudPosY = minY;
-            for (auto &b : m_commands) if (b.enabled) {
-                b.x -= minX;
-                b.y -= minY;
-            }
-        }
-    }
-
     normalizeBindings();
+    syncOverlayButtons();
 }
 
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
 
     j["m_buttonOpacity"] = m_buttonOpacity;
-    j["m_buttonRadius"] = m_buttonRadius;
-    j["m_buttonBorderWidth"] = m_buttonBorderWidth;
 
     char borderHexBuf[10];
     std::snprintf(borderHexBuf, sizeof(borderHexBuf), "#%06X", m_buttonBorderColor & 0x00FFFFFFu);
@@ -533,12 +311,6 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
     char hexBuf[10];
     std::snprintf(hexBuf, sizeof(hexBuf), "#%06X", m_buttonColor & 0x00FFFFFFu);
     j["m_buttonColor"] = std::string(hexBuf);
-
-    // HUD editor integration
-    j["hudPosX"] = hudPosX;
-    j["hudPosY"] = hudPosY;
-    j["isHudModule"] = isHudModule;
-    j["m_hudEditMode"] = m_hudEditMode;
 
     // Always emit all command slots so ModMenu registers them at startup.
     // All slots exist directly in the menu (no Add Command / Remove buttons),
@@ -555,26 +327,20 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
             j[p + "Command"] = b.command;
             j[p + "Keybind"] = b.key;
             j[p + "Screen"] = b.screen;
-            j[p + "X"] = b.x;
-            j[p + "Y"] = b.y;
             j[p + "Width"] = b.width;
             j[p + "Height"] = b.height;
-            j[p + "TextSize"] = b.textSize;
             char commandTextColor[10];
             std::snprintf(commandTextColor, sizeof(commandTextColor), "#%06X", b.textColor & 0x00FFFFFFu);
             j[p + "TextColor"] = std::string(commandTextColor);
             j[p + "Label"] = b.label;
         } else {
-            // Emit defaults for disabled slots - ensures registration and instant visibility when enabled
-            // Use per-index default position so each slot has distinct place when later enabled
+            // Emit defaults for disabled slots so their settings are available
+            // immediately when the slot is enabled.
             j[p + "Command"] = "";
             j[p + "Keybind"] = 0;
             j[p + "Screen"] = false;
-            j[p + "X"] = 24.0f;
-            j[p + "Y"] = 80.0f + static_cast<float>(i) * 52.0f;
             j[p + "Width"] = 110.0f;
             j[p + "Height"] = 40.0f;
-            j[p + "TextSize"] = 20.0f;
             j[p + "TextColor"] = "#373737";
             j[p + "Label"] = "";
         }
