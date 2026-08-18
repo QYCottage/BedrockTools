@@ -1,5 +1,6 @@
 #include "effectdisplay.hpp"
 
+#include "effecticons.hpp"
 #include "core/Runtime.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/events/EventBus.hpp>
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -89,9 +91,6 @@ constexpr std::array<EffectDefinition, 38> kEffects{{
     {"Breath of the Nautilus", 0x4EC2C8},
 }};
 
-constexpr int kIconSize = 16;
-using IconPixels = std::array<std::uint8_t, kIconSize * kIconSize * 4>;
-
 EffectDisplayModule* g_effectDisplay = nullptr;
 
 const EffectDefinition& definitionFor(std::uint32_t id) {
@@ -103,83 +102,6 @@ const std::string& imageIdFor(std::uint32_t id) {
     static std::unordered_map<std::uint32_t, std::string> ids;
     const auto [it, inserted] = ids.try_emplace(id, "bedrocktools.effect." + std::to_string(id));
     return it->second;
-}
-
-void setPixel(IconPixels& pixels, int x, int y, std::uint32_t rgb, std::uint8_t alpha = 255) {
-    if (x < 0 || y < 0 || x >= kIconSize || y >= kIconSize) return;
-    const auto offset = static_cast<std::size_t>((y * kIconSize + x) * 4);
-    pixels[offset] = static_cast<std::uint8_t>((rgb >> 16) & 0xFF);
-    pixels[offset + 1] = static_cast<std::uint8_t>((rgb >> 8) & 0xFF);
-    pixels[offset + 2] = static_cast<std::uint8_t>(rgb & 0xFF);
-    pixels[offset + 3] = alpha;
-}
-
-IconPixels makeEffectIcon(std::uint32_t id, std::uint32_t color) {
-    IconPixels pixels{};
-    const std::uint32_t dark = ((color & 0xFEFEFE) >> 1);
-
-    // Pixel-art medallion and one of six small glyphs. The palette follows
-    // each vanilla effect color, so 36 effects remain easy to distinguish.
-    for (int y = 1; y < 15; ++y) {
-        for (int x = 1; x < 15; ++x) {
-            const int dx = x - 7;
-            const int dy = y - 7;
-            const int distance = dx * dx + dy * dy;
-            if (distance <= 43) setPixel(pixels, x, y, distance >= 32 ? dark : color);
-        }
-    }
-
-    constexpr std::uint32_t white = 0xFFF7D6;
-    switch (id % 6) {
-        case 0: // flame/drop
-            for (int y = 4; y <= 11; ++y) {
-                const int half = y < 8 ? (y - 3) / 2 : (11 - y) / 2 + 1;
-                for (int x = 7 - half; x <= 7 + half; ++x) setPixel(pixels, x, y, white);
-            }
-            break;
-        case 1: // forward chevrons
-            for (int i = 0; i < 5; ++i) {
-                setPixel(pixels, 4 + i, 4 + i, white);
-                setPixel(pixels, 4 + i, 10 - i, white);
-                setPixel(pixels, 8 + i / 2, 4 + i, white);
-                setPixel(pixels, 8 + i / 2, 10 - i, white);
-            }
-            break;
-        case 2: // shield
-            for (int y = 4; y <= 10; ++y) {
-                const int inset = y > 8 ? y - 8 : 0;
-                setPixel(pixels, 4 + inset, y, white);
-                setPixel(pixels, 10 - inset, y, white);
-            }
-            for (int x = 4; x <= 10; ++x) setPixel(pixels, x, 4, white);
-            break;
-        case 3: // bubbles
-            for (const auto [x, y] : std::array<std::pair<int, int>, 5>{{{5, 5}, {9, 4}, {7, 8}, {10, 10}, {4, 11}}}) {
-                setPixel(pixels, x, y, white);
-                setPixel(pixels, x + 1, y, white);
-                setPixel(pixels, x, y + 1, white);
-            }
-            break;
-        case 4: // eye
-            for (int i = 0; i < 4; ++i) {
-                setPixel(pixels, 4 + i, 7 - i / 2, white);
-                setPixel(pixels, 4 + i, 8 + i / 2, white);
-                setPixel(pixels, 10 - i, 7 - i / 2, white);
-                setPixel(pixels, 10 - i, 8 + i / 2, white);
-            }
-            setPixel(pixels, 7, 7, dark);
-            setPixel(pixels, 7, 8, dark);
-            break;
-        default: // sparkle
-            for (int i = 3; i <= 11; ++i) {
-                setPixel(pixels, 7, i, white);
-                setPixel(pixels, i, 7, white);
-            }
-            setPixel(pixels, 5, 5, white);
-            setPixel(pixels, 9, 9, white);
-            break;
-    }
-    return pixels;
 }
 
 void ensureEffectIcon(std::uint32_t id) {
@@ -215,6 +137,55 @@ std::string formatDuration(int ticks) {
     if (hours > 0) std::snprintf(output, sizeof(output), "%d:%02d:%02d", hours, minutes, remaining);
     else std::snprintf(output, sizeof(output), "%d:%02d", minutes, remaining);
     return output;
+}
+
+// ---------------------------------------------------------------------------
+// Time helpers for the countdown colors, progress bars and entrance
+// animations. All animations run off a steady clock so they stay smooth
+// regardless of the game's tick rate.
+// ---------------------------------------------------------------------------
+
+using SteadyClock = std::chrono::steady_clock;
+
+// Elapsed seconds between two clock time points, as a float. The subtraction
+// happens in the clock's integer domain, so short intervals stay exact even
+// though the clock has been running for a long time.
+float secondsSince(SteadyClock::time_point from, SteadyClock::time_point to) {
+    return std::chrono::duration<float>(to - from).count();
+}
+
+float easeOutCubic(float t) {
+    return 1.0f - std::pow(1.0f - t, 3.0f);
+}
+
+float easeOutBack(float t) {
+    constexpr float c1 = 1.70158f;
+    constexpr float c3 = c1 + 1.0f;
+    return 1.0f + c3 * std::pow(t - 1.0f, 3.0f) + c1 * std::pow(t - 1.0f, 2.0f);
+}
+
+std::uint32_t withAlpha(std::uint32_t color, float alpha) {
+    const auto a = static_cast<std::uint32_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
+    return (a << 24) | (color & 0x00FFFFFF);
+}
+
+int secondsRemaining(int ticks) {
+    if (ticks < 0) return -1;
+    return std::max(0, (ticks + 19) / 20);
+}
+
+// Colors the remaining-time text by urgency. Below ten seconds the text
+// pulses so an about-to-expire effect is hard to miss. `pulsePhase` is a
+// small accumulated phase (radians), not an absolute timestamp, so the
+// oscillation stays smooth and precise.
+std::uint32_t durationColor(int ticks, float pulsePhase, float& alphaOut) {
+    alphaOut = 1.0f;
+    const int seconds = secondsRemaining(ticks);
+    if (seconds < 0) return 0xFF7FE8E0;      // infinite
+    if (seconds >= 60) return 0xFFD8D8D8;    // plenty of time
+    if (seconds >= 10) return 0xFFFFC94D;    // running out
+    alphaOut = 0.55f + 0.45f * (0.5f + 0.5f * std::sin(pulsePhase));
+    return 0xFFFF5A5A;                       // about to expire
 }
 
 struct LayoutCandidate {
@@ -366,6 +337,8 @@ void EffectDisplayModule::onInit() {
 void EffectDisplayModule::onDisable() {
     std::lock_guard lock(m_mutex);
     m_effects.clear();
+    m_timing.clear();
+    m_lastChangeAt = SteadyClock::time_point{};
     ::submitDrawCommands(moduleId, {});
 }
 
@@ -377,7 +350,49 @@ void EffectDisplayModule::updateEffects(bedrocktools::sdk::Player* player) {
             if (auto* component = context->tryGetComponent<MobEffectsComponent>()) next = readComponent(*component);
         }
     }
+
+    const auto now = SteadyClock::now();
     std::lock_guard lock(m_mutex);
+
+    // Detect any change in the active effect set so the panel can re-animate.
+    bool changed = next.size() != m_effects.size();
+    if (!changed) {
+        bool seen[256] = {};
+        bool nextSeen[256] = {};
+        for (const auto& effect : m_effects) {
+            if (effect.id < 256) seen[effect.id] = true;
+        }
+        for (const auto& effect : next) {
+            if (effect.id < 256) nextSeen[effect.id] = true;
+        }
+        for (int id = 1; id < 256; ++id) {
+            if (seen[id] != nextSeen[id]) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    // Track appearance time and longest observed duration per effect. The max
+    // duration is the reference for the remaining-time bar and is relearned
+    // whenever an effect goes missing for a moment (new potion, etc.).
+    for (const auto& effect : next) {
+        auto it = m_timing.find(effect.id);
+        if (it == m_timing.end()) {
+            m_timing.emplace(effect.id, EffectTiming{now, now, std::max(effect.durationTicks, 0)});
+        } else {
+            it->second.lastSeenAt = now;
+            if (effect.durationTicks > it->second.maxDurationTicks) {
+                it->second.maxDurationTicks = effect.durationTicks;
+            }
+        }
+    }
+    for (auto it = m_timing.begin(); it != m_timing.end();) {
+        if (now - it->second.lastSeenAt > std::chrono::milliseconds(1500)) it = m_timing.erase(it);
+        else ++it;
+    }
+
+    if (changed) m_lastChangeAt = now;
     m_effects.swap(next);
 }
 
@@ -385,47 +400,102 @@ void EffectDisplayModule::onFrame() {
     if (!enabled) return;
     registerResources();
 
+    const auto now = SteadyClock::now();
     std::vector<ActiveEffect> effects;
+    std::unordered_map<std::uint32_t, EffectTiming> timing;
+    SteadyClock::time_point changeAt{};
     {
         std::lock_guard lock(m_mutex);
         effects = m_effects;
+        timing = m_timing;
+        changeAt = m_lastChangeAt;
     }
+
+    // Advance the low-time pulse phase by the real frame delta.
+    if (m_lastFrameTime == SteadyClock::time_point{}) m_lastFrameTime = now;
+    m_pulsePhase += secondsSince(m_lastFrameTime, now) * 12.0f;
+    if (m_pulsePhase > 25.0f) m_pulsePhase -= 25.0f;
+    m_lastFrameTime = now;
+
+    // HUD-editor preview: a believable spread of effects.
     if (effects.empty() && m_preview) {
         effects = {{1, 68 * 20, 1}, {12, 191 * 20, 0}, {13, 50 * 20, 0}, {14, 213 * 20, 0}};
+        for (const auto& effect : effects) {
+            timing.emplace(effect.id, EffectTiming{now - std::chrono::seconds(1), now, effect.durationTicks * 2});
+        }
     }
 
     const float scale = std::clamp(m_scale, 0.25f, 5.0f);
     const float panelWidth = std::max(110.0f, m_width) * scale;
-    const float rowHeight = 46.0f * scale;
-    const float padding = 7.0f * scale;
-    const float iconSize = 28.0f * scale;
+    const float rowHeight = 48.0f * scale;
+    const float padding = 8.0f * scale;
+    const float iconSize = 30.0f * scale;
     const float nameSize = 18.0f * scale;
-    const float durationSize = 16.0f * scale;
+    const float durationSize = 15.0f * scale;
+    const float barHeight = 3.0f * scale;
+    const float cornerRadius = 9.0f * scale;
     const int visible = effects.empty()
         ? 1
         : std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
     const float panelHeight = padding * 2.0f + rowHeight * visible;
 
+    // Whole-panel entrance: fade in with a gentle slide whenever the set of
+    // active effects changes.
+    float fade = 1.0f;
+    if (m_animate && changeAt != SteadyClock::time_point{}) {
+        const float t = std::clamp(secondsSince(changeAt, now) / 0.22f, 0.0f, 1.0f);
+        fade = easeOutCubic(t);
+    }
+    const float panelY = hudPosY + (1.0f - fade) * 8.0f * scale;
+
     std::vector<PLModMenu_DrawCommand> commands;
-    commands.reserve(2 + static_cast<std::size_t>(visible) * 3);
+    commands.reserve(8 + static_cast<std::size_t>(visible) * 8);
 
     if (m_showBackground) {
+        const auto bgAlpha = std::clamp(m_backgroundOpacity * fade, 0.0f, 1.0f);
+
+        // Soft border around the panel.
+        PLModMenu_DrawCommand border{};
+        border.type = PL_DRAW_RECT_FILLED;
+        border.x = hudPosX - 1.0f * scale;
+        border.y = panelY - 1.0f * scale;
+        border.w = panelWidth + 2.0f * scale;
+        border.h = panelHeight + 2.0f * scale;
+        border.x3 = cornerRadius + 1.0f * scale;
+        border.color = withAlpha(0x5A6C8C, bgAlpha * 0.45f);
+        commands.push_back(border);
+
         PLModMenu_DrawCommand background{};
         background.type = PL_DRAW_RECT_FILLED;
         background.x = hudPosX;
-        background.y = hudPosY;
+        background.y = panelY;
         background.w = panelWidth;
         background.h = panelHeight;
-        const auto alpha = static_cast<std::uint32_t>(std::clamp(m_backgroundOpacity, 0.0f, 1.0f) * 255.0f);
-        background.color = (alpha << 24) | 0x10151F;
+        background.x3 = cornerRadius;
+        background.color = (static_cast<std::uint32_t>(bgAlpha * 255.0f) << 24) | 0x0E1420;
         commands.push_back(background);
+
+        // Hairline separators between rows.
+        if (visible > 1) {
+            for (int index = 1; index < visible; ++index) {
+                PLModMenu_DrawCommand separator{};
+                separator.type = PL_DRAW_LINE;
+                separator.x = hudPosX + padding;
+                separator.y = panelY + padding + rowHeight * index;
+                separator.w = panelWidth - padding * 2.0f;
+                separator.h = 0.0f;
+                separator.size = std::max(0.5f, 1.0f * scale);
+                separator.color = withAlpha(0xFFFFFF, 0.08f * fade);
+                commands.push_back(separator);
+            }
+        }
     } else {
         // Keep a nearly-transparent hitbox so the HUD editor can still grab
         // the module when the background is hidden and no effects are active.
         PLModMenu_DrawCommand hitbox{};
         hitbox.type = PL_DRAW_RECT_FILLED;
         hitbox.x = hudPosX;
-        hitbox.y = hudPosY;
+        hitbox.y = panelY;
         hitbox.w = panelWidth;
         hitbox.h = panelHeight;
         hitbox.color = 0x02000000;
@@ -436,11 +506,11 @@ void EffectDisplayModule::onFrame() {
         PLModMenu_DrawCommand emptyCommand{};
         emptyCommand.type = PL_DRAW_TEXT;
         emptyCommand.x = hudPosX + padding;
-        emptyCommand.y = hudPosY + padding;
+        emptyCommand.y = panelY + padding;
         emptyCommand.w = panelWidth - padding * 2.0f;
         emptyCommand.h = nameSize + 3.0f * scale;
         emptyCommand.size = nameSize;
-        emptyCommand.color = 0xFFD8D8D8;
+        emptyCommand.color = withAlpha(0xFFD8D8D8, fade);
         emptyCommand.fontId = "minecraft";
         emptyCommand.text = "No Effects";
         commands.push_back(emptyCommand);
@@ -451,17 +521,28 @@ void EffectDisplayModule::onFrame() {
     for (int index = 0; index < visible; ++index) {
         const auto& effect = effects[static_cast<std::size_t>(index)];
         ensureEffectIcon(effect.id);
-        const float rowY = hudPosY + padding + rowHeight * index;
+        const float rowY = panelY + padding + rowHeight * index;
         float textX = hudPosX + padding;
 
+        // Newly-applied effects pop in with a little overshoot.
+        float iconPop = 1.0f;
+        if (m_animate) {
+            const auto it = timing.find(effect.id);
+            if (it != timing.end() && it->second.appearAt != SteadyClock::time_point{}) {
+                const float t = std::clamp(secondsSince(it->second.appearAt, now) / 0.20f, 0.0f, 1.0f);
+                iconPop = 0.55f + 0.45f * easeOutBack(t);
+            }
+        }
+
         if (m_showIcons) {
+            const float drawSize = iconSize * iconPop;
             PLModMenu_DrawCommand icon{};
             icon.type = PL_DRAW_IMAGE;
-            icon.x = textX;
-            icon.y = rowY + (rowHeight - iconSize) * 0.5f;
-            icon.w = iconSize;
-            icon.h = iconSize;
-            icon.color = 0xFFFFFFFF;
+            icon.x = textX + (iconSize - drawSize) * 0.5f;
+            icon.y = rowY + (rowHeight - iconSize) * 0.5f + (iconSize - drawSize) * 0.5f;
+            icon.w = drawSize;
+            icon.h = drawSize;
+            icon.color = withAlpha(0xFFFFFF, fade);
             icon.imageId = imageIdFor(effect.id);
             commands.push_back(icon);
             textX += iconSize + 7.0f * scale;
@@ -474,15 +555,19 @@ void EffectDisplayModule::onFrame() {
             if (!level.empty()) name += " " + level;
         }
         const std::string duration = formatDuration(effect.durationTicks);
+        const float contentWidth = panelWidth - (textX - hudPosX) - padding;
+
+        float durationAlpha = 1.0f;
+        const std::uint32_t durationColorValue = durationColor(effect.durationTicks, m_pulsePhase, durationAlpha);
 
         PLModMenu_DrawCommand nameCommand{};
         nameCommand.type = PL_DRAW_TEXT;
         nameCommand.x = textX;
         nameCommand.y = rowY;
-        nameCommand.w = panelWidth - (textX - hudPosX) - padding;
+        nameCommand.w = contentWidth;
         nameCommand.h = nameSize + 3.0f * scale;
         nameCommand.size = nameSize;
-        nameCommand.color = 0xFFF4F4F4;
+        nameCommand.color = withAlpha(0xFFF4F4F4, fade);
         nameCommand.fontId = "minecraft";
         nameCommand.text = name;
         commands.push_back(nameCommand);
@@ -490,14 +575,51 @@ void EffectDisplayModule::onFrame() {
         PLModMenu_DrawCommand durationCommand{};
         durationCommand.type = PL_DRAW_TEXT;
         durationCommand.x = textX;
-        durationCommand.y = rowY + 20.0f * scale;
-        durationCommand.w = nameCommand.w;
+        durationCommand.y = rowY + 19.0f * scale;
+        durationCommand.w = contentWidth;
         durationCommand.h = durationSize + 2.0f * scale;
         durationCommand.size = durationSize;
-        durationCommand.color = 0xFFD8D8D8;
+        durationCommand.color = withAlpha(durationColorValue, fade * durationAlpha);
         durationCommand.fontId = "minecraft";
         durationCommand.text = duration;
         commands.push_back(durationCommand);
+
+        // Remaining-time progress bar, tinted with the effect's own color.
+        if (m_showProgressBar) {
+            float fraction = 1.0f;
+            const auto it = timing.find(effect.id);
+            if (it != timing.end() && it->second.maxDurationTicks > 0 && effect.durationTicks >= 0) {
+                fraction = std::clamp(
+                    static_cast<float>(effect.durationTicks) / static_cast<float>(it->second.maxDurationTicks),
+                    0.0f,
+                    1.0f
+                );
+            }
+            const float barY = rowY + rowHeight - barHeight - 6.0f * scale;
+            const float barRadius = barHeight * 0.5f;
+
+            PLModMenu_DrawCommand track{};
+            track.type = PL_DRAW_RECT_FILLED;
+            track.x = textX;
+            track.y = barY;
+            track.w = contentWidth;
+            track.h = barHeight;
+            track.x3 = barRadius;
+            track.color = withAlpha(0xFFFFFF, 0.10f * fade);
+            commands.push_back(track);
+
+            if (fraction > 0.01f) {
+                PLModMenu_DrawCommand fill{};
+                fill.type = PL_DRAW_RECT_FILLED;
+                fill.x = textX;
+                fill.y = barY;
+                fill.w = std::max(contentWidth * fraction, barHeight * 2.0f);
+                fill.h = barHeight;
+                fill.x3 = barRadius;
+                fill.color = withAlpha(definitionFor(effect.id).color, 0.85f * fade);
+                commands.push_back(fill);
+            }
+        }
     }
 
     ::submitDrawCommands(moduleId, commands);
@@ -514,6 +636,8 @@ void EffectDisplayModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_showBackground")) m_showBackground = j["m_showBackground"].get<bool>();
     if (j.contains("m_showIcons")) m_showIcons = j["m_showIcons"].get<bool>();
     if (j.contains("m_showLevel")) m_showLevel = j["m_showLevel"].get<bool>();
+    if (j.contains("m_showProgressBar")) m_showProgressBar = j["m_showProgressBar"].get<bool>();
+    if (j.contains("m_animate")) m_animate = j["m_animate"].get<bool>();
     if (j.contains("m_preview")) m_preview = j["m_preview"].get<bool>();
     if (j.contains("m_maxVisible")) m_maxVisible = j["m_maxVisible"].get<int>();
 }
@@ -529,6 +653,8 @@ void EffectDisplayModule::saveConfig(nlohmann::json& j) {
     j["m_showBackground"] = m_showBackground;
     j["m_showIcons"] = m_showIcons;
     j["m_showLevel"] = m_showLevel;
+    j["m_showProgressBar"] = m_showProgressBar;
+    j["m_animate"] = m_animate;
     j["m_preview"] = m_preview;
     j["m_maxVisible"] = m_maxVisible;
 }

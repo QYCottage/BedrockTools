@@ -2,9 +2,11 @@
 
 #include "../Module.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace bedrocktools::sdk { class Player; }
@@ -15,6 +17,14 @@ public:
         std::uint32_t id = 0;
         int durationTicks = 0;
         int amplifier = 0;
+    };
+
+    // Per-effect bookkeeping used for animations and the remaining-time bar.
+    // Timestamps are kept as time points so frame-to-frame deltas stay exact.
+    struct EffectTiming {
+        std::chrono::steady_clock::time_point appearAt{};
+        std::chrono::steady_clock::time_point lastSeenAt{};
+        int maxDurationTicks = 0;   // longest observed duration (bar reference)
     };
 
     EffectDisplayModule();
@@ -33,7 +43,13 @@ private:
 
     std::mutex m_mutex;
     std::vector<ActiveEffect> m_effects;
+    std::unordered_map<std::uint32_t, EffectTiming> m_timing;
+    std::chrono::steady_clock::time_point m_lastChangeAt{};
     bool m_resourcesRegistered = false;
+
+    // Animation clocks (render-thread only).
+    std::chrono::steady_clock::time_point m_lastFrameTime{};
+    float m_pulsePhase = 0.0f;
 
     float hudPosX = 8.0f;
     float hudPosY = 70.0f;
@@ -45,6 +61,8 @@ private:
     bool m_showBackground = true;
     bool m_showIcons = true;
     bool m_showLevel = true;
+    bool m_showProgressBar = true;
+    bool m_animate = true;
     bool m_preview = false;
     int m_maxVisible = 36;
 };
