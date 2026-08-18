@@ -16,6 +16,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -69,9 +70,9 @@ struct EffectDefinition {
     std::uint32_t color;
 };
 
-// Bedrock's complete built-in effect range (including the 1.21 trial effects).
-// Index zero is the internal no-effect value.
-constexpr std::array<EffectDefinition, 37> kEffects{{
+// Bedrock's complete built-in effect range (including the 1.21 trial effects
+// and Breath of the Nautilus). Index zero is the internal no-effect value.
+constexpr std::array<EffectDefinition, 38> kEffects{{
     {"", 0x777777},
     {"Speed", 0x7CAFC6}, {"Slowness", 0x5A6C81}, {"Haste", 0xD9C043},
     {"Mining Fatigue", 0x4A4217}, {"Strength", 0x932423}, {"Instant Health", 0xF82423},
@@ -85,6 +86,7 @@ constexpr std::array<EffectDefinition, 37> kEffects{{
     {"Bad Omen", 0x0B6138}, {"Hero of the Village", 0x44FF44}, {"Darkness", 0x292721},
     {"Trial Omen", 0x8F6F78}, {"Wind Charged", 0xB8D8D8}, {"Weaving", 0x78695A},
     {"Oozing", 0x99C256}, {"Infested", 0x8C9B8C}, {"Raid Omen", 0x6D485D},
+    {"Breath of the Nautilus", 0x4EC2C8},
 }};
 
 constexpr int kIconSize = 16;
@@ -97,8 +99,10 @@ const EffectDefinition& definitionFor(std::uint32_t id) {
     return id < kEffects.size() ? kEffects[id] : unknown;
 }
 
-std::string imageIdFor(std::uint32_t id) {
-    return "bedrocktools.effect." + std::to_string(id);
+const std::string& imageIdFor(std::uint32_t id) {
+    static std::unordered_map<std::uint32_t, std::string> ids;
+    const auto [it, inserted] = ids.try_emplace(id, "bedrocktools.effect." + std::to_string(id));
+    return it->second;
 }
 
 void setPixel(IconPixels& pixels, int x, int y, std::uint32_t rgb, std::uint8_t alpha = 255) {
@@ -178,6 +182,13 @@ IconPixels makeEffectIcon(std::uint32_t id, std::uint32_t color) {
     return pixels;
 }
 
+void ensureEffectIcon(std::uint32_t id) {
+    static std::unordered_map<std::uint32_t, bool> registered;
+    if (id == 0 || !registered.emplace(id, true).second) return;
+    const auto icon = makeEffectIcon(id, definitionFor(id).color);
+    pl::modmenu::registerImage(imageIdFor(id), icon, kIconSize, kIconSize);
+}
+
 std::string romanNumeral(int value) {
     if (value <= 0) return {};
     if (value > 20) return std::to_string(value);
@@ -207,61 +218,59 @@ std::string formatDuration(int ticks) {
 }
 
 struct LayoutCandidate {
-    std::size_t stride;
-    std::size_t amplifierOffset;
+    std::size_t stride = 0;
+    std::size_t amplifierOffset = 0;
 };
 
-std::vector<EffectDisplayModule::ActiveEffect> readComponent(const MobEffectsComponent& component) {
-    std::vector<EffectDisplayModule::ActiveEffect> result;
-    if (!component.begin || component.end < component.begin || component.capacity < component.end) return result;
+bool plausibleDuration(int ticks) {
+    return ticks == -1 || (ticks >= 0 && ticks < 2'000'000'000);
+}
 
-    const std::size_t bytes = component.end - component.begin;
-    if (!bytes || bytes > 64 * 1024) return result;
+bool plausibleAmplifier(int amplifier) {
+    return amplifier >= 0 && amplifier <= 255;
+}
 
-    // 0x88 is current Bedrock. The other layouts keep the display usable on
-    // nearby 1.20/1.21 builds without hard-coding an Actor offset.
-    constexpr std::array<LayoutCandidate, 6> candidates{{
-        {0x88, 0x20}, {0x88, 0x18}, {0x80, 0x18},
-        {0x90, 0x20}, {0x78, 0x18}, {0x98, 0x20},
-    }};
+bool isActiveEffect(std::uint32_t id, int duration, int amplifier) {
+    return id != 0 && id <= 255 && duration != 0 && plausibleAmplifier(amplifier);
+}
 
-    const LayoutCandidate* selected = nullptr;
-    int selectedScore = -1;
-    for (const auto& candidate : candidates) {
-        if (bytes % candidate.stride != 0) continue;
-        const std::size_t count = bytes / candidate.stride;
-        if (!count || count > 128) continue;
-
-        int score = 0;
-        for (std::size_t index = 0; index < count; ++index) {
-            const auto address = component.begin + index * candidate.stride;
-            const auto id = *reinterpret_cast<const std::uint32_t*>(address);
-            const auto duration = *reinterpret_cast<const int*>(address + 4);
-            const auto amplifier = *reinterpret_cast<const int*>(address + candidate.amplifierOffset);
-            if (id <= 64) score += 3;
-            else score -= 20;
-            if (duration >= -1 && duration < 1000000000) ++score;
-            if (amplifier >= 0 && amplifier <= 255) ++score;
-            if (id == index) ++score;
-        }
-        if (score > selectedScore) {
-            selected = &candidate;
-            selectedScore = score;
-        }
-    }
-    if (!selected) return result;
-
-    const std::size_t count = bytes / selected->stride;
-    result.reserve(std::min<std::size_t>(count, 36));
+int scoreLayout(std::uintptr_t begin, std::size_t count, const LayoutCandidate& layout) {
+    int score = 0;
+    int active = 0;
     for (std::size_t index = 0; index < count; ++index) {
-        const auto address = component.begin + index * selected->stride;
+        const auto address = begin + index * layout.stride;
         const auto id = *reinterpret_cast<const std::uint32_t*>(address);
         const auto duration = *reinterpret_cast<const int*>(address + 4);
-        const auto amplifier = *reinterpret_cast<const int*>(address + selected->amplifierOffset);
-        if (id == 0 || id > 255 || duration == 0 || amplifier < 0 || amplifier > 255) continue;
+        const auto amplifier = *reinterpret_cast<const int*>(address + layout.amplifierOffset);
+        if (id >= 1 && id <= 64) score += 5;
+        else if (id != 0) score -= 25;
+        if (plausibleDuration(duration)) score += 2;
+        else score -= 8;
+        if (plausibleAmplifier(amplifier)) score += 2;
+        else score -= 8;
+        if (id == static_cast<std::uint32_t>(index) || id == static_cast<std::uint32_t>(index + 1)) ++score;
+        if (isActiveEffect(id, duration, amplifier)) ++active;
+    }
+    if (active > 0) score += active * 4;
+    else score -= 6;
+    return score;
+}
+
+std::vector<EffectDisplayModule::ActiveEffect> collectEffects(
+    std::uintptr_t begin,
+    std::size_t count,
+    const LayoutCandidate& layout
+) {
+    std::vector<EffectDisplayModule::ActiveEffect> result;
+    result.reserve(std::min<std::size_t>(count, 36));
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto address = begin + index * layout.stride;
+        const auto id = *reinterpret_cast<const std::uint32_t*>(address);
+        const auto duration = *reinterpret_cast<const int*>(address + 4);
+        const auto amplifier = *reinterpret_cast<const int*>(address + layout.amplifierOffset);
+        if (!isActiveEffect(id, duration, amplifier)) continue;
         result.push_back({id, duration, amplifier});
     }
-
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
         return left.id < right.id;
     });
@@ -269,6 +278,51 @@ std::vector<EffectDisplayModule::ActiveEffect> readComponent(const MobEffectsCom
         return left.id == right.id;
     }), result.end());
     return result;
+}
+
+// Windows/MSVC MobEffectInstance is 0x88 because std::function is 64 bytes
+// there. Android/libc++ uses a 32-byte std::function, so the same struct is
+// 0x68. Scan every 8-byte stride instead of a short Windows-only list.
+LayoutCandidate detectLayout(std::uintptr_t begin, std::size_t bytes) {
+    static LayoutCandidate cached{};
+    if (cached.stride != 0 && bytes % cached.stride == 0) {
+        const auto count = bytes / cached.stride;
+        if (count && count <= 128 && scoreLayout(begin, count, cached) > 0) return cached;
+    }
+
+    LayoutCandidate best{};
+    int bestScore = 0;
+    constexpr std::array<std::size_t, 7> amplifierOffsets{{0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28}};
+
+    for (std::size_t stride = 0x28; stride <= 0xC0; stride += 8) {
+        if (bytes % stride != 0) continue;
+        const auto count = bytes / stride;
+        if (!count || count > 128) continue;
+
+        for (const auto amplifierOffset : amplifierOffsets) {
+            if (amplifierOffset + sizeof(int) > stride) continue;
+            const LayoutCandidate candidate{stride, amplifierOffset};
+            const int score = scoreLayout(begin, count, candidate);
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+    }
+
+    if (best.stride != 0) cached = best;
+    return best;
+}
+
+std::vector<EffectDisplayModule::ActiveEffect> readComponent(const MobEffectsComponent& component) {
+    if (!component.begin || component.end < component.begin || component.capacity < component.end) return {};
+
+    const std::size_t bytes = component.end - component.begin;
+    if (!bytes || bytes > 64 * 1024) return {};
+
+    const auto layout = detectLayout(component.begin, bytes);
+    if (layout.stride == 0) return {};
+    return collectEffects(component.begin, bytes / layout.stride, layout);
 }
 
 void effectTickCallback(bedrocktools::sdk::Player* player) {
@@ -297,8 +351,7 @@ void EffectDisplayModule::registerResources() {
     }
 
     for (std::uint32_t id = 1; id < kEffects.size(); ++id) {
-        const auto icon = makeEffectIcon(id, kEffects[id].color);
-        pl::modmenu::registerImage(imageIdFor(id), icon, kIconSize, kIconSize);
+        ensureEffectIcon(id);
     }
     m_resourcesRegistered = true;
 }
@@ -340,12 +393,7 @@ void EffectDisplayModule::onFrame() {
     if (effects.empty() && m_preview) {
         effects = {{1, 68 * 20, 1}, {12, 191 * 20, 0}, {13, 50 * 20, 0}, {14, 213 * 20, 0}};
     }
-    if (effects.empty()) {
-        ::submitDrawCommands(moduleId, {});
-        return;
-    }
 
-    const int visible = std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
     const float scale = std::clamp(m_scale, 0.25f, 5.0f);
     const float panelWidth = std::max(110.0f, m_width) * scale;
     const float rowHeight = 46.0f * scale;
@@ -353,10 +401,14 @@ void EffectDisplayModule::onFrame() {
     const float iconSize = 28.0f * scale;
     const float nameSize = 18.0f * scale;
     const float durationSize = 16.0f * scale;
+    const int visible = effects.empty()
+        ? 1
+        : std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
     const float panelHeight = padding * 2.0f + rowHeight * visible;
 
     std::vector<PLModMenu_DrawCommand> commands;
-    commands.reserve(1 + visible * 3);
+    commands.reserve(2 + static_cast<std::size_t>(visible) * 3);
+
     if (m_showBackground) {
         PLModMenu_DrawCommand background{};
         background.type = PL_DRAW_RECT_FILLED;
@@ -367,10 +419,38 @@ void EffectDisplayModule::onFrame() {
         const auto alpha = static_cast<std::uint32_t>(std::clamp(m_backgroundOpacity, 0.0f, 1.0f) * 255.0f);
         background.color = (alpha << 24) | 0x10151F;
         commands.push_back(background);
+    } else {
+        // Keep a nearly-transparent hitbox so the HUD editor can still grab
+        // the module when the background is hidden and no effects are active.
+        PLModMenu_DrawCommand hitbox{};
+        hitbox.type = PL_DRAW_RECT_FILLED;
+        hitbox.x = hudPosX;
+        hitbox.y = hudPosY;
+        hitbox.w = panelWidth;
+        hitbox.h = panelHeight;
+        hitbox.color = 0x02000000;
+        commands.push_back(hitbox);
+    }
+
+    if (effects.empty()) {
+        PLModMenu_DrawCommand emptyCommand{};
+        emptyCommand.type = PL_DRAW_TEXT;
+        emptyCommand.x = hudPosX + padding;
+        emptyCommand.y = hudPosY + padding;
+        emptyCommand.w = panelWidth - padding * 2.0f;
+        emptyCommand.h = nameSize + 3.0f * scale;
+        emptyCommand.size = nameSize;
+        emptyCommand.color = 0xFFD8D8D8;
+        emptyCommand.fontId = "minecraft";
+        emptyCommand.text = "No Effects";
+        commands.push_back(emptyCommand);
+        ::submitDrawCommands(moduleId, commands);
+        return;
     }
 
     for (int index = 0; index < visible; ++index) {
         const auto& effect = effects[static_cast<std::size_t>(index)];
+        ensureEffectIcon(effect.id);
         const float rowY = hudPosY + padding + rowHeight * index;
         float textX = hudPosX + padding;
 
@@ -388,6 +468,7 @@ void EffectDisplayModule::onFrame() {
         }
 
         std::string name = definitionFor(effect.id).name;
+        if (name.empty()) name = "Unknown Effect";
         if (m_showLevel && effect.amplifier >= 0) {
             const auto level = romanNumeral(effect.amplifier + 1);
             if (!level.empty()) name += " " + level;
@@ -403,7 +484,7 @@ void EffectDisplayModule::onFrame() {
         nameCommand.size = nameSize;
         nameCommand.color = 0xFFF4F4F4;
         nameCommand.fontId = "minecraft";
-        nameCommand.text = name.c_str();
+        nameCommand.text = name;
         commands.push_back(nameCommand);
 
         PLModMenu_DrawCommand durationCommand{};
@@ -415,7 +496,7 @@ void EffectDisplayModule::onFrame() {
         durationCommand.size = durationSize;
         durationCommand.color = 0xFFD8D8D8;
         durationCommand.fontId = "minecraft";
-        durationCommand.text = duration.c_str();
+        durationCommand.text = duration;
         commands.push_back(durationCommand);
     }
 
