@@ -23,6 +23,11 @@ public:
     virtual void onEnable()   {}
     virtual void onDisable()  {}
     virtual void onFrame()    {}
+
+    // Called after the module has been registered with the launcher's Mod
+    // Menu (pl::modmenu). Modules that expose launcher-native overlay buttons
+    // should (re)register them here.
+    virtual void onLauncherRegistered() {}
     virtual bool onMouseEvent(int button, bool isDown) { return false; }
     virtual bool onKeyEvent(int key, bool isDown) { return false; }
     virtual bool onTouchEvent(float x, float y, bool isDown) { return false; }
