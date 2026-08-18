@@ -31,8 +31,6 @@ public:
 
     explicit CommentKey(std::function<void(const std::string&)> sendFunc = nullptr);
 
-    void onEnable() override;
-    void onLauncherRegistered() override;
     bool onKeyEvent(int keyCode, bool isDown) override;
     bool onTouchEvent(float x, float y, bool isDown) override;
     void onFrame() override;
@@ -58,20 +56,8 @@ public:
     // Minimum time between keyboard-triggered comments, in milliseconds.
     int cooldownTime = 300;
 
-    // Render on-screen comment slots as launcher-native overlay buttons.
-    // Native buttons are drawn and hit-tested by the launcher itself, so they
-    // keep working while the game is running and you are playing, even when
-    // the game's own input pipeline would swallow touches. Disable to fall
-    // back to the classic in-mod drawn buttons.
-    bool nativeButtonsEnabled = true;
-
 private:
     void sendTextPacket(const std::string& text);
-
-    // Registers/unregisters the launcher-native buttons for on-screen comment
-    // slots. Takes mMutex itself; safe to call from loadConfig, onEnable and
-    // onFrame.
-    void syncNativeButtons();
 
     // Both require mMutex to be held (or a single-threaded context such as the
     // constructor).
@@ -84,12 +70,6 @@ private:
     std::function<void(const std::string&)> mSendFunc;
     std::chrono::steady_clock::time_point mLastSendTime{};
     mutable std::mutex mMutex;
-
-    // Launcher-native button state, one entry per comment slot.
-    std::vector<bool> mNativeButtonRegistered;
-    std::vector<std::string> mNativeButtonLabel;
-    bool mNativeButtonsDirty = true;
-    int mNativeButtonRetries = 0;
 
     // Shared look of the on-screen comment buttons (per-comment text options
     // live on Comment itself).

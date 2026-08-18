@@ -15,7 +15,6 @@
 #include <limits>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -34,24 +33,12 @@ std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
     return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
 }
 
-// Truncates text to fit the launcher's button label byte limit without
-// splitting a UTF-8 sequence.
-std::string truncateUtf8(const std::string& text, std::size_t maxBytes) {
-    if (text.size() <= maxBytes) return text;
-    std::size_t cut = maxBytes;
-    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
-        --cut;
-    return text.substr(0, cut);
-}
-
 } // namespace
 
 CommentKey::CommentKey(std::function<void(const std::string&)> sendFunc)
     : Module("CommentKey",
              "Configure comments and send them with keyboard keys or on-screen buttons.") {
     mKeyDown.resize(512, false);
-    mNativeButtonRegistered.resize(MaxComments, false);
-    mNativeButtonLabel.resize(MaxComments);
     showInMenu = true;
     hideInHudEditor = false;
     isHudModule = true;
@@ -64,102 +51,6 @@ CommentKey::CommentKey(std::function<void(const std::string&)> sendFunc)
     } else {
         mSendFunc = [this](const std::string& text) { sendTextPacket(text); };
     }
-}
-
-void CommentKey::onEnable() {
-    mNativeButtonsDirty = true;
-    mNativeButtonRetries = 0;
-    syncNativeButtons();
-}
-
-void CommentKey::onLauncherRegistered() {
-    // The module is now visible to the launcher's Mod Menu bridge, so this is
-    // the earliest safe point to register the native overlay buttons (before
-    // the launcher's first button refresh).
-    mNativeButtonsDirty = true;
-    mNativeButtonRetries = 0;
-    syncNativeButtons();
-}
-
-void CommentKey::syncNativeButtons() {
-    // The launcher's native overlay buttons are rendered and hit-tested by the
-    // launcher itself (real Android views), so they respond while the game is
-    // running and the player is in a world, independent of the game's input
-    // pipeline. Slots that fail to register keep the classic drawn buttons.
-    struct SlotState {
-        bool want = false;
-        std::string label;
-        std::uint32_t textColor = 0xFFFFFF;
-        float width = 110.0f;
-        float height = 40.0f;
-    };
-    std::vector<SlotState> states(MaxComments);
-
-    // The launcher never invokes our button callbacks while registering, so
-    // holding mMutex across the bridge calls is safe and keeps the registered
-    // state synchronized with the reads in onFrame/onTouchEvent.
-    std::lock_guard<std::mutex> lock(mMutex);
-
-    for (std::size_t i = 0; i < MaxComments; ++i) {
-        const auto& comment = mComments[i];
-        states[i].want = nativeButtonsEnabled && comment.enabled &&
-                         comment.screen && !comment.text.empty();
-        states[i].label = truncateUtf8(comment.text, 32);
-        states[i].textColor = comment.textColor & 0x00FFFFFFu;
-        states[i].width = comment.width;
-        states[i].height = comment.height;
-    }
-
-    bool allSettled = true;
-    for (std::size_t i = 0; i < MaxComments; ++i) {
-        const std::string id = moduleId + ".comment" + std::to_string(i);
-
-        if (!states[i].want) {
-            if (mNativeButtonRegistered[i]) {
-                pl::modmenu::unregisterButton(id);
-                mNativeButtonRegistered[i] = false;
-                mNativeButtonLabel[i].clear();
-            }
-            continue;
-        }
-
-        if (mNativeButtonRegistered[i]) {
-            if (mNativeButtonLabel[i] == states[i].label) continue;
-            // Label changed -> re-register so the launcher shows the new text.
-            pl::modmenu::unregisterButton(id);
-            mNativeButtonRegistered[i] = false;
-        }
-
-        pl::modmenu::ButtonBuilder builder(id, "Comment " + std::to_string(i + 1));
-        builder.moduleId(moduleId)
-            .label(states[i].label)
-            .behavior(pl::modmenu::ButtonBehavior::Click)
-            .defaultVisible(true)
-            .styleColors(colorWithAlpha(mButtonColor, mButtonOpacity),
-                         colorWithAlpha(0x4AE0A0, 0.95f))
-            .textColor(0xFF000000u | states[i].textColor)
-            .activeTextColor(0xFF000000u)
-            .sizeScale(std::clamp(states[i].width / 110.0f, 0.6f, 4.0f),
-                       std::clamp(states[i].height / 40.0f, 0.6f, 2.0f))
-            .onEvent([this, i](std::string_view, pl::modmenu::ButtonEvent event,
-                               float) {
-                if (event == pl::modmenu::ButtonEvent::Click) sendComment(i);
-            });
-        if (builder.registerButton()) {
-            mNativeButtonRegistered[i] = true;
-            mNativeButtonLabel[i] = states[i].label;
-        } else {
-            // Not ready yet (e.g. the module is not registered with the
-            // launcher yet right after startup); retry on the next frame.
-            allSettled = false;
-        }
-    }
-
-    if (!allSettled && ++mNativeButtonRetries < 10) {
-        mNativeButtonsDirty = true;
-        return;
-    }
-    mNativeButtonsDirty = false;
 }
 
 void CommentKey::applyDefaultComments() {
@@ -227,9 +118,6 @@ bool CommentKey::onKeyEvent(int keyCode, bool isDown) {
 }
 
 void CommentKey::onFrame() {
-    if (mNativeButtonsDirty)
-        syncNativeButtons();
-
     std::vector<PLModMenu_DrawCommand> commands;
     std::vector<std::string> labels;
 
@@ -249,7 +137,7 @@ void CommentKey::onFrame() {
             bool hasAny = false;
             for (std::size_t j = 0; j < MaxComments; ++j) {
                 const auto& c = mComments[j];
-                if (!c.enabled || !c.screen || mNativeButtonRegistered[j])
+                if (!c.enabled || !c.screen)
                     continue;
                 minRelX = std::min(minRelX, c.x);
                 minRelY = std::min(minRelY, c.y);
@@ -271,7 +159,7 @@ void CommentKey::onFrame() {
 
             for (std::size_t i = 0; i < MaxComments; ++i) {
                 const auto& comment = mComments[i];
-                if (!comment.enabled || !comment.screen || mNativeButtonRegistered[i])
+                if (!comment.enabled || !comment.screen)
                     continue;
 
                 const float absX = comment.x + hudPosX;
@@ -330,7 +218,7 @@ void CommentKey::onFrame() {
 }
 
 bool CommentKey::onTouchEvent(float x, float y, bool isDown) {
-    if (!enabled)
+    if (!enabled || ModuleRegistry::get().keybindBlocked())
         return false;
 
     // HUD edit mode: drag individual buttons instead of sending comments.
@@ -339,7 +227,7 @@ bool CommentKey::onTouchEvent(float x, float y, bool isDown) {
             std::lock_guard<std::mutex> lock(mMutex);
             for (std::size_t i = 0; i < MaxComments; ++i) {
                 const auto& comment = mComments[i];
-                if (!comment.enabled || !comment.screen || mNativeButtonRegistered[i])
+                if (!comment.enabled || !comment.screen)
                     continue;
                 if (!inside(comment, x, y))
                     continue;
@@ -385,7 +273,7 @@ bool CommentKey::onTouchEvent(float x, float y, bool isDown) {
         std::lock_guard<std::mutex> lock(mMutex);
         for (std::size_t i = 0; i < MaxComments; ++i) {
             const auto& comment = mComments[i];
-            if (!comment.enabled || !comment.screen || mNativeButtonRegistered[i])
+            if (!comment.enabled || !comment.screen)
                 continue;
             if (!inside(comment, x, y))
                 continue;
@@ -487,9 +375,6 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
     if (j.contains("cooldownTime") && j["cooldownTime"].is_number_integer())
         loadedCooldown = std::clamp(j["cooldownTime"].get<int>(), 0, 60000);
 
-    if (j.contains("nativeButtons") && j["nativeButtons"].is_boolean())
-        nativeButtonsEnabled = j["nativeButtons"].get<bool>();
-
     // HUD editor fields (same keys the launcher HUD editor writes).
     if (j.contains("hudPosX") && j["hudPosX"].is_number())
         hudPosX = j["hudPosX"].get<float>();
@@ -578,18 +463,12 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
         normalizeComments();
         mDraggingIndex = -1;
     }
-
-    // Keep the launcher-native overlay buttons in sync with the loaded slots.
-    mNativeButtonsDirty = true;
-    mNativeButtonRetries = 0;
-    syncNativeButtons();
 }
 
 void CommentKey::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
 
     std::lock_guard<std::mutex> lock(mMutex);
-    j["nativeButtons"] = nativeButtonsEnabled;
     j["cooldownTime"] = cooldownTime;
     j["hudPosX"] = hudPosX;
     j["hudPosY"] = hudPosY;

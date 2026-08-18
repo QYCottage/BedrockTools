@@ -28,8 +28,6 @@ public:
     ~CommandHotkeyModule() override;
 
     void onInit() override;
-    void onEnable() override;
-    void onLauncherRegistered() override;
     void onFrame() override;
     bool onKeyEvent(int key, bool isDown) override;
     bool onTouchEvent(float x, float y, bool isDown) override;
@@ -39,24 +37,11 @@ public:
 
     static CommandHotkeyModule* instance();
 
-    // Render on-screen command slots as launcher-native overlay buttons.
-    // Native buttons are drawn and hit-tested by the launcher itself, so they
-    // keep working while the game is running and you are playing, even when
-    // the game's own input pipeline would swallow touches. Disable to fall
-    // back to the classic in-mod drawn buttons.
-    bool nativeButtonsEnabled = true;
-
 private:
     std::array<Binding, MaxCommands> m_commands{};
     float m_buttonOpacity = 0.78f;
     float m_buttonRadius = 7.0f;
     std::uint32_t m_buttonColor = 0x202020;
-
-    // Launcher-native button state, one entry per command slot.
-    std::array<bool, MaxCommands> m_nativeButtonRegistered{};
-    std::array<std::string, MaxCommands> m_nativeButtonLabel;
-    bool m_nativeButtonsDirty = true;
-    int m_nativeButtonRetries = 0;
 
     // HUD editor integration - group position
     float hudPosX = 0.0f;
@@ -72,11 +57,6 @@ private:
     void execute(std::size_t index);
     void applyDefaultBindings();
     void normalizeBindings();
-
-    // Registers/unregisters the launcher-native buttons for on-screen command
-    // slots. Same threading model as the rest of this module (called from the
-    // render thread via onFrame and from loadConfig).
-    void syncNativeButtons();
 
     static std::string normalizeCommand(std::string command);
     static std::string defaultLabel(const Binding& binding, std::size_t index);
