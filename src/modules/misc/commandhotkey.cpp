@@ -54,6 +54,10 @@ std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
     return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
 }
 
+// Launcher overlay button palette (keycap preset).
+constexpr std::uint32_t kKeycapActiveBg = 0xC6C6C6;
+constexpr int kPressedHighlightMs = 130;
+
 std::string keyName(int key) {
     // Android KEYCODE_* values. Unknown values are still usable and are shown numerically.
     switch (key) {
@@ -127,10 +131,20 @@ void CommandHotkeyModule::onInit() {
     // Input hooks are installed once by Runtime. This module only consumes the events.
 }
 
+bool CommandHotkeyModule::isPressed(std::size_t index) const {
+    if (m_pressedIndex != static_cast<int>(index)) return false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - m_pressedTime).count();
+    return elapsed >= 0 && elapsed < kPressedHighlightMs;
+}
+
 void CommandHotkeyModule::execute(std::size_t index) {
     if (!enabled || index >= MaxCommands) return;
     auto& binding = m_commands[index];
     if (!binding.enabled) return;
+
+    m_pressedIndex = static_cast<int>(index);
+    m_pressedTime = std::chrono::steady_clock::now();
 
     const auto command = normalizeCommand(binding.command);
     if (command.empty()) return;
@@ -255,6 +269,10 @@ void CommandHotkeyModule::onFrame() {
         float absX = binding.x + hudPosX;
         float absY = binding.y + hudPosY;
 
+        const bool dragging = m_hudEditMode && m_draggingIndex == static_cast<int>(i);
+        const bool pressed = isPressed(i);
+
+        // Face: launcher keycap style (light gray face, 0.85 alpha, tiny radius).
         PLModMenu_DrawCommand rect{};
         rect.type = PL_DRAW_RECT_FILLED;
         rect.x = absX;
@@ -262,27 +280,27 @@ void CommandHotkeyModule::onFrame() {
         rect.w = binding.width;
         rect.h = binding.height;
         rect.x3 = m_buttonRadius;
-        // Highlight dragging button in HUD edit mode
-        if (m_hudEditMode && m_draggingIndex == static_cast<int>(i)) {
+        if (dragging) {
             rect.color = colorWithAlpha(0x4AE0A0, 0.95f);
+        } else if (pressed) {
+            rect.color = colorWithAlpha(kKeycapActiveBg, m_buttonOpacity);
         } else {
             rect.color = colorWithAlpha(m_buttonColor, m_buttonOpacity);
         }
         commands.push_back(rect);
 
-        // In HUD edit mode draw an outline to indicate draggable
-        if (m_hudEditMode) {
-            PLModMenu_DrawCommand outline{};
-            outline.type = PL_DRAW_RECT;
-            outline.x = absX;
-            outline.y = absY;
-            outline.w = binding.width;
-            outline.h = binding.height;
-            outline.x3 = m_buttonRadius;
-            outline.color = 0xFF4AE0A0;
-            outline.size = 1.0f;
-            commands.push_back(outline);
-        }
+        // Border: same 2px dark stroke the launcher draws around its buttons.
+        PLModMenu_DrawCommand border{};
+        border.type = PL_DRAW_RECT;
+        border.x = absX;
+        border.y = absY;
+        border.w = binding.width;
+        border.h = binding.height;
+        border.x3 = m_buttonRadius;
+        border.size = std::max(1.0f, m_buttonBorderWidth);
+        border.color = dragging ? 0xFF4AE0A0
+                                : colorWithAlpha(m_buttonBorderColor, m_buttonOpacity);
+        commands.push_back(border);
 
         labels.push_back(defaultLabel(binding, i));
         PLModMenu_DrawCommand text{};
@@ -294,7 +312,8 @@ void CommandHotkeyModule::onFrame() {
         // The overlay forwards this value to Android Paint.setTextSize(), so it
         // must be a usable pixel size rather than the old 0.5–4 scale value.
         text.size = binding.textSize;
-        text.color = 0xFF000000u | (binding.textColor & 0x00FFFFFFu);
+        text.color = pressed ? 0xFF1F1F1Fu
+                             : (0xFF000000u | (binding.textColor & 0x00FFFFFFu));
         text.text = labels.back().c_str();
         commands.push_back(text);
     }
@@ -313,6 +332,7 @@ void CommandHotkeyModule::applyDefaultBindings() {
         m_commands[i].width = 110.0f;
         m_commands[i].height = 40.0f;
         m_commands[i].label = "Command " + std::to_string(i + 1);
+        m_commands[i].textColor = 0x373737;
     }
     // Invalidate dragging
     m_draggingIndex = -1;
@@ -395,9 +415,26 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     // override each slot with whatever is stored in the config.
     applyDefaultBindings();
 
-    if (j.contains("m_buttonOpacity")) m_buttonOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
-    if (j.contains("m_buttonRadius")) m_buttonRadius = std::clamp(j["m_buttonRadius"].get<float>(), 0.0f, 40.0f);
-    if (j.contains("m_buttonColor")) {
+    // Configs written before the launcher-style button look have no border
+    // entry. For those the stored face color / radius / opacity (and the old
+    // white label color) are ignored so the buttons pick up the launcher look.
+    const bool legacyStyle = !j.contains("m_buttonBorderColor");
+
+    if (!legacyStyle && j.contains("m_buttonOpacity")) m_buttonOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
+    if (!legacyStyle && j.contains("m_buttonRadius")) m_buttonRadius = std::clamp(j["m_buttonRadius"].get<float>(), 0.0f, 40.0f);
+    if (j.contains("m_buttonBorderWidth")) m_buttonBorderWidth = std::clamp(j["m_buttonBorderWidth"].get<float>(), 0.0f, 8.0f);
+    if (j.contains("m_buttonBorderColor")) {
+        const auto& v = j["m_buttonBorderColor"];
+        if (v.is_string()) {
+            std::string hexStr = v.get<std::string>();
+            if (!hexStr.empty() && hexStr[0] == '#') {
+                try { m_buttonBorderColor = std::stoul(hexStr.substr(1), nullptr, 16) & 0x00FFFFFFu; } catch (...) {}
+            }
+        } else if (v.is_number()) {
+            m_buttonBorderColor = static_cast<std::uint32_t>(v.get<std::uint64_t>()) & 0x00FFFFFFu;
+        }
+    }
+    if (!legacyStyle && j.contains("m_buttonColor")) {
         const auto& v = j["m_buttonColor"];
         if (v.is_string()) {
             std::string hexStr = v.get<std::string>();
@@ -440,7 +477,7 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
         if (j.contains(p + "Width")) b.width = j[p + "Width"].get<float>();
         if (j.contains(p + "Height")) b.height = j[p + "Height"].get<float>();
         if (j.contains(p + "TextSize")) b.textSize = j[p + "TextSize"].get<float>();
-        if (j.contains(p + "TextColor")) {
+        if (!legacyStyle && j.contains(p + "TextColor")) {
             const auto& v = j[p + "TextColor"];
             if (v.is_string()) {
                 std::string hexStr = v.get<std::string>();
@@ -487,6 +524,11 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
 
     j["m_buttonOpacity"] = m_buttonOpacity;
     j["m_buttonRadius"] = m_buttonRadius;
+    j["m_buttonBorderWidth"] = m_buttonBorderWidth;
+
+    char borderHexBuf[10];
+    std::snprintf(borderHexBuf, sizeof(borderHexBuf), "#%06X", m_buttonBorderColor & 0x00FFFFFFu);
+    j["m_buttonBorderColor"] = std::string(borderHexBuf);
 
     char hexBuf[10];
     std::snprintf(hexBuf, sizeof(hexBuf), "#%06X", m_buttonColor & 0x00FFFFFFu);
@@ -533,7 +575,7 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
             j[p + "Width"] = 110.0f;
             j[p + "Height"] = 40.0f;
             j[p + "TextSize"] = 20.0f;
-            j[p + "TextColor"] = "#FFFFFF";
+            j[p + "TextColor"] = "#373737";
             j[p + "Label"] = "";
         }
     }

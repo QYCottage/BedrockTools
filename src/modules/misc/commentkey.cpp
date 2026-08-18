@@ -28,6 +28,12 @@ SendToServerFn gSendToServer = nullptr;
 GetPacketSenderFn gGetPacketSender = nullptr;
 CreatePacketFn gCreatePacket = nullptr;
 
+// Launcher overlay button palette ("keycap" preset used by the launcher's own
+// on-screen buttons).
+constexpr std::uint32_t kKeycapActiveBg = 0xC6C6C6;
+constexpr std::uint32_t kKeycapActiveText = 0xFF1F1F1Fu;
+constexpr int kPressedHighlightMs = 130;
+
 std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
     alpha = std::clamp(alpha, 0.0f, 1.0f);
     return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
@@ -165,6 +171,12 @@ void CommentKey::onFrame() {
                 const float absX = comment.x + hudPosX;
                 const float absY = comment.y + hudPosY;
 
+                const bool dragging =
+                    mHudEditMode && mDraggingIndex == static_cast<int>(i);
+                const bool pressed = isPressed(i);
+
+                // Face: launcher keycap style (light gray face, 0.85 alpha,
+                // tiny corner radius).
                 PLModMenu_DrawCommand rect{};
                 rect.type = PL_DRAW_RECT_FILLED;
                 rect.x = absX;
@@ -172,27 +184,30 @@ void CommentKey::onFrame() {
                 rect.w = comment.width;
                 rect.h = comment.height;
                 rect.x3 = mButtonRadius;
-                // Highlight the dragged button while in HUD edit mode.
-                if (mHudEditMode && mDraggingIndex == static_cast<int>(i)) {
+                if (dragging) {
                     rect.color = colorWithAlpha(0x4AE0A0, 0.95f);
+                } else if (pressed) {
+                    rect.color = colorWithAlpha(kKeycapActiveBg, mButtonOpacity);
                 } else {
                     rect.color = colorWithAlpha(mButtonColor, mButtonOpacity);
                 }
                 commands.push_back(rect);
 
-                // Outline in HUD edit mode to hint the button is draggable.
-                if (mHudEditMode) {
-                    PLModMenu_DrawCommand outline{};
-                    outline.type = PL_DRAW_RECT;
-                    outline.x = absX;
-                    outline.y = absY;
-                    outline.w = comment.width;
-                    outline.h = comment.height;
-                    outline.x3 = mButtonRadius;
-                    outline.color = 0xFF4AE0A0;
-                    outline.size = 1.0f;
-                    commands.push_back(outline);
-                }
+                // Border: the same 2px dark stroke the launcher draws around
+                // its own overlay buttons (also marks drag targets in the HUD
+                // editor).
+                PLModMenu_DrawCommand border{};
+                border.type = PL_DRAW_RECT;
+                border.x = absX;
+                border.y = absY;
+                border.w = comment.width;
+                border.h = comment.height;
+                border.x3 = mButtonRadius;
+                border.size = std::max(1.0f, mButtonBorderWidth);
+                border.color = dragging
+                                   ? 0xFF4AE0A0
+                                   : colorWithAlpha(mButtonBorderColor, mButtonOpacity);
+                commands.push_back(border);
 
                 labels.push_back(comment.text.empty()
                                      ? ("Comment " + std::to_string(i + 1))
@@ -205,7 +220,8 @@ void CommentKey::onFrame() {
                 text.h = comment.height;
                 // Forwarded to Android Paint.setTextSize(), so it is a pixel size.
                 text.size = comment.textSize;
-                text.color = 0xFF000000u | (comment.textColor & 0x00FFFFFFu);
+                text.color = pressed ? kKeycapActiveText
+                                     : (0xFF000000u | (comment.textColor & 0x00FFFFFFu));
                 text.text = labels.back().c_str();
                 commands.push_back(text);
             }
@@ -288,6 +304,15 @@ bool CommentKey::onTouchEvent(float x, float y, bool isDown) {
     return true;
 }
 
+bool CommentKey::isPressed(std::size_t index) const {
+    if (mPressedIndex != static_cast<int>(index))
+        return false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - mPressedTime)
+                             .count();
+    return elapsed >= 0 && elapsed < kPressedHighlightMs;
+}
+
 bool CommentKey::inside(const Comment& comment, float x, float y) const {
     const float absX = comment.x + hudPosX;
     const float absY = comment.y + hudPosY;
@@ -331,7 +356,7 @@ void CommentKey::addComment(std::string text, int keyCode) {
             slot->width = 110.0f;
             slot->height = 40.0f;
             slot->textSize = 20.0f;
-            slot->textColor = 0xFFFFFF;
+            slot->textColor = 0x373737;
         }
     }
 }
@@ -363,6 +388,8 @@ void CommentKey::sendComment(std::size_t index) {
             return;
         sendFunc = mSendFunc;
         text = comment.text;
+        mPressedIndex = static_cast<int>(index);
+        mPressedTime = std::chrono::steady_clock::now();
     }
     if (sendFunc)
         sendFunc(text);
@@ -370,6 +397,42 @@ void CommentKey::sendComment(std::size_t index) {
 
 void CommentKey::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
+
+    // Configs written before the launcher-style button look have no border
+    // entry. For those the stored face color / radius / opacity (and the old
+    // white label color) are ignored so the buttons pick up the launcher look.
+    const bool legacyStyle = !j.contains("m_buttonBorderColor");
+
+    const auto readColor = [](const nlohmann::json& value, std::uint32_t& out) {
+        if (value.is_string()) {
+            const std::string hexStr = value.get<std::string>();
+            if (!hexStr.empty() && hexStr[0] == '#') {
+                try {
+                    out = static_cast<std::uint32_t>(std::stoul(hexStr.substr(1), nullptr, 16)) &
+                          0x00FFFFFFu;
+                } catch (...) {
+                }
+            }
+        } else if (value.is_number()) {
+            out = static_cast<std::uint32_t>(value.get<std::uint64_t>()) & 0x00FFFFFFu;
+        }
+    };
+
+    std::uint32_t loadedButtonColor = mButtonColor;
+    std::uint32_t loadedBorderColor = mButtonBorderColor;
+    float loadedOpacity = mButtonOpacity;
+    float loadedRadius = mButtonRadius;
+    float loadedBorderWidth = mButtonBorderWidth;
+    if (!legacyStyle) {
+        if (j.contains("m_buttonOpacity") && j["m_buttonOpacity"].is_number())
+            loadedOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
+        if (j.contains("m_buttonRadius") && j["m_buttonRadius"].is_number())
+            loadedRadius = std::clamp(j["m_buttonRadius"].get<float>(), 0.0f, 40.0f);
+        if (j.contains("m_buttonBorderWidth") && j["m_buttonBorderWidth"].is_number())
+            loadedBorderWidth = std::clamp(j["m_buttonBorderWidth"].get<float>(), 0.0f, 8.0f);
+        if (j.contains("m_buttonColor")) readColor(j["m_buttonColor"], loadedButtonColor);
+        readColor(j["m_buttonBorderColor"], loadedBorderColor);
+    }
 
     int loadedCooldown = cooldownTime;
     if (j.contains("cooldownTime") && j["cooldownTime"].is_number_integer())
@@ -390,6 +453,11 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
     {
         std::lock_guard<std::mutex> lock(mMutex);
         cooldownTime = loadedCooldown;
+        mButtonOpacity = loadedOpacity;
+        mButtonRadius = loadedRadius;
+        mButtonBorderWidth = loadedBorderWidth;
+        mButtonColor = loadedButtonColor;
+        mButtonBorderColor = loadedBorderColor;
         applyDefaultComments();
 
         for (std::size_t i = 0; i < MaxComments; ++i) {
@@ -425,7 +493,7 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
                     comment.height = j[prefix + "Height"].get<float>();
                 if (j.contains(prefix + "TextSize") && j[prefix + "TextSize"].is_number())
                     comment.textSize = j[prefix + "TextSize"].get<float>();
-                if (j.contains(prefix + "TextColor")) {
+                if (!legacyStyle && j.contains(prefix + "TextColor")) {
                     const auto& v = j[prefix + "TextColor"];
                     if (v.is_string()) {
                         std::string hexStr = v.get<std::string>();
@@ -470,6 +538,18 @@ void CommentKey::saveConfig(nlohmann::json& j) {
 
     std::lock_guard<std::mutex> lock(mMutex);
     j["cooldownTime"] = cooldownTime;
+    j["m_buttonOpacity"] = mButtonOpacity;
+    j["m_buttonRadius"] = mButtonRadius;
+    j["m_buttonBorderWidth"] = mButtonBorderWidth;
+
+    char buttonColorHex[10];
+    std::snprintf(buttonColorHex, sizeof(buttonColorHex), "#%06X", mButtonColor & 0x00FFFFFFu);
+    j["m_buttonColor"] = std::string(buttonColorHex);
+
+    char borderColorHex[10];
+    std::snprintf(borderColorHex, sizeof(borderColorHex), "#%06X",
+                  mButtonBorderColor & 0x00FFFFFFu);
+    j["m_buttonBorderColor"] = std::string(borderColorHex);
     j["hudPosX"] = hudPosX;
     j["hudPosY"] = hudPosY;
     j["isHudModule"] = isHudModule;
@@ -506,7 +586,7 @@ void CommentKey::saveConfig(nlohmann::json& j) {
             j[prefix + "Width"] = 110.0f;
             j[prefix + "Height"] = 40.0f;
             j[prefix + "TextSize"] = 20.0f;
-            j[prefix + "TextColor"] = "#FFFFFF";
+            j[prefix + "TextColor"] = "#373737";
         }
     }
 }
