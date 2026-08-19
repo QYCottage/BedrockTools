@@ -19,14 +19,20 @@ const std::array<SignatureDefinition, SignatureCount> definitions{{
     SignatureDefinition{SignatureId::SetTime, "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? 91 54 D0 3B D5 F3 03 01 2A ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6"},
     SignatureDefinition{SignatureId::EduMultiplayer, "? ? ? D1 ? ? ? A9 ? ? ? F9 ? ? ? A9 ? ? ? 91 55 D0 3B D5 F3 03 00 AA ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 ? ? ? 91 20 01 3F D6 ? ? ? F9 ? ? ? B4 ? ? ? 39"},
     SignatureDefinition{SignatureId::HudCursor, "? ? ? 6D ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 ? ? ? D1 5C D0 3B D5 F4 03 00 AA ? ? ? 91 ? ? ? F9 F6 03 03 AA"},
-    // HudScreen::_renderStatusEffects — the function that draws the vanilla
-    // status-effect (potion) bar in the HUD. Hooked by the Effect Display
-    // module to hide that bar while the module is enabled.
+    // HudScreen::_renderStatusEffects — the custom UI renderer behind the
+    // vanilla `mob_effects_renderer` element that draws the status-effect
+    // (potion) bar in the HUD. Hooked by the Effect Display module to hide
+    // that bar while the module is enabled.
     //
     // !!! PLACEHOLDER PATTERN — DO NOT SHIP AS-IS !!!
     // The byte string below is a deliberately bogus sequence that will never
-    // resolve, so the hook stays safely inactive until a real pattern is
-    // provided. To activate the feature:
+    // resolve. The Effect Display module now also ships a signature-free
+    // fallback (locateRenderStatusEffects() in effectdisplay.cpp) that finds
+    // this function by scanning for references to the vanilla effect-icon
+    // textures, so the "hide vanilla bar" option works even without a real
+    // pattern. Replacing this placeholder with the real ARM64 byte pattern of
+    // `_renderStatusEffects` for your target game build is still preferred —
+    // it is exact and skips the fallback's confidence checks:
     //   1. Dump libminecraftpe.so from the exact game build you target.
     //   2. Open it in IDA / Ghidra and find HudScreen::_renderStatusEffects
     //      (in recent builds it is `void _renderStatusEffects(
@@ -37,8 +43,7 @@ const std::array<SignatureDefinition, SignatureCount> definitions{{
     //      address-relative operands with "?" exactly like the other
     //      signatures in this file (see the note at the top of the file).
     //   4. Rebuild. While the placeholder remains, resolve() returns 0 and
-    //      EffectDisplayModule simply skips installing the hook — the vanilla
-    //      bar stays visible and nothing else changes.
+    //      EffectDisplayModule falls back to the locator described above.
     SignatureDefinition{SignatureId::RenderPotionEffects, "BA 5E BA 11 CA FE BA 5E BA 11 CA FE BA 5E BA 11 CA FE BA 5E BA 11 CA FE BA 5E BA 11 CA FE"},
     SignatureDefinition{SignatureId::LevelInit, "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 ? ? ? F9 48 D0 3B D5 ? ? ? B0 ? ? ? 91 ? ? ? A9"},
     SignatureDefinition{SignatureId::LevelDtor, "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 56 D0 3B D5 F3 03 00 AA ? ? ? F9 ? ? ? F8 ? ? ? F0"},

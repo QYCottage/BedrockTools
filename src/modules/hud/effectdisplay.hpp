@@ -2,6 +2,7 @@
 
 #include "../Module.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -54,6 +55,16 @@ private:
     // static member so it can read private state (m_hideVanillaHud) directly.
     static void renderPotionEffectsDetour(void* self, void* renderContext, void* screenView, float posX, float posY);
 
+    // True once the detour has been entered often enough to prove it is a
+    // per-frame render callback (not a one-shot constructor). Only used when
+    // the hook was located by the signature-free fallback locator; hooks
+    // installed from a real byte pattern are trusted immediately.
+    bool detourReady() const { return m_detourEntries.load(std::memory_order_relaxed) >= kDetourWarmupEntries; }
+
+    // Number of detour entries (≈ rendered frames) that must be observed
+    // before the fallback-located hook starts suppressing the vanilla bar.
+    static constexpr std::uint32_t kDetourWarmupEntries = 90;
+
     std::mutex m_mutex;
     std::vector<ActiveEffect> m_effects;
     std::unordered_map<std::uint32_t, EffectTiming> m_timing;
@@ -91,4 +102,12 @@ private:
     // whether to skip the vanilla draw call.
     bedrocktools::hooks::State* m_vanillaBarHook = nullptr;
     bool m_vanillaBarHooked = false;
+
+    // True when the hook was installed through the signature-free locator
+    // instead of a real byte pattern. The detour then applies a warm-up
+    // period before suppressing anything (see detourReady()).
+    bool m_locatorMode = false;
+
+    // Render-thread entry counter for the warm-up validation above.
+    std::atomic<std::uint32_t> m_detourEntries{0};
 };
