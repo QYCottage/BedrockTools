@@ -9,6 +9,7 @@ private:
     uint8_t m_originalBytes2[4];
     void* m_patchTarget;
     void* m_patchTarget2;
+    bool m_renderFirstPersonHooked;
     bool m_getModifiedSwingDurationHooked;
 
     

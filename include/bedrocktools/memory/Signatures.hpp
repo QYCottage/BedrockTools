@@ -112,7 +112,7 @@ enum class SignatureId : std::uint16_t {
     BlockTessellatorTessellateDoubleThinFenceInWorld,
     BlockGraphicsGetTexture,
     BlockOccluderUpdateRenderFace,
-    FluxSwing,
+    ItemInHandRendererRenderFirstPerson,
     MobGetModifiedSwingDuration,
     Count
 };

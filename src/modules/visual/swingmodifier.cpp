@@ -8,6 +8,7 @@ static SwingModifierModule* g_swingMod = nullptr;
 
 SwingModifierModule::SwingModifierModule() : Module("Swing Modifier", "Modify ur swing like flux swing and the speed(visually)") {
     m_patched = false;
+    m_renderFirstPersonHooked = false;
     m_getModifiedSwingDurationHooked = false;
     m_patchTarget = nullptr;
     m_patchTarget2 = nullptr;
@@ -18,23 +19,33 @@ SwingModifierModule::~SwingModifierModule() {
     if (g_swingMod == this) g_swingMod = nullptr;
 }
 
+static void (*_renderFirstPerson_orig)(void*, void*, const void*, std::uint8_t) = nullptr;
+static void _renderFirstPerson_hook(void* self, void* renderContext, const void* prevProj, std::uint8_t itemFlags) {
+    if(g_swingMod) {
+        if(g_swingMod->m_fluxSwing && g_swingMod->enabled) g_swingMod->applyPatch();
+        else g_swingMod->removePatch();
+    }
+    _renderFirstPerson_orig(self, renderContext, prevProj, itemFlags);
+}
+
 static int (*_getModifiedSwingDuration_orig)(void*) = nullptr;
 static int _getModifiedSwingDuration_hook(void* self) {
-    if(g_swingMod->m_fluxSwing && g_swingMod->enabled) g_swingMod->applyPatch();
-    else g_swingMod->removePatch();
     if(!g_swingMod || !g_swingMod->enabled) return _getModifiedSwingDuration_orig(self);
     return g_swingMod->m_swingSpeed;
 }
 
 void SwingModifierModule::onInit() {
-    if(!m_patchTarget){
-        uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::FluxSwing);
-        if (addr != 0) {
-            
-            m_patchTarget = (void*)(addr + 8);
-            m_patchTarget2 = (void*)(addr + 8 + 4);
+    uintptr_t renderFirstPerson = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemInHandRendererRenderFirstPerson);
+    if (renderFirstPerson != 0) {
+        if(!m_patchTarget){
+            m_patchTarget = (void*)(renderFirstPerson + bedrocktools::sdk::offsets::ItemInHandRenderer::mRenderFirstPersonTransformPatchOffset1);
+            m_patchTarget2 = (void*)(renderFirstPerson + bedrocktools::sdk::offsets::ItemInHandRenderer::mRenderFirstPersonTransformPatchOffset2);
             memcpy(m_originalBytes, m_patchTarget, 4);
             memcpy(m_originalBytes2, m_patchTarget2, 4);
+        }
+        if(!m_renderFirstPersonHooked){
+            bedrocktools::hooks::install((void*)renderFirstPerson, (void*)_renderFirstPerson_hook, (void**)&_renderFirstPerson_orig);
+            m_renderFirstPersonHooked = true;
         }
     }
     if(!m_getModifiedSwingDurationHooked){
@@ -62,11 +73,10 @@ void SwingModifierModule::removePatch() {
 }
 
 void SwingModifierModule::onEnable() {
-    // applyPatch();
 }
 
 void SwingModifierModule::onDisable() {
-    // removePatch();
+    removePatch();
 }
 
 void SwingModifierModule::loadConfig(const nlohmann::json& j) {
