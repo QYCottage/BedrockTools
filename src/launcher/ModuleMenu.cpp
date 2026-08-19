@@ -1,4 +1,5 @@
 #include "ModuleMenu.hpp"
+#include "ExternalButtonRefresh.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
@@ -61,31 +62,41 @@ static void onModuleConfigChanged(std::string_view module_id, std::string_view k
 
     std::string safeValue(value);
     std::string safeKey(key);
-    if (!safeValue.empty()) {
-        try {
-            if (j.contains(safeKey)) {
-                if (j[safeKey].is_boolean()) {
-                    if (safeValue == "true") j[safeKey] = true;
-                    else if (safeValue == "false") j[safeKey] = false;
-                } else if (j[safeKey].is_number_integer()) {
-                    char* end;
-                    int val = std::strtol(safeValue.c_str(), &end, 10);
-                    if (end != safeValue.c_str()) j[safeKey] = val;
-                } else if (j[safeKey].is_number_float()) {
-                    char* end;
-                    float val = std::strtof(safeValue.c_str(), &end);
-                    if (end != safeValue.c_str()) j[safeKey] = val;
-                } else {
-                    j[safeKey] = safeValue;
-                }
+    try {
+        if (j.contains(safeKey)) {
+            if (j[safeKey].is_boolean()) {
+                if (safeValue == "true") j[safeKey] = true;
+                else if (safeValue == "false") j[safeKey] = false;
+            } else if (j[safeKey].is_number_integer()) {
+                char* end = nullptr;
+                const long val = std::strtol(safeValue.c_str(), &end, 10);
+                if (end != safeValue.c_str() && *end == '\0') j[safeKey] = val;
+            } else if (j[safeKey].is_number_float()) {
+                char* end = nullptr;
+                const float val = std::strtof(safeValue.c_str(), &end);
+                if (end != safeValue.c_str() && *end == '\0') j[safeKey] = val;
             } else {
+                // Text fields need to be allowed to become empty as well;
+                // otherwise deleting the last character leaves the previous
+                // value in the module and in its overlay button.
                 j[safeKey] = safeValue;
             }
-        } catch (...) {
+        } else {
             j[safeKey] = safeValue;
         }
+    } catch (...) {
+        j[safeKey] = safeValue;
     }
     mod->loadConfig(j);
+
+    // The native button registry is updated by loadConfig(), but the launcher
+    // keeps a snapshot of each external overlay button. Rebuild these two
+    // modules' overlays now so a changed label/text is visible immediately.
+    if (module_id == "bedrocktools.CommentKey" ||
+        module_id == "bedrocktools.Command Hotkey") {
+        bedrocktools::launcher::refreshExternalButtonsForModule(module_id);
+    }
+
     bedrocktools::config::ConfigManager::get().save();
 }
 
