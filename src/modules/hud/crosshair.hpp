@@ -10,10 +10,11 @@ extern CrosshairModule* g_crosshairMod;
 //
 // Replaces the vanilla crosshair (textures/gui/crosshair.png, drawn by
 // HudCursorRenderer) with one of 16 custom shapes drawn through the HUD
-// overlay. Color, scale, thickness, opacity, an outline pass and an
-// animated RGB (rainbow) mode are configurable from the mod menu.
-// Selecting the "Vanilla" style restores the game's own crosshair.png
-// untouched - the module then neither hooks nor draws anything.
+// overlay. Color, scale, thickness, opacity, an outline pass, an
+// animated RGB (rainbow) mode and a hit indicator are configurable from
+// the mod menu. Selecting the "Vanilla" style restores the game's own
+// crosshair.png - the module then only draws when the hit indicator is
+// active and in-place tinting is unavailable.
 class CrosshairModule : public Module {
 public:
     // The radio option order is persisted by index (see saveConfig), so new
@@ -65,9 +66,9 @@ public:
     float m_rgbSpeed = 0.3f;      // full hue cycles per second (menu: 0.05 - 1)
     bool m_outline = true;        // dark back-pass so bright scenes stay readable
 
-    // Recolors the vanilla crosshair while the player is aiming at a hittable
-    // entity. The hitbox module supplies the hit-test, but this option belongs
-    // to the Crosshair module and is persisted with its settings.
+    // Recolors the crosshair while the player is aiming at a hittable
+    // entity. Hit-testing lives in this module, so the option works
+    // without enabling Hitbox.
     bool m_indicator = false;
     uint32_t m_indicatorColor = 0xFFFF0000;
 
@@ -75,5 +76,6 @@ public:
     uint32_t indicatorColor() const { return m_indicatorColor; }
 
 private:
-    bool m_cursorHooked = false;  // HudCursorRenderer hook installed
+    bool m_cursorHooked = false;    // HudCursorRenderer hook installed
+    bool m_tessColorHooked = false; // Tessellator::color hook (vanilla tint)
 };

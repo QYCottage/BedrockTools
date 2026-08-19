@@ -6,6 +6,8 @@
 //   * Style::Vanilla forwards to the game's own crosshair renderer
 //   * save/load round-trips every setting, including the style radio format
 //   * the outline pass is drawn first (dark, thicker) and RGB animates
+//   * the hit indicator recolors a custom crosshair without Hitbox enabled
+//   * Vanilla + indicator falls back to an overlay when tinting is impossible
 //
 // Unlike the other tests in this directory, the module needs the preloader
 // and nlohmann_json headers (normally provided by xmake). Build and run
@@ -29,6 +31,7 @@
 #include "pl/ModMenu.hpp"
 #include "pl/memory/Hook.hpp"
 #include "bedrocktools/memory/Signatures.hpp"
+#include "bedrocktools/events/EventBus.hpp"
 
 // ---------------------------------------------------------------------------
 // Launcher / memory stubs
@@ -65,6 +68,13 @@ namespace bedrocktools::memory {
     std::uintptr_t resolve(SignatureId) {
         static char fakeTarget[16];
         return (std::uintptr_t)fakeTarget;
+    }
+}
+
+namespace bedrocktools::events {
+    EventBus& bus() {
+        static EventBus instance;
+        return instance;
     }
 }
 
@@ -181,6 +191,73 @@ int main() {
         usleep(3000);
     }
     check(animated, "rgb hue animates over time");
+
+    // Hit indicator: lives entirely in the Crosshair module. Lighting it
+    // must recolor the custom overlay without any Hitbox module present.
+    g_lastCursorRenderUs.store(0, std::memory_order_relaxed);
+    g_aimedEntityInRange.store(false, std::memory_order_relaxed);
+    g_aimRefreshTimeUs.store(0, std::memory_order_relaxed);
+    g_cursorTintState.store(static_cast<uint32_t>(CursorTintState::Probing),
+                            std::memory_order_relaxed);
+    g_cursorTintProbeMisses.store(0, std::memory_order_relaxed);
+    mod3.m_style = CrosshairModule::Style::Cross;
+    mod3.m_rgb = false;
+    mod3.m_color = 0xFFFFFFFF;
+    mod3.m_indicator = true;
+    mod3.m_indicatorColor = 0xFFFF3300;
+    mod3.m_outline = false;
+    cursorRenderHook(nullptr, nullptr, nullptr, nullptr);
+    mod3.onFrame();
+    check(!g_lastCmds.empty(), "custom style still draws with indicator idle");
+    check((g_lastCmds.back().color & 0x00FFFFFF) == 0xFFFFFF, "idle indicator keeps configured color");
+
+    g_aimedEntityInRange.store(true, std::memory_order_relaxed);
+    g_aimRefreshTimeUs.store(nowUs(), std::memory_order_relaxed);
+    cursorRenderHook(nullptr, nullptr, nullptr, nullptr);
+    mod3.onFrame();
+    check(!g_lastCmds.empty(), "indicator draws without Hitbox module");
+    check((g_lastCmds.back().color & 0x00FFFFFF) == 0xFF3300, "aimed indicator uses indicator color");
+    check(indicatorLit(), "indicatorLit is true while the aim flag is fresh");
+
+    g_aimedEntityInRange.store(false, std::memory_order_relaxed);
+    cursorRenderHook(nullptr, nullptr, nullptr, nullptr);
+    mod3.onFrame();
+    check((g_lastCmds.back().color & 0x00FFFFFF) == 0xFFFFFF, "looking away restores configured color");
+
+    // Config round-trip for the indicator settings.
+    nlohmann::json jInd;
+    mod3.saveConfig(jInd);
+    check(jInd["m_indicator"].get<bool>(), "indicator persists as true");
+    CrosshairModule mod4;
+    mod4.loadConfig(jInd);
+    check(mod4.m_indicator, "indicator flag round-trip");
+    check((mod4.m_indicatorColor & 0x00FFFFFF) == 0xFF3300, "indicator color round-trip");
+
+    // Vanilla style + indicator: after several tint-probe misses the overlay
+    // fallback must hide the vanilla draw and submit a replacement.
+    g_originalCursorCalls = 0;
+    g_lastCursorRenderUs.store(0, std::memory_order_relaxed);
+    g_aimedEntityInRange.store(true, std::memory_order_relaxed);
+    g_aimRefreshTimeUs.store(nowUs(), std::memory_order_relaxed);
+    g_cursorTintState.store(static_cast<uint32_t>(CursorTintState::Probing),
+                            std::memory_order_relaxed);
+    g_cursorTintProbeMisses.store(0, std::memory_order_relaxed);
+    // mod4 is now g_crosshairMod; enable it and copy the indicator settings.
+    mod4.setMasterEnabled(true);
+    mod4.m_style = CrosshairModule::Style::Vanilla;
+    mod4.m_indicator = true;
+    mod4.m_indicatorColor = 0xFFFF3300;
+    mod4.m_outline = false;
+    for (int i = 0; i < 8; ++i) {
+        cursorRenderHook(nullptr, nullptr, nullptr, nullptr);
+    }
+    check(g_originalCursorCalls == 8, "vanilla indicator probes the original renderer");
+    check(overlayFallbackLatched(), "vanilla indicator latches overlay fallback");
+    cursorRenderHook(nullptr, nullptr, nullptr, nullptr);
+    check(g_originalCursorCalls == 8, "fallback swallows the vanilla renderer");
+    mod4.onFrame();
+    check(g_lastCmds.size() >= 4, "vanilla indicator fallback draws replacement arms");
+    check((g_lastCmds.back().color & 0x00FFFFFF) == 0xFF3300, "fallback arms use indicator color");
 
     std::printf(g_failures == 0 ? "ALL TESTS PASSED\n" : "%d TEST(S) FAILED\n", g_failures);
     return g_failures == 0 ? 0 : 1;

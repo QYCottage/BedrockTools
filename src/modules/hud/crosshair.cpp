@@ -2,7 +2,9 @@
 
 #include "modules/ModuleRegistry.hpp"
 #include "core/memory/Hooks.hpp"
+#include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
+#include <bedrocktools/sdk/Offsets.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -13,21 +15,57 @@
 #include <vector>
 
 // Defined here at global scope to satisfy the `extern` declaration in
-// crosshair.hpp (the hitbox module reads it to drive the crosshair hit
-// indicator). Keeping it out of the anonymous namespace below avoids a
+// crosshair.hpp. Keeping it out of the anonymous namespace below avoids a
 // shadowed duplicate that makes the name ambiguous inside member functions.
 CrosshairModule* g_crosshairMod = nullptr;
 
 namespace {
 
 using HudCursorRenderFn = void (*)(void*, void*, void*, void*);
+using TessellatorColorFn = void (*)(void*, float, float, float, float);
+using LevelGetHitResultFn = void* (*)(void*);
+using HitResultGetEntityFn = void* (*)(void*);
+using ActorIsPlayerFn = bool (*)(void*);
 
 HudCursorRenderFn g_cursorRenderOrig = nullptr;
+TessellatorColorFn g_tessColorOrig = nullptr;
+LevelGetHitResultFn g_levelGetHitResult = nullptr;
+HitResultGetEntityFn g_hitResultGetEntity = nullptr;
+ActorIsPlayerFn g_actorIsPlayer = nullptr;
 
 // Timestamp of the last HudCursorRenderer::render call that the module
-// swallowed. Read by onFrame to know whether the HUD is actually showing a
-// crosshair right now.
+// swallowed (custom style) or tinted (vanilla indicator). Read by onFrame
+// to know whether the HUD is actually showing a crosshair right now.
 std::atomic<int64_t> g_lastCursorRenderUs{0};
+
+// True while the player is aiming at a mob or another player that is close
+// enough to actually be hit. Refreshed once per client tick (resolving the
+// hit result inside a render hook caused frame stalls), and read by the HUD
+// overlay path on the render thread, hence the atomic.
+std::atomic<bool> g_aimedEntityInRange{false};
+
+// Timestamp of the last tick where the flag above was refreshed. The
+// indicator only lights while this is recent: if the client stops ticking
+// (singleplayer pause, most menus) it fades out instead of staying stuck.
+std::atomic<int64_t> g_aimRefreshTimeUs{0};
+
+// Vanilla-style in-place tinting. HudCursorRenderer + Tessellator::color
+// cooperate: a thread-local window is opened around the original cursor
+// draw, and every color submitted inside that window has its RGB replaced
+// with the indicator color. If a build never routes the cursor through
+// Tessellator::color, the probe latches an overlay fallback that hides
+// the vanilla crosshair and lets onFrame submit a same-shaped replacement.
+enum class CursorTintState : uint32_t {
+    Probing = 0,
+    Tinting = 1,
+    OverlayFallback = 2,
+};
+
+std::atomic<uint32_t> g_cursorTintState{static_cast<uint32_t>(CursorTintState::Probing)};
+std::atomic<int32_t> g_cursorTintProbeMisses{0};
+
+thread_local bool tl_inCursorRender = false;
+thread_local int32_t tl_cursorColorCalls = 0;
 
 int64_t nowUs() {
     return static_cast<int64_t>(
@@ -41,17 +79,95 @@ double nowSeconds() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+uint32_t forceOpaqueColor(uint32_t color) {
+    return color | 0xFF000000u;
+}
+
+bool hasCategory(void* actor, uint32_t categoryBit) {
+    if (!actor) return false;
+    const uint32_t categories = *reinterpret_cast<uint32_t*>(
+        reinterpret_cast<uintptr_t>(actor) + bedrocktools::sdk::offsets::Actor::mCategories);
+    return (categories & categoryBit) != 0;
+}
+
+// Bedrock already does the reach math: TypeEntity only while the target is
+// close enough to hit, TypeEntityOutOfRange once it is not.
+void updateAimedEntity(void* player) {
+    bool inRange = false;
+
+    if (player && g_levelGetHitResult && g_hitResultGetEntity) {
+        const uintptr_t level = *reinterpret_cast<uintptr_t*>(
+            reinterpret_cast<uintptr_t>(player) + bedrocktools::sdk::offsets::Actor::mLevel);
+        if (level >= 0x1000) {
+            void* hit = g_levelGetHitResult(reinterpret_cast<void*>(level));
+            if (hit) {
+                const int type = *reinterpret_cast<int*>(
+                    reinterpret_cast<uintptr_t>(hit) + bedrocktools::sdk::offsets::HitResult::mType);
+                if (type == bedrocktools::sdk::offsets::HitResult::TypeEntity) {
+                    void* entity = g_hitResultGetEntity(hit);
+                    if (entity && entity != player) {
+                        const bool isPlayer = g_actorIsPlayer && g_actorIsPlayer(entity);
+                        // Category bit 2 is the mob category.
+                        if (isPlayer || hasCategory(entity, 2)) inRange = true;
+                    }
+                }
+            }
+        }
+    }
+
+    g_aimedEntityInRange.store(inRange, std::memory_order_relaxed);
+}
+
+void onCrosshairTick(void* player) {
+    if (!g_crosshairMod || !g_crosshairMod->indicatorActive()) {
+        g_aimedEntityInRange.store(false, std::memory_order_relaxed);
+        return;
+    }
+    updateAimedEntity(player);
+    if (g_aimedEntityInRange.load(std::memory_order_relaxed)) {
+        g_aimRefreshTimeUs.store(nowUs(), std::memory_order_relaxed);
+    }
+}
+
+// True while the option is on and the aimed-entity flag is fresh.
+bool indicatorLit() {
+    if (!g_crosshairMod || !g_crosshairMod->indicatorActive()) return false;
+    constexpr int64_t kMaxStaleUs = 500000; // 500 ms, ~10 missed ticks
+    const int64_t lastRefresh = g_aimRefreshTimeUs.load(std::memory_order_relaxed);
+    return g_aimedEntityInRange.load(std::memory_order_relaxed) &&
+           lastRefresh > 0 && (nowUs() - lastRefresh) <= kMaxStaleUs;
+}
+
+bool overlayFallbackLatched() {
+    return g_cursorTintState.load(std::memory_order_relaxed) ==
+           static_cast<uint32_t>(CursorTintState::OverlayFallback);
+}
+
+void tessColorHook(void* tessellator, float r, float g, float b, float a) {
+    if (tl_inCursorRender) {
+        // Recolor the vanilla crosshair in place: keep the alpha the game
+        // chose, replace the RGB channels with the indicator color.
+        ++tl_cursorColorCalls;
+        const uint32_t color =
+            g_crosshairMod ? forceOpaqueColor(g_crosshairMod->indicatorColor()) : 0xFFFF0000u;
+        r = ((color >> 16) & 0xFF) / 255.0f;
+        g = ((color >>  8) & 0xFF) / 255.0f;
+        b = ( color        & 0xFF) / 255.0f;
+    }
+    if (g_tessColorOrig) g_tessColorOrig(tessellator, r, g, b, a);
+}
+
 // HudCursorRenderer::render is the function that draws the vanilla
-// crosshair (textures/gui/crosshair.png). The debug menu and the hitbox
-// crosshair indicator hook the same target; pl::memory::hook chains the
-// detours, so as long as every module keeps forwarding to the original all
-// of them keep working together.
+// crosshair (textures/gui/crosshair.png). The debug menu hooks the same
+// target; pl::memory::hook chains the detours, so as long as every module
+// keeps forwarding to the original all of them keep working together.
 //
 // While a custom style is selected the vanilla draw is swallowed here and
 // onFrame submits the replacement shape through the HUD overlay instead, so
 // there is still exactly one crosshair on screen - never one painted over
-// the other. With Style::Vanilla the call is forwarded untouched and the
-// module behaves as if it were disabled.
+// the other. With Style::Vanilla the call is forwarded untouched unless
+// the hit indicator is lighting the crosshair (in-place tint, or hide +
+// overlay fallback when tinting is impossible).
 void cursorRenderHook(void* _this, void* a1, void* a2, void* a3) {
     if (!g_cursorRenderOrig) return;
 
@@ -60,7 +176,38 @@ void cursorRenderHook(void* _this, void* a1, void* a2, void* a3) {
         return;
     }
 
+    if (!indicatorLit()) {
+        g_cursorRenderOrig(_this, a1, a2, a3);
+        return;
+    }
+
+    g_lastCursorRenderUs.store(nowUs(), std::memory_order_relaxed);
+
+    if (overlayFallbackLatched()) {
+        // In-place tinting does not work on this build. Skip the vanilla
+        // draw; onFrame submits the colored replacement, so still exactly
+        // one crosshair shows.
+        return;
+    }
+
+    tl_cursorColorCalls = 0;
+    tl_inCursorRender = true;
     g_cursorRenderOrig(_this, a1, a2, a3);
+    tl_inCursorRender = false;
+
+    if (tl_cursorColorCalls > 0) {
+        g_cursorTintState.store(static_cast<uint32_t>(CursorTintState::Tinting),
+                                std::memory_order_relaxed);
+        g_cursorTintProbeMisses.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    // The renderer is also invoked for frames where nothing ends up drawn,
+    // so give the probe several misses before latching the overlay fallback.
+    if (g_cursorTintProbeMisses.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
+        g_cursorTintState.store(static_cast<uint32_t>(CursorTintState::OverlayFallback),
+                                std::memory_order_relaxed);
+    }
 }
 
 // True when the cursor renderer ran very recently, i.e. the game itself
@@ -273,7 +420,7 @@ void buildShape(CrosshairModule::Style style, const ShapePainter& p, float s) {
 } // namespace
 
 CrosshairModule::CrosshairModule()
-    : Module("Crosshair", "Replaces the vanilla crosshair with 16 custom shapes. Color, size, thickness, outline and an animated RGB mode are configurable.") {
+    : Module("Crosshair", "Replaces the vanilla crosshair with 16 custom shapes. Color, size, thickness, outline, an animated RGB mode and a hit indicator are configurable.") {
     // The crosshair always sits at the exact screen center; there is nothing
     // to drag in the HUD editor.
     hideInHudEditor = true;
@@ -286,16 +433,44 @@ CrosshairModule::~CrosshairModule() {
 
 void CrosshairModule::onInit() {
     // Installed once for the whole session (the detour passes straight
-    // through whenever the module is off or the Vanilla style is selected,
-    // and it chains safely with the debug menu/hitbox cursor hooks).
-    if (m_cursorHooked) return;
-    uintptr_t cursor = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HudCursor);
-    if (cursor != 0 &&
-        bedrocktools::hooks::install(reinterpret_cast<void*>(cursor),
-                                     reinterpret_cast<void*>(&cursorRenderHook),
-                                     reinterpret_cast<void**>(&g_cursorRenderOrig))) {
-        m_cursorHooked = true;
+    // through whenever the module is off or the Vanilla style is selected
+    // with the indicator idle, and it chains safely with the debug menu
+    // cursor hook).
+    if (!m_cursorHooked) {
+        uintptr_t cursor = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HudCursor);
+        if (cursor != 0 &&
+            bedrocktools::hooks::install(reinterpret_cast<void*>(cursor),
+                                         reinterpret_cast<void*>(&cursorRenderHook),
+                                         reinterpret_cast<void**>(&g_cursorRenderOrig))) {
+            m_cursorHooked = true;
+        }
     }
+
+    if (!m_tessColorHooked) {
+        uintptr_t tessColor = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::TessellatorColor);
+        if (tessColor != 0 &&
+            bedrocktools::hooks::install(reinterpret_cast<void*>(tessColor),
+                                         reinterpret_cast<void*>(&tessColorHook),
+                                         reinterpret_cast<void**>(&g_tessColorOrig))) {
+            m_tessColorHooked = true;
+        }
+    }
+
+    if (!g_levelGetHitResult) {
+        uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LevelGetHitResult);
+        if (addr) g_levelGetHitResult = reinterpret_cast<LevelGetHitResultFn>(addr);
+    }
+    if (!g_hitResultGetEntity) {
+        uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
+        if (addr) g_hitResultGetEntity = reinterpret_cast<HitResultGetEntityFn>(addr);
+    }
+    if (!g_actorIsPlayer) {
+        uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorIsPlayer);
+        if (addr) g_actorIsPlayer = reinterpret_cast<ActorIsPlayerFn>(addr);
+    }
+
+    bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
+        [](auto& event) { onCrosshairTick(event.player); });
 }
 
 void CrosshairModule::onEnable() {
@@ -303,20 +478,28 @@ void CrosshairModule::onEnable() {
 
 void CrosshairModule::onDisable() {
     g_lastCursorRenderUs.store(0, std::memory_order_relaxed);
+    g_aimedEntityInRange.store(false, std::memory_order_relaxed);
+    g_aimRefreshTimeUs.store(0, std::memory_order_relaxed);
     // Clear the overlay immediately; onFrame stops running for disabled
     // modules, so this is the only chance to remove the custom crosshair.
     submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
 }
 
 void CrosshairModule::onFrame() {
-    if (!enabled || !customStyleActive() || !cursorRenderRecent()) {
+    const bool custom = customStyleActive();
+    const bool indicate = indicatorLit();
+    const bool vanillaFallback = !custom && indicate && overlayFallbackLatched();
+
+    if (!enabled || (!custom && !vanillaFallback) || !cursorRenderRecent()) {
         submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
         return;
     }
 
-    // Resolve the draw color: animated RGB or the configured static color.
+    // Resolve the draw color: hit indicator overrides RGB / static color.
     uint32_t rgb;
-    if (m_rgb) {
+    if (indicate) {
+        rgb = m_indicatorColor & 0x00FFFFFFu;
+    } else if (m_rgb) {
         const float speed = std::clamp(m_rgbSpeed, 0.05f, 1.0f);
         float hue = std::fmod(static_cast<float>(nowSeconds()) * speed * 360.0f, 360.0f);
         if (hue < 0.0f) hue += 360.0f;
@@ -334,19 +517,35 @@ void CrosshairModule::onFrame() {
 
     // HUD overlay coordinates: values <= -19000 are interpreted by the
     // launcher relative to the screen center, with -20000 being the exact
-    // center (the same convention the debug menu and hitbox overlay use), so
-    // the crosshair is always dead-center on every resolution.
+    // center (the same convention the debug menu uses), so the crosshair
+    // is always dead-center on every resolution.
     constexpr float kCenter = -20000.0f;
 
     std::vector<PLModMenu_DrawCommand> cmds;
-    if (m_outline) {
-        // Dark, slightly thicker back-pass first so the crosshair stays
-        // readable against bright skies and sand.
-        ShapePainter outlinePainter{cmds, kCenter, kCenter, thickness + 2.0f, outline};
-        buildShape(m_style, outlinePainter, scale);
+    if (vanillaFallback) {
+        // Mirror the vanilla 4-arm crosshair. The game's own draw is hidden
+        // for these frames, so the replacement is the only one on screen.
+        constexpr float kArmLength = 8.0f;
+        constexpr float kGap = 2.0f;
+        auto addArms = [&](float armThickness, uint32_t armColor) {
+            ShapePainter p{cmds, kCenter, kCenter, armThickness, armColor};
+            p.line(0.0f, -kGap, 0.0f, -(kGap + kArmLength));
+            p.line(0.0f, kGap, 0.0f, kGap + kArmLength);
+            p.line(-kGap, 0.0f, -(kGap + kArmLength), 0.0f);
+            p.line(kGap, 0.0f, kGap + kArmLength, 0.0f);
+        };
+        if (m_outline) addArms(thickness + 2.0f, outline);
+        addArms(thickness, color);
+    } else {
+        if (m_outline) {
+            // Dark, slightly thicker back-pass first so the crosshair stays
+            // readable against bright skies and sand.
+            ShapePainter outlinePainter{cmds, kCenter, kCenter, thickness + 2.0f, outline};
+            buildShape(m_style, outlinePainter, scale);
+        }
+        ShapePainter painter{cmds, kCenter, kCenter, thickness, color};
+        buildShape(m_style, painter, scale);
     }
-    ShapePainter painter{cmds, kCenter, kCenter, thickness, color};
-    buildShape(m_style, painter, scale);
 
     submitDrawCommands(moduleId, cmds);
 }

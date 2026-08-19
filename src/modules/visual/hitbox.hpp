@@ -51,10 +51,5 @@ private:
     void* m_tessVertexAddr;
     void* m_renderMaterialGroupAddr;
 
-    // Crosshair-indicator hooks (installed once in onInit, chainable with
-    // the debug menu's HudCursor hook).
-    bool m_cursorHooked;
-    bool m_tessColorHooked;
-
     void applyPatch();
 };
