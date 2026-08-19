@@ -12,11 +12,16 @@
 #include <string>
 #include <vector>
 
+// Defined here at global scope to satisfy the `extern` declaration in
+// crosshair.hpp (the hitbox module reads it to drive the crosshair hit
+// indicator). Keeping it out of the anonymous namespace below avoids a
+// shadowed duplicate that makes the name ambiguous inside member functions.
+CrosshairModule* g_crosshairMod = nullptr;
+
 namespace {
 
 using HudCursorRenderFn = void (*)(void*, void*, void*, void*);
 
-CrosshairModule* g_crosshairMod = nullptr;
 HudCursorRenderFn g_cursorRenderOrig = nullptr;
 
 // Timestamp of the last HudCursorRenderer::render call that the module
