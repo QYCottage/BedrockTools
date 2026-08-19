@@ -448,7 +448,7 @@ inline bool validateLayout(const std::uint8_t* data, std::size_t bytes, const In
     const int strideScore = detail::scoreStride(data, count, layout.stride);
     if (strideScore <= 0) {
         // A fallback layout is accepted on a single well-formed header so
-        // one active effect cannot drop the HUD back to "No Effects".
+        // one active effect cannot drop the HUD back to hidden.
         if (count != 1 || !detail::looksLikeEffectHeader(data)) return false;
     }
     if (!layout.hasAmplifier) return true;
