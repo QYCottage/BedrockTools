@@ -2,7 +2,6 @@
 
 #include "effectformat.hpp"
 #include "effectlayout.hpp"
-#include "effectlocator.hpp"
 #include "core/Runtime.hpp"
 #include "core/memory/Hooks.hpp"
 #include "modules/ModuleRegistry.hpp"
@@ -19,18 +18,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <iterator>
 #include <limits>
-#include <link.h>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-namespace effectlocator = bedrocktools::hud::effectlocator;
 
 // These names and entity traits intentionally match Bedrock's EnTT types.
 // They must remain in the global namespace because EnTT's component IDs are
@@ -1040,17 +1035,15 @@ void effectTickCallback(bedrocktools::sdk::Player* player) {
 // ---------------------------------------------------------------------------
 // Bedrock draws the built-in status-effect (potion) bar from
 // `HudScreen::_renderStatusEffects(MinecraftUIRenderContext&, ScreenView&,
-// float, float)`. It is the custom UI renderer wired to the vanilla
-// `mob_effects_renderer` element of hud_screen.json (visible while the
-// `#status_effects_visible` binding is set). Hooking it lets this module skip
-// the draw call entirely, so the vanilla bar cannot overlap this module's own
-// panel.
+// float, float)`. Hooking it lets this module skip the draw call entirely, so
+// the vanilla bar cannot overlap this module's own panel.
 //
-// The address is resolved in installVanillaBarHook(): first through
-// `SignatureId::RenderPotionEffects` (see src/core/memory/Signatures.cpp), and
-// when that pattern is not available, through the signature-free locator
-// below. Both paths fail quietly and leave the vanilla bar visible, so the
-// module itself remains fully functional either way.
+// The address is located through `SignatureId::RenderPotionEffects` (see
+// src/core/memory/Signatures.cpp). The pattern registered there is a clearly
+// marked placeholder: until it is replaced with the real ARM64 byte pattern of
+// `_renderStatusEffects` for the target game build, `resolve()` returns 0,
+// `installVanillaBarHook()` bails out quietly and the vanilla bar stays
+// visible. The module itself remains fully functional either way.
 //
 // The prototype below matches Bedrock's `_renderStatusEffects` signature on
 // the builds the rest of this codebase targets. If a different build renames
@@ -1060,39 +1053,6 @@ using RenderPotionEffectsFn = void (*)(void* self, void* renderContext, void* sc
 
 RenderPotionEffectsFn g_origRenderPotionEffects = nullptr;
 
-// ---------------------------------------------------------------------------
-// Signature-free fallback locator
-// ---------------------------------------------------------------------------
-// The pure ARM64 scanning and clustering logic lives in effectlocator.hpp so
-// it can be unit tested on the host. Only the platform-specific piece stays
-// here: enumerating the loaded game library's code/data ranges.
-
-bool collectModuleRanges(effectlocator::ModuleRanges& ranges) {
-    struct Context { effectlocator::ModuleRanges* out; };
-    Context context{&ranges};
-    dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* opaque) -> int {
-        auto* out = static_cast<Context*>(opaque)->out;
-        if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libminecraftpe.so")) return 0;
-        const std::uintptr_t base = static_cast<std::uintptr_t>(info->dlpi_addr);
-        for (int i = 0; i < info->dlpi_phnum; ++i) {
-            const auto& ph = info->dlpi_phdr[i];
-            if (ph.p_type != PT_LOAD || ph.p_memsz == 0) continue;
-            const std::uintptr_t start = base + ph.p_vaddr;
-            const std::uintptr_t end = start + ph.p_memsz;
-            if ((ph.p_flags & PF_X) != 0) {
-                if (out->textStart == 0 || start < out->textStart) out->textStart = start;
-                if (end > out->textEnd) out->textEnd = end;
-            } else if ((ph.p_flags & PF_R) != 0) {
-                if (out->dataStart == 0 || start < out->dataStart) out->dataStart = start;
-                if (end > out->dataEnd) out->dataEnd = end;
-            }
-        }
-        return 1;   // stop iterating: first match is the game library
-    }, &context);
-    return ranges.textStart != 0 && ranges.textEnd > ranges.textStart &&
-           ranges.dataStart != 0 && ranges.dataEnd > ranges.dataStart;
-}
-
 } // namespace
 
 void EffectDisplayModule::renderPotionEffectsDetour(void* self, void* renderContext, void* screenView, float posX, float posY) {
@@ -1100,15 +1060,7 @@ void EffectDisplayModule::renderPotionEffectsDetour(void* self, void* renderCont
     // "hide vanilla HUD" option is active. Return immediately so the game
     // never reaches its own drawing code for the bar.
     if (g_effectDisplay && g_effectDisplay->enabled && g_effectDisplay->m_hideVanillaHud) {
-        // When the hook came from the signature-free locator, do not trust it
-        // blindly: a function that is never called at frame rate (a one-shot
-        // constructor, say) must keep running untouched. Only after the detour
-        // has been entered a few dozen times (about a second of rendering) do
-        // we start suppressing; if it never reaches that count the vanilla bar
-        // simply stays visible.
-        const bool warmedUp = !g_effectDisplay->m_locatorMode || g_effectDisplay->detourReady();
-        g_effectDisplay->m_detourEntries.fetch_add(1, std::memory_order_relaxed);
-        if (warmedUp) return;
+        return;
     }
 
     // Otherwise behave exactly like the original function.
@@ -1120,31 +1072,14 @@ void EffectDisplayModule::renderPotionEffectsDetour(void* self, void* renderCont
 void EffectDisplayModule::installVanillaBarHook() {
     if (m_vanillaBarHooked) return;
 
-    // Preferred: a real byte pattern for HudScreen::_renderStatusEffects (see
-    // src/core/memory/Signatures.cpp). A pattern is exact and is therefore
-    // trusted immediately (no warm-up).
-    std::uintptr_t address = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::RenderPotionEffects);
-
-    // Fallback: signature-free locator. It scans the loaded game library for
-    // the code that references the vanilla effect icon textures. See
-    // effectlocator::locateRenderStatusEffects() for the confidence rules and
-    // limitations; the segment enumeration lives in collectModuleRanges().
-    if (!address) {
-        effectlocator::ModuleRanges ranges;
-        if (collectModuleRanges(ranges)) {
-            address = effectlocator::locateRenderStatusEffects(ranges);
-        }
-        m_locatorMode = address != 0;
-    }
-
-    if (!address) return;   // neither path resolved: keep the vanilla bar
+    const auto address = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::RenderPotionEffects);
+    if (!address) return;   // placeholder pattern / build mismatch: skip quietly
 
     m_vanillaBarHook = bedrocktools::hooks::install(
         reinterpret_cast<void*>(address),
         reinterpret_cast<void*>(&EffectDisplayModule::renderPotionEffectsDetour),
         reinterpret_cast<void**>(&g_origRenderPotionEffects));
     m_vanillaBarHooked = m_vanillaBarHook != nullptr;
-    if (!m_vanillaBarHooked) m_locatorMode = false;
 }
 
 EffectDisplayModule::EffectDisplayModule()
