@@ -1,6 +1,7 @@
 #include "Runtime.hpp"
 #include "GameHooks.hpp"
 #include "config/ConfigManager.hpp"
+#include "launcher/ExternalButtonRefresh.hpp"
 #include "launcher/ModuleMenu.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "core/memory/Hooks.hpp"
@@ -126,6 +127,7 @@ void Runtime::minecraftLoaded() {
 }
 
 bool Runtime::load(pl::mod::ModContext& context) {
+    bedrocktools::launcher::setJavaVm(context.javaVm());
     mResourceDirectory = context.resourceDir();
     bedrocktools::config::ConfigManager::get().setConfigPath((context.configDir() / "config.json").string());
     if (!launcherContext()) return true;
