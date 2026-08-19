@@ -1222,6 +1222,15 @@ void EffectDisplayModule::onFrame() {
         }
     }
 
+    // Hide the panel entirely while the player has no active effects. The
+    // empty command list clears any rows left over from the previous frame,
+    // so the HUD disappears the moment the last effect expires. (The preview
+    // above keeps the panel visible in the HUD editor.)
+    if (effects.empty()) {
+        ::submitDrawCommands(moduleId, {});
+        return;
+    }
+
     const float scale = std::clamp(m_scale, 0.25f, 5.0f);
     const float panelWidth = std::max(110.0f, m_width) * scale;
     const float rowHeight = 48.0f * scale;
@@ -1231,9 +1240,7 @@ void EffectDisplayModule::onFrame() {
     const float durationSize = 15.0f * scale;
     const float barHeight = 3.0f * scale;
     const float cornerRadius = 9.0f * scale;
-    const int visible = effects.empty()
-        ? 1
-        : std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
+    const int visible = std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
     const float panelHeight = padding * 2.0f + rowHeight * visible;
 
     // Whole-panel entrance: fade in with a gentle slide whenever the set of
@@ -1288,7 +1295,7 @@ void EffectDisplayModule::onFrame() {
         }
     } else {
         // Keep a nearly-transparent hitbox so the HUD editor can still grab
-        // the module when the background is hidden and no effects are active.
+        // the module when the background is hidden but effects are active.
         PLModMenu_DrawCommand hitbox{};
         hitbox.type = PL_DRAW_RECT_FILLED;
         hitbox.x = hudPosX;
@@ -1297,22 +1304,6 @@ void EffectDisplayModule::onFrame() {
         hitbox.h = panelHeight;
         hitbox.color = 0x02000000;
         commands.push_back(hitbox);
-    }
-
-    if (effects.empty()) {
-        PLModMenu_DrawCommand emptyCommand{};
-        emptyCommand.type = PL_DRAW_TEXT;
-        emptyCommand.x = hudPosX + padding;
-        emptyCommand.y = panelY + padding;
-        emptyCommand.w = panelWidth - padding * 2.0f;
-        emptyCommand.h = nameSize + 3.0f * scale;
-        emptyCommand.size = nameSize;
-        emptyCommand.color = withAlpha(0xFFD8D8D8, fade);
-        emptyCommand.fontId = "minecraft";
-        emptyCommand.text = "No Effects";
-        commands.push_back(emptyCommand);
-        ::submitDrawCommands(moduleId, commands);
-        return;
     }
 
     for (int index = 0; index < visible; ++index) {

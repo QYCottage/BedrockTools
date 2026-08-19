@@ -274,8 +274,8 @@ int main() {
 
     // Regression: a single effect whose id is outside the vanilla 1..64 range
     // (a modded effect, or a newer vanilla id) used to score negatively and be
-    // rejected entirely, so the HUD stayed on "No Effects" until several
-    // effects were active. A lone valid effect of any id must still show.
+    // rejected entirely, so the HUD went blank until several effects were
+    // active. A lone valid effect of any id must still show.
     std::printf("single modded effect (id 65-255) still resolves\n");
     {
         Buffer buffer(0x88, 1);
