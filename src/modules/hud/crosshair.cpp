@@ -403,6 +403,16 @@ void CrosshairModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_outline")) {
         try { m_outline = j["m_outline"].get<bool>(); } catch (...) {}
     }
+    if (j.contains("m_indicator")) {
+        try { m_indicator = j["m_indicator"].get<bool>(); } catch (...) {}
+    }
+    if (j.contains("m_indicatorColor") && j["m_indicatorColor"].is_string()) {
+        std::string hexStr = j["m_indicatorColor"].get<std::string>();
+        if (!hexStr.empty()) {
+            if (hexStr[0] == '#') hexStr = hexStr.substr(1);
+            try { m_indicatorColor = 0xFF000000u | (static_cast<uint32_t>(std::stoul(hexStr, nullptr, 16)) & 0x00FFFFFFu); } catch (...) {}
+        }
+    }
 }
 
 void CrosshairModule::saveConfig(nlohmann::json& j) {
@@ -422,4 +432,9 @@ void CrosshairModule::saveConfig(nlohmann::json& j) {
     j["m_rgb"] = m_rgb;
     j["m_rgbSpeed"] = m_rgbSpeed;
     j["m_outline"] = m_outline;
+    j["m_indicator"] = m_indicator;
+
+    char indicatorColor[10];
+    std::snprintf(indicatorColor, sizeof(indicatorColor), "#%06X", m_indicatorColor & 0x00FFFFFFu);
+    j["m_indicatorColor"] = std::string(indicatorColor);
 }

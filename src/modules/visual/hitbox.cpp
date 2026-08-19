@@ -1,4 +1,5 @@
 #include "hitbox.hpp"
+#include "modules/hud/crosshair.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
 #include "core/memory/Hooks.hpp"
@@ -263,7 +264,7 @@ static thread_local int32_t tl_cursorColorCalls = 0;
 // flag is fresh. A stale flag means ticking stopped (singleplayer pause,
 // most menus), so the crosshair must return to its vanilla color.
 static bool s_indicatorActiveNow() {
-    if (!g_hitboxMod || !g_hitboxMod->enabled || !g_hitboxMod->crosshairIndicator) return false;
+    if (!g_hitboxMod || !g_hitboxMod->enabled || !g_crosshairMod || !g_crosshairMod->indicatorActive()) return false;
     constexpr int64_t kMaxStaleUs = 500000; // 500 ms, i.e. ~10 missed ticks
     const int64_t lastRefresh = g_aimRefreshTimeUs.load(std::memory_order_relaxed);
     return g_aimedEntityInRange.load(std::memory_order_relaxed) &&
@@ -328,7 +329,7 @@ static void s_tessColorHook(void* tessellator, float r, float g, float b, float 
         // chose, replace the RGB channels with the indicator color.
         ++tl_cursorColorCalls;
         const uint32_t color =
-            g_hitboxMod ? forceOpaqueColor(g_hitboxMod->crosshairIndicatorColor) : 0xFFFF0000u;
+            g_crosshairMod ? forceOpaqueColor(g_crosshairMod->indicatorColor()) : 0xFFFF0000u;
         r = ((color >> 16) & 0xFF) / 255.0f;
         g = ((color >>  8) & 0xFF) / 255.0f;
         b = ((color      ) & 0xFF) / 255.0f;
@@ -983,7 +984,7 @@ void HitboxModule::onFrame() {
         s_cursorTintState.load(std::memory_order_relaxed) ==
         static_cast<uint32_t>(CursorTintState::OverlayFallback);
 
-    if (!enabled || !crosshairIndicator || !overlayFallback ||
+    if (!enabled || !g_crosshairMod || !g_crosshairMod->indicatorActive() || !overlayFallback ||
         !s_indicatorActiveNow() || !s_cursorRenderRecent()) {
         submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
         return;
@@ -1031,7 +1032,7 @@ void HitboxModule::onFrame() {
     std::vector<PLModMenu_DrawCommand> outline = addArms(kThickness + 2.0f, kOutlineColor);
     cmds.insert(cmds.end(), outline.begin(), outline.end());
 
-    const uint32_t color = forceOpaqueColor(crosshairIndicatorColor);
+    const uint32_t color = forceOpaqueColor(g_crosshairMod ? g_crosshairMod->indicatorColor() : 0xFFFF0000u);
     std::vector<PLModMenu_DrawCommand> inner = addArms(kThickness, color);
     cmds.insert(cmds.end(), inner.begin(), inner.end());
 
@@ -1056,10 +1057,6 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("hitboxIndicator")) {
         hitboxIndicator = j["hitboxIndicator"].get<bool>();
     }
-    if (j.contains("crosshairIndicator")) {
-        try { crosshairIndicator = j["crosshairIndicator"].get<bool>(); } catch (...) {}
-    }
-
     auto parseColor = [&](const std::string& key, uint32_t& outColor) {
         if (!j.contains(key) || !j[key].is_string()) return;
         std::string hexStr = j[key].get<std::string>();
@@ -1083,7 +1080,6 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     parseColor("lookLineColor", lookLineColor);
     parseColor("indicatorDefaultColor", indicatorDefaultColor);
     parseColor("indicatorActiveColor", indicatorActiveColor);
-    parseColor("crosshairIndicatorColor", crosshairIndicatorColor);
 }
 
 void HitboxModule::saveConfig(nlohmann::json& j) {
@@ -1096,20 +1092,17 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["lookLineLength"] = lookLineLength;
     j["lineThickness"] = lineThickness;
     j["hitboxIndicator"] = hitboxIndicator;
-    j["crosshairIndicator"] = crosshairIndicator;
 
-    char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12], hexC[12];
+    char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12];
     snprintf(hexH, sizeof(hexH), "#%08X", forceOpaqueColor(hitboxColor));
     snprintf(hexE, sizeof(hexE), "#%08X", forceOpaqueColor(eyeLineColor));
     snprintf(hexL, sizeof(hexL), "#%08X", forceOpaqueColor(lookLineColor));
     snprintf(hexD, sizeof(hexD), "#%08X", forceOpaqueColor(indicatorDefaultColor));
     snprintf(hexA, sizeof(hexA), "#%08X", forceOpaqueColor(indicatorActiveColor));
-    snprintf(hexC, sizeof(hexC), "#%08X", forceOpaqueColor(crosshairIndicatorColor));
 
     j["hitboxColor"] = std::string(hexH);
     j["eyeLineColor"] = std::string(hexE);
     j["lookLineColor"] = std::string(hexL);
     j["indicatorDefaultColor"] = std::string(hexD);
     j["indicatorActiveColor"] = std::string(hexA);
-    j["crosshairIndicatorColor"] = std::string(hexC);
 }

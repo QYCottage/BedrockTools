@@ -41,17 +41,6 @@ public:
     uint32_t indicatorDefaultColor = 0xFFFFFFFF; 
     uint32_t indicatorActiveColor = 0xFFFF0000;  
 
-    // Crosshair indicator: while the player is aiming at a mob or another
-    // player that is close enough to actually be hit (the game's own hit
-    // result decides the reach, not a configurable range), the vanilla
-    // crosshair itself is recolored in place to crosshairIndicatorColor via
-    // the HudCursorRenderer + Tessellator::color hooks - no second
-    // crosshair is drawn over it. If the running game build makes in-place
-    // tinting impossible, the vanilla crosshair is hidden while the
-    // indicator is active and a matching crosshair is drawn instead, so
-    // there is never a stacked crosshair either way.
-    bool crosshairIndicator = false;
-    uint32_t crosshairIndicatorColor = 0xFFFF0000;
 
 private:
     bool m_patched;

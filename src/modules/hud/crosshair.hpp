@@ -3,6 +3,9 @@
 #include "../Module.hpp"
 #include <cstdint>
 
+class CrosshairModule;
+extern CrosshairModule* g_crosshairMod;
+
 // Crosshair
 //
 // Replaces the vanilla crosshair (textures/gui/crosshair.png, drawn by
@@ -61,6 +64,15 @@ public:
     bool m_rgb = false;           // animated rainbow mode (overrides m_color)
     float m_rgbSpeed = 0.3f;      // full hue cycles per second (menu: 0.05 - 1)
     bool m_outline = true;        // dark back-pass so bright scenes stay readable
+
+    // Recolors the vanilla crosshair while the player is aiming at a hittable
+    // entity. The hitbox module supplies the hit-test, but this option belongs
+    // to the Crosshair module and is persisted with its settings.
+    bool m_indicator = false;
+    uint32_t m_indicatorColor = 0xFFFF0000;
+
+    bool indicatorActive() const { return enabled && m_indicator; }
+    uint32_t indicatorColor() const { return m_indicatorColor; }
 
 private:
     bool m_cursorHooked = false;  // HudCursorRenderer hook installed
