@@ -73,11 +73,7 @@ constexpr float kHudCenter = -20000.0f;
 
 // Gap between the top of the player's head and the vertical center of the
 // nametag line the game draws (and therefore of the icon next to it).
-// Bedrock renders the nametag billboard centred roughly 0.5 blocks above the
-// top of the bounding box.  The previous value (0.45) placed the projected
-// anchor slightly below the real text centre, making the icon sit lower than
-// the name on screen.
-constexpr float kNametagAnchorOffset = 0.5f;
+constexpr float kNametagAnchorOffset = 0.45f;
 
 // Assumed name length when the player's name cannot be read, so the icon still
 // lands roughly where a typical nametag starts instead of on top of the name.
