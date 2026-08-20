@@ -17,11 +17,17 @@ private:
     void removePatch();
 
     // --- Nametag Icon ------------------------------------------------------
-    // Draws the launcher icon (BedrockTools logo) above your own head while
-    // the camera is in third person, complementing the nametag this module
-    // restores. The icon is a screen-space overlay anchored to the head, so
-    // it stays readable at any distance (same idea as a vanilla nametag).
+    // Draws the launcher icon (the BedrockTools logo shipped as icon.png in
+    // the levipack) directly to the LEFT of your own name while the camera is
+    // in third person, like a rank badge in front of the nametag this module
+    // restores. The icon is a screen-space overlay whose position and size are
+    // derived from the nametag's own projection, so it tracks the name at any
+    // distance and camera angle.
     void registerResources();
+
+    // Visible character count of the name the game paints above the head,
+    // used to find the left edge of the nametag.
+    int localNameLength(bedrocktools::sdk::Player* player) const;
 
     bool m_resourcesRegistered = false;
 
@@ -29,9 +35,10 @@ private:
     using GetLocalPlayerFn = bedrocktools::sdk::Player* (*)(bedrocktools::sdk::ClientInstance*);
     GetLocalPlayerFn m_getLocalPlayer = nullptr;
 
-    // "Nametag Icon" toggle and its on-screen size multiplier.
+    // "Nametag Icon" toggle and its size multiplier (1.0 == the icon is a
+    // little taller than the name text).
     bool m_nametagIcon = true;
-    float m_iconScale = 1.0f;
+    float m_nametagIconScale = 1.0f;
 
 public:
     ThirdPersonNametagModule();
