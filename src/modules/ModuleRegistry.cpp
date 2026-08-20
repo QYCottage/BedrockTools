@@ -28,6 +28,7 @@
 #include "hud/tablist.hpp"
 #include "hud/combocounter.hpp"
 #include "visual/chunkborder.hpp"
+#include "visual/blockoutline.hpp"
 #include "visual/hitbox.hpp"
 #include "visual/zoom.hpp"
 #include "visual/breadcrumbs.hpp"
@@ -122,6 +123,7 @@ void registerAllModules() {
     registry.emplace<ThirdPersonNametagModule>();
     registry.emplace<TablistModule>();
     registry.emplace<ChunkBorderModule>();
+    registry.emplace<BlockOutlineModule>();
     registry.emplace<HitboxModule>();
     registry.emplace<ZoomModule>();
     registry.emplace<BreadcrumbsModule>();
