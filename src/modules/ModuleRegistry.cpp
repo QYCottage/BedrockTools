@@ -39,6 +39,7 @@
 #include "player/autoreq.hpp"
 #include "misc/commentkey.hpp"
 #include "misc/commandhotkey.hpp"
+#include "misc/hotbar.hpp"
 #include "hud/crosshair.hpp"
 
 
@@ -135,5 +136,6 @@ void registerAllModules() {
     registry.emplace<ForceGlobalRPModule>();
     registry.emplace<CommentKey>();
     registry.emplace<CommandHotkeyModule>();
+    registry.emplace<HotbarModule>();
     registry.emplace<CrosshairModule>();
 }
