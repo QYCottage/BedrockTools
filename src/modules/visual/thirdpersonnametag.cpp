@@ -1,5 +1,6 @@
 #include "thirdpersonnametag.hpp"
 #include "nametagicon_assets.hpp"
+#include "nametagiconlayout.hpp"
 
 #include "core/GameHooks.hpp"
 #include "modules/ModuleRegistry.hpp"
@@ -8,6 +9,7 @@
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/client/ClientInstance.hpp>
+#include <bedrocktools/sdk/world/Actor.hpp>
 
 #include <pl/ModMenu.hpp>
 #include <EGL/egl.h>
@@ -16,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -67,8 +71,13 @@ constexpr float kVerticalFov = 70.0f * kPi / 180.0f;
 // center (the same convention the Crosshair and Tablist modules rely on).
 constexpr float kHudCenter = -20000.0f;
 
-// Gap between the top of the player's head and the bottom of the icon.
-constexpr float kIconAnchorOffset = 0.35f;
+// Gap between the top of the player's head and the vertical center of the
+// nametag line the game draws (and therefore of the icon next to it).
+constexpr float kNametagAnchorOffset = 0.45f;
+
+// Assumed name length when the player's name cannot be read, so the icon still
+// lands roughly where a typical nametag starts instead of on top of the name.
+constexpr int kFallbackNameLength = 8;
 
 } // namespace
 
@@ -139,6 +148,19 @@ void ThirdPersonNametagModule::registerResources() {
     }
 }
 
+int ThirdPersonNametagModule::localNameLength(bedrocktools::sdk::Player* player) const {
+    if (!player) return kFallbackNameLength;
+
+    // Player::mName is the name the client paints above the head. Guard the
+    // read: a wrong offset on an unsupported game build would otherwise feed
+    // a nonsense width into the layout.
+    const std::string& name = player->name();
+    if (name.empty() || name.size() > 256) return kFallbackNameLength;
+
+    const int visible = bedrocktools::nametag::visibleNameLength(std::string_view(name));
+    return visible > 0 ? visible : kFallbackNameLength;
+}
+
 void ThirdPersonNametagModule::onFrame() {
     if (!enabled || !m_nametagIcon) {
         ::submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
@@ -180,11 +202,11 @@ void ThirdPersonNametagModule::onFrame() {
     eglQuerySurface(display, surface, EGL_HEIGHT, &height);
     if (width <= 0 || height <= 0) return;
 
-    // Anchor: just above the top of the head (fallback to a nominal height
-    // when the AABB component is unavailable).
+    // Anchor: the nametag line the game draws above the head (fallback to a
+    // nominal height when the AABB component is unavailable).
     const auto bounds = player->bounds();
     const float headTop = (bounds.max.y > bounds.min.y) ? bounds.max.y : (feet.y + 1.8f);
-    const bedrocktools::sdk::Vec3 anchor = {feet.x, headTop + kIconAnchorOffset, feet.z};
+    const bedrocktools::sdk::Vec3 anchor = {feet.x, headTop + kNametagAnchorOffset, feet.z};
 
     // Camera basis. The follow camera looks at the player, so the forward
     // vector is simply the direction from the camera to the eye.
@@ -227,21 +249,40 @@ void ThirdPersonNametagModule::onFrame() {
     const float px = (ndcX + 1.0f) * 0.5f * static_cast<float>(width);
     const float py = (1.0f - ndcY) * 0.5f * static_cast<float>(height);
 
-    // Screen-center-relative HUD coordinates.
-    const float hudX = kHudCenter + (px - static_cast<float>(width) * 0.5f);
-    const float hudY = kHudCenter + (py - static_cast<float>(height) * 0.5f);
-
     registerResources();
 
-    // Fixed on-screen size (a nametag-style billboard), scaled by the option.
-    const float iconSize = static_cast<float>(height) * 0.05f * m_iconScale;
+    // The nametag is a world-space billboard: its on-screen size follows the
+    // distance to the camera, so the icon is measured against the same
+    // projection instead of a fixed pixel size. `camZ` is the depth along the
+    // view axis, which is exactly what the perspective divide above used.
+    const float textHeightPx =
+        bedrocktools::nametag::nametagTextHeightPx(camZ, static_cast<float>(height), kVerticalFov);
+    if (textHeightPx <= 0.0f) {
+        ::submitDrawCommands(moduleId, std::vector<PLModMenu_DrawCommand>{});
+        return;
+    }
+
+    bedrocktools::nametag::IconPlacement placement;
+    placement.nameCenterX = px;
+    placement.nameCenterY = py;
+    placement.textHeightPx = textHeightPx;
+    placement.nameLength = localNameLength(player);
+    placement.scale = m_nametagIconScale;
+
+    // Sits immediately to the left of the name, vertically centered on it.
+    const bedrocktools::nametag::IconRect rect =
+        bedrocktools::nametag::iconRectLeftOfName(placement);
+
+    // Screen-center-relative HUD coordinates.
+    const float hudX = kHudCenter + (rect.x - static_cast<float>(width) * 0.5f);
+    const float hudY = kHudCenter + (rect.y - static_cast<float>(height) * 0.5f);
 
     PLModMenu_DrawCommand icon{};
     icon.type = PL_DRAW_IMAGE;
-    icon.x = hudX - iconSize * 0.5f;
-    icon.y = hudY - iconSize * 0.5f;
-    icon.w = iconSize;
-    icon.h = iconSize;
+    icon.x = hudX;
+    icon.y = hudY;
+    icon.w = rect.w;
+    icon.h = rect.h;
     icon.color = 0xFFFFFFFF;
     icon.imageId = bedrocktools::nametag::kNametagIconImageId;
 
@@ -251,11 +292,14 @@ void ThirdPersonNametagModule::onFrame() {
 void ThirdPersonNametagModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     if (j.contains("m_nametagIcon")) m_nametagIcon = j["m_nametagIcon"].get<bool>();
-    if (j.contains("m_iconScale")) m_iconScale = j["m_iconScale"].get<float>();
+    // "m_iconScale" is the pre-rename key; keep reading it so existing configs
+    // do not silently lose the size the player picked.
+    if (j.contains("m_iconScale")) m_nametagIconScale = j["m_iconScale"].get<float>();
+    if (j.contains("m_nametagIconScale")) m_nametagIconScale = j["m_nametagIconScale"].get<float>();
 }
 
 void ThirdPersonNametagModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
     j["m_nametagIcon"] = m_nametagIcon;
-    j["m_iconScale"] = m_iconScale;
+    j["m_nametagIconScale"] = m_nametagIconScale;
 }
