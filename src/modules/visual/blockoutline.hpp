@@ -14,25 +14,24 @@ public:
     void loadConfig(const nlohmann::json& json) override;
     void saveConfig(nlohmann::json& json) override;
 
-    // Stored as AARRGGBB. The menu exposes the RGB channels as three sliders
-    // (outlineRed/Green/Blue) and keeps alpha forced opaque when drawing, so
-    // the color never washes out. The hex picker key is kept for loading
-    // older configs but is no longer written.
+    // Stored as AARRGGBB with alpha forced opaque. The menu exposes this as a
+    // single RGB color picker (saved as "#RRGGBB", like the Hitbox colors)
+    // instead of the old Red/Green/Blue sliders. The legacy per-channel keys
+    // are still accepted when loading older configs.
     std::uint32_t outlineColor = 0xFF00FFFFu;
 
     // Draws the targeted block as a translucent filled box (a true 3D volume)
-    // in addition to the wireframe edges.
+    // in addition to the wireframe edges. Only the faces pointing at the
+    // camera are drawn, so the tint stays on the block's surface instead of
+    // bleeding through to the inside.
     bool outline3d = false;
 
     // Line size (menu slider units). 1.0 keeps the classic hairline box;
     // anything above that is drawn as real camera-facing geometry because GL
-    // line width is ignored by most mobile GLES drivers.
+    // line width is ignored by most mobile GLES drivers. Only edges facing
+    // the camera are drawn, so a thick outline still reads as a flat frame
+    // rather than a see-through 3D wireframe.
     float lineThickness = 1.0f;
-
-    // RGB channels (0-255) mirrored to/from outlineColor.
-    int outlineRed = 0;
-    int outlineGreen = 255;
-    int outlineBlue = 255;
 
 private:
     void installRenderHook();
