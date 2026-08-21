@@ -74,6 +74,9 @@ private:
     bool m_hideVanillaHud = true;
 
     float m_scale = 1.0f;
+    // Multiplier applied on top of m_scale to just the potion icons, so their
+    // size can be tuned without resizing the whole panel. 1.0 == vanilla 18px.
+    float m_iconScale = 1.0f;
     float m_width = 210.0f;
     float m_backgroundOpacity = 0.82f;
     bool m_showBackground = true;

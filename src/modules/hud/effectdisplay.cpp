@@ -1252,10 +1252,13 @@ void EffectDisplayModule::onFrame() {
     }
 
     const float scale = std::clamp(m_scale, 0.25f, 5.0f);
+    const float iconScale = std::clamp(m_iconScale, 0.25f, 4.0f);
     const float panelWidth = std::max(110.0f, m_width) * scale;
-    const float rowHeight = 48.0f * scale;
+    const float iconSize = static_cast<float>(kEffectIconSize) * scale * iconScale;
+    // Rows grow with the icon so an enlarged icon never clips against its
+    // neighbours; with icons hidden or at default size the classic height wins.
+    const float rowHeight = std::max(48.0f * scale, m_showIcons ? iconSize + 12.0f * scale : 0.0f);
     const float padding = 8.0f * scale;
-    const float iconSize = static_cast<float>(kEffectIconSize) * scale;
     const float nameSize = 18.0f * scale;
     const float durationSize = 15.0f * scale;
     const float barHeight = 3.0f * scale;
@@ -1364,6 +1367,9 @@ void EffectDisplayModule::onFrame() {
         }
         const std::string duration = formatDuration(effect.durationTicks);
         const float contentWidth = panelWidth - (textX - hudPosX) - padding;
+        // Rows can be taller than the classic 48px when the icons are scaled
+        // up; keep the two text lines vertically centered in that case.
+        const float textY = rowY + (rowHeight - 48.0f * scale) * 0.5f;
 
         float durationAlpha = 1.0f;
         const std::uint32_t durationColorValue = durationColor(effect.durationTicks, m_pulsePhase, durationAlpha);
@@ -1371,7 +1377,7 @@ void EffectDisplayModule::onFrame() {
         PLModMenu_DrawCommand nameCommand{};
         nameCommand.type = PL_DRAW_TEXT;
         nameCommand.x = textX;
-        nameCommand.y = rowY;
+        nameCommand.y = textY;
         nameCommand.w = contentWidth;
         nameCommand.h = nameSize + 3.0f * scale;
         nameCommand.size = nameSize;
@@ -1383,7 +1389,7 @@ void EffectDisplayModule::onFrame() {
         PLModMenu_DrawCommand durationCommand{};
         durationCommand.type = PL_DRAW_TEXT;
         durationCommand.x = textX;
-        durationCommand.y = rowY + 19.0f * scale;
+        durationCommand.y = textY + 19.0f * scale;
         durationCommand.w = contentWidth;
         durationCommand.h = durationSize + 2.0f * scale;
         durationCommand.size = durationSize;
@@ -1442,6 +1448,7 @@ void EffectDisplayModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("hudPosY")) hudPosY = j["hudPosY"].get<float>();
     if (j.contains("isHudModule")) isHudModule = j["isHudModule"].get<bool>();
     if (j.contains("m_scale")) m_scale = j["m_scale"].get<float>();
+    if (j.contains("m_iconScale")) m_iconScale = j["m_iconScale"].get<float>();
     if (j.contains("m_width")) m_width = j["m_width"].get<float>();
     if (j.contains("m_backgroundOpacity")) m_backgroundOpacity = j["m_backgroundOpacity"].get<float>();
     if (j.contains("m_showBackground")) m_showBackground = j["m_showBackground"].get<bool>();
@@ -1462,6 +1469,7 @@ void EffectDisplayModule::saveConfig(nlohmann::json& j) {
     j["hudPosY"] = hudPosY;
     j["isHudModule"] = isHudModule;
     j["m_scale"] = m_scale;
+    j["m_iconScale"] = m_iconScale;
     j["m_width"] = m_width;
     j["m_backgroundOpacity"] = m_backgroundOpacity;
     j["m_showBackground"] = m_showBackground;
