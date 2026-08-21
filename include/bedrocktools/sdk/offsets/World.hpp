@@ -86,10 +86,13 @@ inline constexpr std::size_t mWeather = 0x1B8;
 namespace ItemActor {
 // ItemActor holds its ItemStack as the first member right after the Actor
 // base, i.e. at sizeof(Actor). This value is the observed sizeof(Actor) on
-// the 1.20.60-1.21.0x Android builds this offset set targets. The Item
-// Labels module validates the value at runtime (and scans a small window
-// around it as a fallback), so a version mismatch degrades to "no label"
-// instead of crashing.
+// the 1.20.60-1.21.0x Android builds this offset set targets.
+//
+// It is only a *starting guess*: the Item Labels module probes this offset
+// first and, if the memory there does not read back as a real ItemStack,
+// scans a small window around it (0x2A8-0x340) and caches whatever offset
+// worked per actor vtable. A version mismatch therefore costs one scan
+// instead of breaking the module.
 inline constexpr std::size_t mItem = 0x2E8;
 }
 
