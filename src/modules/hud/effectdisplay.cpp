@@ -904,8 +904,28 @@ void ensureEffectIcon(std::uint32_t id) {
     // Register the vanilla icon for this effect under its texture path. The
     // mod menu copies the pixels, so the temporary buffer may go out of scope.
     const char* path = getEffectIconPath(id);
-    const auto pixels = vanillaIconPixels(path);
+    auto pixels = vanillaIconPixels(path);
     if (pixels.empty()) return;
+
+    // The launcher uploads these bytes verbatim into an ARGB_8888 Bitmap,
+    // whose storage is premultiplied alpha, and draws it with a plain canvas
+    // blit. The embedded vanilla textures are straight alpha whose fully
+    // transparent regions still carry RGB 0xFFFFFF, so straight-uploaded they
+    // composite as a solid white square behind every icon. Premultiplying the
+    // RGB channels by alpha keeps transparent pixels invisible, blends the
+    // anti-aliased edges correctly and leaves the opaque artwork untouched.
+    for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        const unsigned alpha = pixels[i + 3];
+        if (alpha == 255) continue;
+        if (alpha == 0) {
+            pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+            continue;
+        }
+        pixels[i]     = static_cast<unsigned char>((pixels[i]     * alpha + 127) / 255);
+        pixels[i + 1] = static_cast<unsigned char>((pixels[i + 1] * alpha + 127) / 255);
+        pixels[i + 2] = static_cast<unsigned char>((pixels[i + 2] * alpha + 127) / 255);
+    }
+
     pl::modmenu::registerImage(path, pixels, kEffectIconSize, kEffectIconSize);
 }
 
