@@ -30,6 +30,10 @@ static const ExplicitDependency kExplicitDependencies[] = {
     // is shown at all.
     {"m_romanLevels", "m_showLevel"},
     {"m_hideLevelOne", "m_showLevel"},
+
+    // Effect Display: the potion-icon size only matters while the icons are
+    // shown at all.
+    {"m_iconScale", "m_showIcons"},
 };
 
 static const char* explicitParentFor(const std::string& key) {
@@ -216,6 +220,11 @@ void registerModulesWithLauncher() {
                     kLower.find("color") != std::string::npos ||
                     kLower.find("alpha") != std::string::npos) {
                     maxVal = 1.0f;
+                } else if (kLower.find("iconscale") != std::string::npos) {
+                    // Potion-icon size multiplier (Effect Display); the module
+                    // clamps to the same range at render time.
+                    minVal = 0.25f;
+                    maxVal = 4.0f;
                 } else if (kLower.find("scale") != std::string::npos) {
                     minVal = 0.1f;
                     maxVal = 5.0f;
