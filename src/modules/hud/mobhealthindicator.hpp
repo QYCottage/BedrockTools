@@ -24,8 +24,9 @@ public:
     int m_maxHearts = 10;        // number of hearts to display (for hearts mode)
     float m_barLength = 10.0f;   // number of segments in the bar (for bar mode)
 
-private:
     void onLocalPlayerTick(void* localPlayer);
+
+private:
     void restoreAllNametags();
     std::string formatHealthHearts(float health, float maxHealth);
     std::string formatHealthBar(float health, float maxHealth);
