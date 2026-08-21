@@ -37,9 +37,10 @@ public:
 
     // Line size (menu slider units). 1.0 keeps the classic hairline box;
     // anything above that is drawn as real camera-facing geometry because GL
-    // line width is ignored by most mobile GLES drivers. Only edges facing
-    // the camera are drawn, so a thick outline still reads as a flat frame
-    // rather than a see-through 3D wireframe.
+    // line width is ignored by most mobile GLES drivers. In thick mode only
+    // the block's projected outline (silhouette edges) is drawn, so raising
+    // the size thickens a flat frame instead of turning it into a 3D box —
+    // that is what the explicit "Block 3d" toggle is for.
     float lineThickness = 1.0f;
 
 private:
