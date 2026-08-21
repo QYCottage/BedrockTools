@@ -1,6 +1,8 @@
+#include "modules/visual/blockoutline_color.hpp"
 #include "modules/visual/blockoutline_geometry.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <iostream>
 
 using bedrocktools::modules::blockoutline::Point;
@@ -122,6 +124,47 @@ int main() {
         int visibleCount = 0;
         for (bool v : vis) visibleCount += v ? 1 : 0;
         assert(visibleCount >= 4 && visibleCount <= 12);
+    }
+
+    // --- RGB rainbow cycle -----------------------------------------------
+    using bedrocktools::modules::blockoutline::rainbowRgb;
+    using bedrocktools::modules::blockoutline::wrapPhase;
+
+    // Exact points of the cycle (phases chosen so every value is exactly
+    // representable as a float).
+    constexpr auto cRed = rainbowRgb(0.0f);
+    static_assert(cRed.r == 1.0f && cRed.g == 0.0f && cRed.b == 0.0f);
+    constexpr auto cSpringGreen = rainbowRgb(0.25f);
+    static_assert(cSpringGreen.r == 0.5f && cSpringGreen.g == 1.0f && cSpringGreen.b == 0.0f);
+    constexpr auto cCyan = rainbowRgb(0.5f);
+    static_assert(cCyan.r == 0.0f && cCyan.g == 1.0f && cCyan.b == 1.0f);
+    constexpr auto cViolet = rainbowRgb(0.75f);
+    static_assert(cViolet.r == 0.5f && cViolet.g == 0.0f && cViolet.b == 1.0f);
+
+    // The cycle wraps: phase 1.0 is back to red, negatives wrap around.
+    constexpr auto cWrapped = rainbowRgb(1.0f);
+    static_assert(cWrapped.r == 1.0f && cWrapped.g == 0.0f && cWrapped.b == 0.0f);
+    static_assert(wrapPhase(2.25f) == 0.25f);
+    static_assert(wrapPhase(-0.25f) == 0.75f);
+    static_assert(wrapPhase(1.0f) == 0.0f);
+
+    // The primary colors sit at thirds of the cycle (checked with a small
+    // epsilon because 1/3 is not exactly representable).
+    const auto near = [](bedrocktools::modules::blockoutline::RgbColor c,
+                         float r, float g, float b) {
+        return std::fabs(c.r - r) < 1e-4f &&
+               std::fabs(c.g - g) < 1e-4f &&
+               std::fabs(c.b - b) < 1e-4f;
+    };
+    assert(near(rainbowRgb(1.0f / 3.0f), 0.0f, 1.0f, 0.0f));
+    assert(near(rainbowRgb(2.0f / 3.0f), 0.0f, 0.0f, 1.0f));
+
+    // Every channel always stays inside [0, 1].
+    for (int i = 0; i < 360; ++i) {
+        const auto c = rainbowRgb(static_cast<float>(i) / 360.0f);
+        assert(c.r >= 0.0f && c.r <= 1.0f);
+        assert(c.g >= 0.0f && c.g <= 1.0f);
+        assert(c.b >= 0.0f && c.b <= 1.0f);
     }
 
     std::cout << "block outline geometry tests passed\n";
