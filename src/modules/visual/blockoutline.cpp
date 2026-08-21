@@ -1,4 +1,5 @@
 #include "blockoutline.hpp"
+#include "blockoutline_color.hpp"
 #include "blockoutline_geometry.hpp"
 
 #include "core/memory/Hooks.hpp"
@@ -8,6 +9,7 @@
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/Types.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -27,6 +29,9 @@ using LevelGetHitResult = void* (*)(void*);
 // quad), 4 = line list (2 vertices per line).
 constexpr int kQuadPrimitive = 1;
 constexpr int kLinePrimitive = 4;
+
+// How long one full rainbow cycle takes in the "Rgb" mode.
+constexpr double kRgbCycleSeconds = 3.0;
 
 struct HashedString {
     std::uint64_t mStrHash;
@@ -263,10 +268,24 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
     colorHolder[2] = 1.0f;
     colorHolder[3] = 1.0f;
 
-    const std::uint32_t color = g_module->outlineColor;
-    const float red = static_cast<float>((color >> 16) & 0xFFu) / 255.0f;
-    const float green = static_cast<float>((color >> 8) & 0xFFu) / 255.0f;
-    const float blue = static_cast<float>(color & 0xFFu) / 255.0f;
+    float red, green, blue;
+    if (g_module->rgb) {
+        // Rainbow mode: the hue cycles continuously through the spectrum.
+        // Phase is computed in double so precision survives long uptimes.
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float phase =
+            static_cast<float>(std::fmod(seconds / kRgbCycleSeconds, 1.0));
+        const auto c = bedrocktools::modules::blockoutline::rainbowRgb(phase);
+        red = c.r;
+        green = c.g;
+        blue = c.b;
+    } else {
+        const std::uint32_t color = g_module->outlineColor;
+        red = static_cast<float>((color >> 16) & 0xFFu) / 255.0f;
+        green = static_cast<float>((color >> 8) & 0xFFu) / 255.0f;
+        blue = static_cast<float>(color & 0xFFu) / 255.0f;
+    }
 
     const float camX = camera.x;
     const float camY = camera.y;
@@ -304,7 +323,7 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
     // z-fight with the block's own surface. Only the faces pointing at the
     // camera are drawn, so the tint stays on the surface of the block and the
     // color never bleeds through to its inside.
-    if (g_module->outline3d) {
+    if (g_module->block3d) {
         constexpr float kFillAlpha = 0.25f;
         const auto faces = bedrocktools::modules::blockoutline::makeFaces(
             static_cast<float>(target.x),
@@ -447,7 +466,7 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
 } // namespace
 
 BlockOutlineModule::BlockOutlineModule()
-    : Module("Block Outline", "Draws a configurable outline around the block you are looking at.") {
+    : Module("Block Outline", "Draws a configurable outline around the block you are looking at. Optional 3D box and rainbow RGB colors.") {
     g_module = this;
 }
 
@@ -513,7 +532,18 @@ void BlockOutlineModule::onDisable() {
 void BlockOutlineModule::loadConfig(const nlohmann::json& json) {
     Module::loadConfig(json);
 
-    outline3d = json.value("outline3d", outline3d);
+    // The 3D box is an explicit opt-in toggle. Current configs use the
+    // "block3d" key; the old "outline3d" key is still accepted so upgrading
+    // players keep their setting.
+    auto readBool = [&](const char* key, bool& out) {
+        if (json.contains(key) && json[key].is_boolean()) out = json[key].get<bool>();
+    };
+    if (json.contains("block3d")) {
+        readBool("block3d", block3d);
+    } else {
+        readBool("outline3d", block3d);
+    }
+    readBool("rgb", rgb);
 
     if (json.contains("lineThickness")) {
         try {
@@ -577,6 +607,7 @@ void BlockOutlineModule::saveConfig(nlohmann::json& json) {
     std::snprintf(hex, sizeof(hex), "%06X", outlineColor & 0x00FFFFFFu);
     json["outlineColor"] = std::string("#") + hex;
 
-    json["outline3d"] = outline3d;
+    json["block3d"] = block3d;
+    json["rgb"] = rgb;
     json["lineThickness"] = lineThickness;
 }

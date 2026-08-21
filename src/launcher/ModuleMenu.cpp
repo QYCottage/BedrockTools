@@ -152,8 +152,8 @@ void registerModulesWithLauncher() {
                     displayName += ' ';
                     displayName += sourceKey[i];
                 } else if (isdigit(sourceKey[i]) && i > 0 && !isdigit(sourceKey[i - 1])) {
-                    // Split before a digit so keys like "outline3d" render as
-                    // "Outline 3d" instead of "Outline3d".
+                    // Split before a digit so keys like "block3d" render as
+                    // "Block 3d" instead of "Block3d".
                     displayName += ' ';
                     displayName += sourceKey[i];
                 } else {
