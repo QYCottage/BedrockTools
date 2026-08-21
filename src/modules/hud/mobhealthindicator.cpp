@@ -6,6 +6,7 @@
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
+#include <bedrocktools/sdk/Types.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 #include <core/memory/Hooks.hpp>
 
@@ -15,14 +16,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-
-// Function pointer types
-using ActorIsInvisible_t = bool (*)(void*);
-using ActorGetNameTag_t = std::string (*)(void*);
-using ActorSetNameTag_t = void (*)(void*, const std::string&);
-using SynchedActorDataEnsureIndexFn = void (*)(void*, std::uint16_t);
-using ActorSynchedDataUpdateAlwaysShowNameTagFn = void (*)(void*, const void*);
-using ActorFetchNearbyActorsSorted_t = void* (*)(void*, void*, int);
 
 struct DistanceSortedActor {
     void* mActor;
@@ -35,6 +28,14 @@ struct ActorVec {
     DistanceSortedActor* end;
     DistanceSortedActor* cap;
 };
+
+// Function pointer types
+using ActorIsInvisible_t = bool (*)(void*);
+using ActorGetNameTag_t = std::string (*)(void*);
+using ActorSetNameTag_t = void (*)(void*, const std::string&);
+using SynchedActorDataEnsureIndexFn = void (*)(void*, std::uint16_t);
+using ActorSynchedDataUpdateAlwaysShowNameTagFn = void (*)(void*, const void*);
+using ActorFetchNearbyActorsSorted_t = ActorVec (*)(void*, void*, int);
 
 // Global state
 static MobHealthIndicatorModule* g_mobHealthMod = nullptr;
