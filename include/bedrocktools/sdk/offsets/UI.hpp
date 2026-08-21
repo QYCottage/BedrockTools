@@ -19,10 +19,6 @@ inline constexpr std::size_t FilteredFullStringPresent = 0xA0;
 namespace ShulkerPreview {
 inline constexpr std::size_t ItemStackBaseItem = 0x8;
 inline constexpr std::size_t ItemStackBaseUserData = 0x10;
-// ItemStackBase::mCustomName — anvil-renamed display name, right after the
-// user-data pointer. Read with a layout-agnostic string parser that also
-// tolerates the size field sitting at +8 or +16.
-inline constexpr std::size_t ItemStackBaseCustomName = 0x18;
 inline constexpr std::size_t SharedCounterPointer = 0x0;
 inline constexpr std::size_t ItemId = 0x8A;
 inline constexpr std::size_t CompoundTagTreeRoot = 0x8;

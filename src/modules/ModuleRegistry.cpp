@@ -34,7 +34,6 @@
 #include "visual/breadcrumbs.hpp"
 #include "visual/lightoverlay.hpp"
 #include "visual/shulkerpreview.hpp"
-#include "visual/itemlabels.hpp"
 #include "visual/connectedglass.hpp"
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
@@ -134,7 +133,6 @@ void registerAllModules() {
     registry.emplace<FPSUnlockerModule>();
     registry.emplace<LightOverlayModule>();
     registry.emplace<ShulkerPreviewModule>();
-    registry.emplace<ItemLabelsModule>();
     registry.emplace<ConnectedGlassModule>();
     registry.emplace<ForceGlobalRPModule>();
     registry.emplace<CommentKey>();
