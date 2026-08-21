@@ -126,6 +126,71 @@ int main() {
         assert(visibleCount >= 4 && visibleCount <= 12);
     }
 
+    // --- Edge silhouette -------------------------------------------------
+    // The silhouette is the boundary of the block's projected shape: exactly
+    // the edges where one touching face faces the eye and the other does not.
+    // From a corner that is the six-edge hexagon; the three edges meeting at
+    // the near corner (indices 5, 6 and 10 for this eye) sit inside the
+    // projection and must NOT be drawn, because as thick camera-facing quads
+    // they make the outline read as a 3D box.
+    using bedrocktools::modules::blockoutline::makeEdgeSilhouette;
+
+    {
+        constexpr auto box = makeBox(0.0f, 0.0f, 0.0f);
+        constexpr auto vis = makeEdgeSilhouette(box, Point{2.0f, 3.0f, 4.0f});
+        static_assert(vis[1] && vis[2] && vis[4] && vis[7] && vis[9] && vis[11]);
+        static_assert(!vis[0] && !vis[3] && !vis[5] && !vis[6] && !vis[8] && !vis[10]);
+        int count = 0;
+        for (bool v : vis) count += v ? 1 : 0;
+        assert(count == 6);
+    }
+    // From straight above only the four top edges form the outline.
+    {
+        constexpr auto box = makeBox(0.0f, 0.0f, 0.0f);
+        constexpr auto vis = makeEdgeSilhouette(box, Point{0.5f, 2.0f, 0.5f});
+        static_assert(!vis[0] && !vis[1] && !vis[2] && !vis[3]);
+        static_assert(vis[4] && vis[5] && vis[6] && vis[7]);
+        static_assert(!vis[8] && !vis[9] && !vis[10] && !vis[11]);
+    }
+    // From straight along +X only the four edges lying in the +X plane.
+    {
+        constexpr auto box = makeBox(0.0f, 0.0f, 0.0f);
+        constexpr auto vis = makeEdgeSilhouette(box, Point{3.0f, 0.5f, 0.5f});
+        static_assert(vis[1] && vis[5] && vis[9] && vis[10]);
+        static_assert(!vis[0] && !vis[2] && !vis[3] && !vis[4]);
+        static_assert(!vis[6] && !vis[7] && !vis[8] && !vis[11]);
+    }
+    // Slightly off-axis (front + a sliver of the top): still a six-edge
+    // outline, never fewer than the four-edge silhouette of one face.
+    {
+        constexpr auto box = makeBox(0.0f, 0.0f, 0.0f);
+        constexpr auto vis = makeEdgeSilhouette(box, Point{0.5f, 1.2f, 4.5f});
+        int count = 0;
+        for (bool v : vis) count += v ? 1 : 0;
+        assert(count == 6);
+    }
+    // From inside the box every edge is kept (the outline surrounds the
+    // player; culling anything would lose the frame).
+    {
+        constexpr auto box = makeBox(0.0f, 0.0f, 0.0f, 0.002f);
+        constexpr auto vis = makeEdgeSilhouette(box, Point{0.5f, 0.5f, 0.5f});
+        int count = 0;
+        for (bool v : vis) count += v ? 1 : 0;
+        assert(count == 12);
+    }
+    // The silhouette is always a subset of the face-visible edge set.
+    {
+        constexpr auto box = makeBox(10.0f, -2.0f, 4.0f);
+        constexpr auto full = makeEdgeVisibility(box, Point{13.0f, 0.5f, 7.0f});
+        constexpr auto sil = makeEdgeSilhouette(box, Point{13.0f, 0.5f, 7.0f});
+        int count = 0;
+        for (std::size_t i = 0; i < full.size(); ++i) {
+            assert(!(sil[i] && !full[i]));
+            count += sil[i] ? 1 : 0;
+        }
+        assert(count == 6);
+    }
+
     // --- RGB rainbow cycle -----------------------------------------------
     using bedrocktools::modules::blockoutline::rainbowRgb;
     using bedrocktools::modules::blockoutline::wrapPhase;

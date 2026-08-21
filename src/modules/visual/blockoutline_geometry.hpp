@@ -145,6 +145,73 @@ constexpr std::array<bool, 12> makeEdgeVisibility(
     return visible;
 }
 
+// Decides which of the twelve edges are silhouette edges: exactly the edges
+// where one of the two touching faces faces the eye and the other does not.
+// Those edges are the boundary of the box's projected shape, so drawing only
+// them keeps a thick outline a flat frame around the block. The remaining
+// visible edges (where two visible faces meet) sit inside the projected
+// outline; as thin hairlines they are barely noticeable, but as thick
+// camera-facing quads they form the "corner of a box" bars that make the
+// outline read as a 3D cube even though the "Block 3d" fill is off. When the
+// eye is inside the box every edge is kept: the outline surrounds the player
+// and nothing can be culled without losing the frame.
+constexpr std::array<bool, 12> makeEdgeSilhouette(
+    const std::array<Line, 12>& box, Point eye) {
+    float x0 = box[0].from.x, x1 = x0;
+    float y0 = box[0].from.y, y1 = y0;
+    float z0 = box[0].from.z, z1 = z0;
+    for (const auto& line : box) {
+        const Point verts[2] = {line.from, line.to};
+        for (const Point& v : verts) {
+            if (v.x < x0) x0 = v.x;
+            if (v.x > x1) x1 = v.x;
+            if (v.y < y0) y0 = v.y;
+            if (v.y > y1) y1 = v.y;
+            if (v.z < z0) z0 = v.z;
+            if (v.z > z1) z1 = v.z;
+        }
+    }
+
+    const bool inside = eye.x > x0 && eye.x < x1 &&
+                        eye.y > y0 && eye.y < y1 &&
+                        eye.z > z0 && eye.z < z1;
+    const bool faceVisible[kFaceCount] = {
+        inside || eye.y < y0,  // -Y
+        inside || eye.y > y1,  // +Y
+        inside || eye.z < z0,  // -Z
+        inside || eye.z > z1,  // +Z
+        inside || eye.x < x0,  // -X
+        inside || eye.x > x1,  // +X
+    };
+
+    // Endpoints of an edge share the exact bound coordinate on every face the
+    // edge touches (both derive from the same makeBox constants), so exact
+    // equality is safe here. Every edge touches exactly two faces.
+    std::array<bool, 12> visible{};
+    for (std::size_t i = 0; i < box.size(); ++i) {
+        if (inside) {
+            visible[i] = true;
+            continue;
+        }
+        const Point& a = box[i].from;
+        const Point& b = box[i].to;
+        const bool on[kFaceCount] = {
+            a.y == y0 && b.y == y0,
+            a.y == y1 && b.y == y1,
+            a.z == z0 && b.z == z0,
+            a.z == z1 && b.z == z1,
+            a.x == x0 && b.x == x0,
+            a.x == x1 && b.x == x1,
+        };
+        int touchingVisible = 0;
+        for (int f = 0; f < static_cast<int>(kFaceCount); ++f) {
+            if (on[f] && faceVisible[f]) ++touchingVisible;
+        }
+        visible[i] = (touchingVisible == 1);
+    }
+    return visible;
+}
+
 // Builds the six faces of a block-sized axis-aligned box as quads. Used by the
 // "3D" rendering mode to fill the box with a translucent overlay so the block
 // reads as a solid volume instead of a bare wireframe.

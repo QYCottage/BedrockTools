@@ -312,7 +312,17 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
     // is painted inside the block and thick lines read as a full 3D wireframe
     // cube instead of a flat frame.
     const bedrocktools::modules::blockoutline::Point eye{camX, camY, camZ};
-    const auto edgeVisible = bedrocktools::modules::blockoutline::makeEdgeVisibility(lines, eye);
+
+    // Thick lines are drawn as camera-facing quads, so the interior edges
+    // (where two visible faces meet) become solid bars that make the frame
+    // read as a 3D cube. While the thick pass is active, keep only the
+    // silhouette edges — the boundary of the block's projected outline — so
+    // raising the line size thickens a flat frame instead of turning it into
+    // a box. The classic hairline box (line size 1.0) keeps the full
+    // face-visible edge set, which is the traditional wireframe look.
+    const auto edgeVisible = thickLines
+        ? bedrocktools::modules::blockoutline::makeEdgeSilhouette(lines, eye)
+        : bedrocktools::modules::blockoutline::makeEdgeVisibility(lines, eye);
     int visibleEdgeCount = 0;
     for (const bool visible : edgeVisible) {
         if (visible) ++visibleEdgeCount;
@@ -364,10 +374,11 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
         }
     }
 
-    // Thick pass: every camera-facing edge becomes a camera-facing quad so
-    // the apparent width follows the line-size setting from any angle. Edges
-    // on the far side of the block are skipped; without the depth test they
-    // would shine through the block and make the frame look 3D.
+    // Thick pass: every silhouette edge becomes a camera-facing quad so the
+    // apparent width follows the line-size setting from any angle. Only the
+    // projected outline is drawn: the far-side edges would shine through the
+    // block (no depth test) and the interior edges would form "corner of a
+    // box" bars, both of which make the frame look 3D.
     if (thickLines && visibleEdgeCount > 0) {
         g_tessellatorBegin(tessellator, nullptr, kQuadPrimitive,
                            visibleEdgeCount * 8, 0);
