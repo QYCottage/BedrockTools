@@ -58,6 +58,8 @@ struct ActorVec {
 
 using ActorFetchNearbyActorsSortedFn = ActorVec (*)(void*, void*, int);
 using BlockSourceIsSolidBlockingBlockFn = bool (*)(void*, const bedrocktools::sdk::BlockPos&);
+// Level actor enumeration fallback (same helper the Tablist module uses).
+using ActorManagerListFn = std::vector<void*> (*)(void*);
 
 ActorGetNameTagFn g_getNameTag = nullptr;
 ActorSetNameTagFn g_setNameTag = nullptr;
@@ -65,11 +67,18 @@ SynchedActorDataEnsureIndexFn g_ensureIndex = nullptr;
 ActorSynchedDataUpdateAlwaysShowNameTagFn g_updateAlwaysShowNameTag = nullptr;
 ActorFetchNearbyActorsSortedFn g_fetchNearby = nullptr;
 BlockSourceIsSolidBlockingBlockFn g_isSolidBlockingBlock = nullptr;
+ActorManagerListFn g_actorManagerList = nullptr;
 
 ItemLabelsModule* g_mod = nullptr;
 
-// ActorCategory::Item — dropped item entities carry this category bit.
-constexpr std::uint32_t kItemCategoryBit = 0x40;
+// ActorCategory bits. Only the Player (0x1) and Mob (0x2) bits are used, and
+// only as a *negative* hint: the exact value of ActorCategory::Item has moved
+// between builds, so an actor is never rejected for missing it — a candidate
+// is confirmed by actually finding a valid ItemStack inside it (see
+// findItemStack below). Skipping players and mobs just keeps the discovery
+// scan away from entities that can never be dropped items.
+constexpr std::uint32_t kPlayerCategoryBit = 0x1;
+constexpr std::uint32_t kMobCategoryBit = 0x2;
 
 // Sanity bounds for pointers read from the game.
 constexpr std::uintptr_t kMinPtr = 0x10000;
@@ -87,9 +96,15 @@ struct CapturedState {
 // game thread, so access is serialized with g_mutex.
 std::unordered_map<void*, CapturedState> g_captured;
 std::mutex g_mutex;
-// Vtable of ItemActor — used to make sure an actor pointer is still a live
-// item entity before restoring anything on it.
-void* g_itemActorVtable = nullptr;
+// Actor vtable -> offset of the embedded ItemStack, discovered at runtime.
+// ItemActor is the only actor that carries a real ItemStack, so a vtable that
+// resolves once identifies every dropped item afterwards without re-scanning.
+std::unordered_map<void*, std::size_t> g_itemStackOffsets;
+// Vtables that were probed and did not look like item actors. Cleared every
+// so often so an actor that was probed at a bad moment (empty stack right
+// after spawn) gets another chance.
+std::unordered_set<void*> g_notItemVtables;
+int g_negativeCacheTicks = 0;
 // Item* -> description id cache (Item objects are registry singletons, so
 // the id only needs to be resolved once per item type).
 std::unordered_map<void*, std::string> g_nameCache;
@@ -415,22 +430,99 @@ bool writeAlwaysShowItem(void* actor, std::int8_t value) {
 }
 
 // ---------------------------------------------------------------------------
-// Actor helpers.
+// Item actor detection.
+//
+// Earlier revisions trusted two hard-coded constants: an ActorCategory bit for
+// "this is a dropped item" and ItemActor::mItem for where the stack lives.
+// Both move between game builds, and when either was wrong the module simply
+// showed nothing. Detection is now done by evidence instead: a candidate
+// offset is accepted only when the memory there reads back as a real
+// ItemStack (vtable + WeakPtr<Item> + plausible item id). The answer is
+// cached per actor vtable, so the scan runs once per entity type.
 // ---------------------------------------------------------------------------
+
+// The documented offset is tried first; the window around it covers the
+// layout shifts observed between 1.20.x and 1.21.x builds. The range stays
+// small on purpose so the probe never reads far past an actor object.
+constexpr std::size_t kStackScanFirst = 0x2A8;
+constexpr std::size_t kStackScanLast = 0x340;
+
+std::uint16_t readItemId(Item* item) {
+    if (!item) return 0;
+    return *reinterpret_cast<const std::uint16_t*>(
+        reinterpret_cast<std::uint8_t*>(item) +
+        bedrocktools::sdk::offsets::ShulkerPreview::ItemId);
+}
+
+// True when the memory at `candidate` reads back as a populated ItemStack.
+bool looksLikeItemStack(void* candidate) {
+    if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(candidate))) return false;
+    // ItemStackBase starts with a vtable pointer.
+    if (!isReadablePtr(*reinterpret_cast<std::uintptr_t*>(candidate))) return false;
+
+    Item* item = getStackItem(reinterpret_cast<ItemStackBase*>(candidate));
+    if (!item) return false;
+
+    const std::uint16_t itemId = readItemId(item);
+    return itemId != 0 && itemId <= 2000;
+}
+
+// Returns the actor's ItemStack, or nullptr when the actor is not a dropped
+// item (or its stack is currently empty).
+ItemStackBase* findItemStack(void* actor) {
+    if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(actor))) return nullptr;
+
+    void* vtable = *reinterpret_cast<void**>(actor);
+    if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(vtable))) return nullptr;
+
+    const auto base = reinterpret_cast<std::uint8_t*>(actor);
+
+    // Known entity type: go straight to the offset we resolved earlier.
+    const auto known = g_itemStackOffsets.find(vtable);
+    if (known != g_itemStackOffsets.end()) {
+        auto* stack = reinterpret_cast<ItemStackBase*>(base + known->second);
+        return looksLikeItemStack(stack) ? stack : nullptr;
+    }
+    if (g_notItemVtables.contains(vtable)) return nullptr;
+
+    // Unknown entity type. Players and mobs can never be dropped items, so
+    // they are rejected without probing their memory at all.
+    const auto categories = *reinterpret_cast<const std::uint32_t*>(
+        base + bedrocktools::sdk::offsets::Actor::mCategories);
+    if ((categories & (kPlayerCategoryBit | kMobCategoryBit)) != 0) {
+        g_notItemVtables.insert(vtable);
+        return nullptr;
+    }
+
+    // Probe the documented offset first, then the small window around it.
+    const std::size_t documented = bedrocktools::sdk::offsets::ItemActor::mItem;
+    if (looksLikeItemStack(base + documented)) {
+        g_itemStackOffsets.emplace(vtable, documented);
+        return reinterpret_cast<ItemStackBase*>(base + documented);
+    }
+    for (std::size_t off = kStackScanFirst; off <= kStackScanLast; off += 8) {
+        if (off == documented) continue;
+        if (!looksLikeItemStack(base + off)) continue;
+        g_itemStackOffsets.emplace(vtable, off);
+        return reinterpret_cast<ItemStackBase*>(base + off);
+    }
+
+    g_notItemVtables.insert(vtable);
+    return nullptr;
+}
+
+// An actor address is only safe to touch again if it still reads as a live
+// item entity of a type we resolved before.
 bool isLiveItemActor(void* actor) {
     if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(actor))) return false;
     void* vtable = *reinterpret_cast<void**>(actor);
-    if (!g_itemActorVtable) {
-        // First contact: trust the category bit and validate the stack.
-        if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(vtable))) return false;
-        const auto categories = *reinterpret_cast<const std::uint32_t*>(
-            reinterpret_cast<std::uintptr_t>(actor) + bedrocktools::sdk::offsets::Actor::mCategories);
-        if ((categories & kItemCategoryBit) == 0) return false;
-        g_itemActorVtable = vtable;
-        return true;
-    }
-    return vtable == g_itemActorVtable;
+    if (!isReadablePtr(reinterpret_cast<std::uintptr_t>(vtable))) return false;
+    return g_itemStackOffsets.contains(vtable);
 }
+
+// ---------------------------------------------------------------------------
+// Actor helpers.
+// ---------------------------------------------------------------------------
 
 void* getActorStateVector(void* actor) {
     if (!actor) return nullptr;
@@ -480,23 +572,16 @@ struct ItemLabelInfo {
 // Extracts name + count from an item actor. Returns false when the actor is
 // not (or no longer reads as) a dropped item.
 bool readItemLabelInfo(void* actor, ItemLabelInfo& out) {
-    if (!actor || !isLiveItemActor(actor)) return false;
+    if (!actor) return false;
 
-    ItemStackBase* stack = reinterpret_cast<ItemStackBase*>(
-        reinterpret_cast<std::uint8_t*>(actor) + bedrocktools::sdk::offsets::ItemActor::mItem);
+    // Locates (and, the first time an entity type is seen, discovers) the
+    // stack. A non-item actor returns nullptr here.
+    ItemStackBase* stack = findItemStack(actor);
     if (!stack) return false;
 
-    // The stack must look real: a readable vtable and a valid item behind
-    // the WeakPtr.
-    if (!isReadablePtr(*reinterpret_cast<std::uintptr_t*>(stack))) return false;
     Item* item = getStackItem(stack);
     if (!item) return false;
-
-    // Optional extra sanity: the item id (used by ShulkerPreview) should be
-    // in a plausible range.
-    const auto itemId = *reinterpret_cast<const std::uint16_t*>(
-        reinterpret_cast<std::uint8_t*>(item) +
-        bedrocktools::sdk::offsets::ShulkerPreview::ItemId);
+    const std::uint16_t itemId = readItemId(item);
     if (itemId == 0 || itemId > 2000) return false;
 
     out.actor = actor;
@@ -507,11 +592,19 @@ bool readItemLabelInfo(void* actor, ItemLabelInfo& out) {
         out.name = custom;
     } else {
         std::string id;
-        if (!findItemDescriptionId(item, id) || id.empty()) return false;
-        out.name = prettifyItemId(id);
+        if (findItemDescriptionId(item, id) && !id.empty()) {
+            out.name = prettifyItemId(id);
+        } else {
+            // The description-id scan can miss on a layout we have not seen.
+            // Falling back to the numeric id keeps the label visible instead
+            // of silently dropping the item, which is far easier to diagnose
+            // than an empty screen.
+            out.name = "Item #" + std::to_string(static_cast<int>(itemId));
+        }
     }
     return !out.name.empty();
 }
+
 
 // ---------------------------------------------------------------------------
 // Ray casting (mirrors the Hitbox module's helpers).
@@ -644,7 +737,6 @@ void restoreAllItems() {
         }
         it = g_captured.erase(it);
     }
-    g_itemActorVtable = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +829,10 @@ void ItemLabelsModule::onInit() {
         g_isSolidBlockingBlock = reinterpret_cast<BlockSourceIsSolidBlockingBlockFn>(
             bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceIsSolidBlockingBlock));
     }
+    if (!g_actorManagerList) {
+        g_actorManagerList = reinterpret_cast<ActorManagerListFn>(
+            bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorManagerList));
+    }
 
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) {
@@ -761,7 +857,6 @@ void ItemLabelsModule::updateLabels(void* player) {
         g_level = level;
         g_captured.clear();
         g_nameCache.clear();
-        g_itemActorVtable = nullptr;
         if (level < kMinPtr) return;  // Not in a world yet.
     }
 
@@ -780,6 +875,15 @@ void ItemLabelsModule::updateLabels(void* player) {
         }
     }
 
+    // Give entity types that failed the item probe another chance every few
+    // seconds: a dropped item can be probed in the one tick where its stack
+    // is not populated yet, and a permanent "not an item" verdict would then
+    // hide that entity type for the rest of the session.
+    if (++g_negativeCacheTicks >= 200) {
+        g_negativeCacheTicks = 0;
+        g_notItemVtables.clear();
+    }
+
     const float maxDist = std::max(4.0f, std::min(m_maxDistance, 128.0f));
     const float fetchRadius = std::min(std::max(maxDist + 8.0f, 32.0f), 64.0f);
 
@@ -788,42 +892,61 @@ void ItemLabelsModule::updateLabels(void* player) {
     // deselected" apart from "gone from the world".
     std::unordered_set<void*> fetchedThisTick;
 
-    // Gather item actors inside range.
-    std::vector<ItemLabelInfo> items;
+    // Collect nearby entities. fetchNearbyActorsSorted is the cheap path, but
+    // it is a signature-scanned function: when a game update breaks that
+    // signature it resolves to null and the module used to go completely
+    // silent. The level's runtime actor list (the same source the Tablist
+    // module walks) is used as a fallback so labels keep working.
+    std::vector<void*> candidates;
     if (g_fetchNearby) {
         bedrocktools::sdk::Vec3 extent{fetchRadius, fetchRadius, fetchRadius};
         ActorVec actors = g_fetchNearby(player, &extent, 1);
-        if (actors.begin && actors.end) {
+        if (actors.begin && actors.end && actors.end >= actors.begin) {
+            candidates.reserve(static_cast<std::size_t>(actors.end - actors.begin));
             for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
-                void* ent = it->mActor;
-                if (!ent || ent == player) continue;
-                fetchedThisTick.insert(ent);
-
-                ItemLabelInfo info;
-                if (!readItemLabelInfo(ent, info)) continue;
-
-                const bedrocktools::sdk::Vec3 pos = getActorPosition(ent);
-                const float dx = pos.x - playerPos.x;
-                const float dy = pos.y - playerPos.y;
-                const float dz = pos.z - playerPos.z;
-                info.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (info.distance > maxDist) continue;
-
-                // Ray-trace culling: hide labels behind solid blocks (walls,
-                // ground overhangs...). Grass and other non-blocking blocks
-                // do not hide labels, matching the "visible items only" rule.
-                if (m_occlusion && region) {
-                    const float tx = pos.x;
-                    const float ty = pos.y + 0.35f;  // Label sits above the item.
-                    const float tz = pos.z;
-                    if (rayHitsSolid(region, playerPos.x, eyeY, playerPos.z, tx, ty, tz)) {
-                        continue;
-                    }
-                }
-
-                items.push_back(std::move(info));
+                if (it->mActor) candidates.push_back(it->mActor);
             }
         }
+    }
+    if (candidates.empty() && g_actorManagerList && level >= kMinPtr) {
+        void* actorManager = *reinterpret_cast<void**>(
+            level + bedrocktools::sdk::offsets::Level::mActorManager);
+        if (actorManager) {
+            candidates = g_actorManagerList(actorManager);
+        }
+    }
+
+    // Gather item actors inside range.
+    std::vector<ItemLabelInfo> items;
+    for (void* ent : candidates) {
+        if (!ent || ent == player) continue;
+        fetchedThisTick.insert(ent);
+
+        const bedrocktools::sdk::Vec3 pos = getActorPosition(ent);
+        const float dx = pos.x - playerPos.x;
+        const float dy = pos.y - playerPos.y;
+        const float dz = pos.z - playerPos.z;
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        // Distance is checked before the (more expensive) stack probe.
+        if (distance > maxDist) continue;
+
+        ItemLabelInfo info;
+        if (!readItemLabelInfo(ent, info)) continue;
+        info.distance = distance;
+
+        // Ray-trace culling: hide labels behind solid blocks (walls,
+        // ground overhangs...). Grass and other non-blocking blocks
+        // do not hide labels, matching the "visible items only" rule.
+        if (m_occlusion && region) {
+            const float tx = pos.x;
+            const float ty = pos.y + 0.35f;  // Label sits above the item.
+            const float tz = pos.z;
+            if (rayHitsSolid(region, playerPos.x, eyeY, playerPos.z, tx, ty, tz)) {
+                continue;
+            }
+        }
+
+        items.push_back(std::move(info));
     }
 
     // Select which items get labels.

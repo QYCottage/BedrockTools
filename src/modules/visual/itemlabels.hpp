@@ -18,6 +18,13 @@
 //     grass) only get a label when they are actually visible, and
 //   * two targeting modes — nearest N items inside a radius, or only the
 //     single item currently under the crosshair.
+//
+// Item detection does not rely on hard-coded version constants: an entity is
+// treated as a dropped item only when a real ItemStack is found inside it
+// (probing the documented ItemActor::mItem offset first, then a small window
+// around it), and the result is cached per actor vtable. Nearby entities come
+// from Actor::fetchNearbyActorsSorted, falling back to the level's runtime
+// actor list when that signature does not resolve on the running build.
 class ItemLabelsModule : public Module {
 public:
     // 0 = nearest items in range, 1 = crosshair target only.
