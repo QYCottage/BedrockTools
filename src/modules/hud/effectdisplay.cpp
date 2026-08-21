@@ -1,6 +1,7 @@
 #include "effectdisplay.hpp"
 
 #include "effectformat.hpp"
+#include "effecti18n.hpp"
 #include "effectlayout.hpp"
 #include "core/Runtime.hpp"
 #include "core/memory/Hooks.hpp"
@@ -18,11 +19,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -72,35 +76,31 @@ public:
 
 namespace {
 
-struct EffectDefinition {
-    const char* name;
+// Effect tint colors for the countdown bars, indexed by Bedrock's built-in
+// effect id. The localized display names live in effecti18n.hpp; index zero
+// is the internal no-effect value.
+struct EffectColor {
     std::uint32_t color;
 };
 
 // Bedrock's complete built-in effect range (including the 1.21 trial effects
-// and Breath of the Nautilus). Index zero is the internal no-effect value.
-constexpr std::array<EffectDefinition, 38> kEffects{{
-    {"", 0x777777},
-    {"Speed", 0x7CAFC6}, {"Slowness", 0x5A6C81}, {"Haste", 0xD9C043},
-    {"Mining Fatigue", 0x4A4217}, {"Strength", 0x932423}, {"Instant Health", 0xF82423},
-    {"Instant Damage", 0x430A09}, {"Jump Boost", 0x22FF4C}, {"Nausea", 0x551D4A},
-    {"Regeneration", 0xCD5CAB}, {"Resistance", 0x99453A}, {"Fire Resistance", 0xE49A3A},
-    {"Water Breathing", 0x2E5299}, {"Invisibility", 0x7F8392}, {"Blindness", 0x1F1F23},
-    {"Night Vision", 0x1F1FA1}, {"Hunger", 0x587653}, {"Weakness", 0x484D48},
-    {"Poison", 0x4E9331}, {"Wither", 0x352A27}, {"Health Boost", 0xF87D23},
-    {"Absorption", 0x2552A5}, {"Saturation", 0xF82423}, {"Levitation", 0xCEFFFF},
-    {"Fatal Poison", 0x4E9331}, {"Conduit Power", 0x1DC2D1}, {"Slow Falling", 0xF3CFB9},
-    {"Bad Omen", 0x0B6138}, {"Hero of the Village", 0x44FF44}, {"Darkness", 0x292721},
-    {"Trial Omen", 0x8F6F78}, {"Wind Charged", 0xB8D8D8}, {"Weaving", 0x78695A},
-    {"Oozing", 0x99C256}, {"Infested", 0x8C9B8C}, {"Raid Omen", 0x6D485D},
-    {"Breath of the Nautilus", 0x4EC2C8},
+// and Breath of the Nautilus), in the same order as effecti18n.hpp.
+constexpr std::array<EffectColor, 38> kEffectColors{{
+    {0x777777},
+    {0x7CAFC6}, {0x5A6C81}, {0xD9C043}, {0x4A4217}, {0x932423}, {0xF82423},
+    {0x430A09}, {0x22FF4C}, {0x551D4A}, {0xCD5CAB}, {0x99453A}, {0xE49A3A},
+    {0x2E5299}, {0x7F8392}, {0x1F1F23}, {0x1F1FA1}, {0x587653}, {0x484D48},
+    {0x4E9331}, {0x352A27}, {0xF87D23}, {0x2552A5}, {0xF82423}, {0xCEFFFF},
+    {0x4E9331}, {0x1DC2D1}, {0xF3CFB9}, {0x0B6138}, {0x44FF44}, {0x292721},
+    {0x8F6F78}, {0xB8D8D8}, {0x78695A}, {0x99C256}, {0x8C9B8C}, {0x6D485D},
+    {0x4EC2C8},
 }};
 
 EffectDisplayModule* g_effectDisplay = nullptr;
 
-const EffectDefinition& definitionFor(std::uint32_t id) {
-    static constexpr EffectDefinition unknown{"Unknown Effect", 0x888888};
-    return id < kEffects.size() ? kEffects[id] : unknown;
+std::uint32_t colorFor(std::uint32_t id) {
+    static constexpr EffectColor unknown{0x888888};
+    return id < kEffectColors.size() ? kEffectColors[id].color : unknown.color;
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +959,111 @@ std::uint32_t withAlpha(std::uint32_t color, float alpha) {
     return (a << 24) | (color & 0x00FFFFFF);
 }
 
+// ---------------------------------------------------------------------------
+// Game language detection
+// ---------------------------------------------------------------------------
+// Bedrock persists its settings as `key:value` lines in options.txt inside
+// the game's data directory and rewrites the file whenever a setting —
+// including the language — changes. The directory differs between the
+// Play-Store layout, scoped storage and LeviLauncher's private-data layout,
+// so every known candidate is probed. The file is re-checked every couple of
+// seconds (a stat() in the steady state) from the render thread, so changing
+// the language in the game's settings is reflected on the HUD without a
+// restart. Calling into the game's own I18n instead would need per-build
+// signatures; the options file is build-independent.
+
+// First NUL-terminated token of /proc/self/cmdline, e.g.
+// "org.levimc.launcher" or "com.mojang.minecraftpe". Empty when unreadable.
+std::string gamePackageName() {
+    static const std::string cached = [] {
+        std::string name;
+        const int fd = open("/proc/self/cmdline", O_RDONLY);
+        if (fd >= 0) {
+            char buffer[256]{};
+            const auto size = read(fd, buffer, sizeof(buffer) - 1);
+            close(fd);
+            if (size > 0) name = buffer;
+        }
+        return name;
+    }();
+    return cached;
+}
+
+// Every known location of the vanilla options.txt, most likely first.
+std::vector<std::string> optionsFileCandidates() {
+    std::vector<std::string> paths;
+    const std::string pkg = gamePackageName();
+    paths.push_back("games/com.mojang/minecraftpe/options.txt");
+    for (const char* root : {"/sdcard", "/storage/emulated/0"}) {
+        paths.push_back(std::string(root) + "/games/com.mojang/minecraftpe/options.txt");
+    }
+    if (!pkg.empty()) {
+        for (const char* root : {"/sdcard/Android/data", "/storage/emulated/0/Android/data",
+                                 "/data/data", "/data/user/0"}) {
+            paths.push_back(std::string(root) + "/" + pkg +
+                            "/files/games/com.mojang/minecraftpe/options.txt");
+        }
+    }
+    return paths;
+}
+
+// Tracks the game's `game_language` option. Used only from the render
+// thread (onFrame), so no locking is needed.
+class GameLanguageWatcher {
+public:
+    // The language code currently selected in the game (e.g. "ar_SA");
+    // "en_US" until the first successful read.
+    std::string_view current() {
+        const auto now = SteadyClock::now();
+        if (now >= mNextPoll) {
+            mNextPoll = now + std::chrono::seconds(2);
+            refresh();
+        }
+        return mCode;
+    }
+
+private:
+    void refresh() {
+        struct stat info {};
+        if (mPath.empty() || stat(mPath.c_str(), &info) != 0) {
+            // First call, or the previously found file disappeared. A fresh
+            // file is always read once, even if its size and mtime happen to
+            // match the old one's.
+            mPath.clear();
+            mLastSize = -1;
+            mMtime = -1;
+            for (const auto& candidate : optionsFileCandidates()) {
+                if (stat(candidate.c_str(), &info) == 0) {
+                    mPath = candidate;
+                    break;
+                }
+            }
+            if (mPath.empty()) return;
+        }
+        // Only re-read when the file actually changed since last time.
+        if (info.st_size == mLastSize && info.st_mtime == mMtime) return;
+        mLastSize = info.st_size;
+        mMtime = info.st_mtime;
+
+        std::ifstream file(mPath, std::ios::binary);
+        if (!file) return;
+        const std::string contents((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+        // An empty value means "follow the device default"; the last known
+        // explicit choice is kept rather than guessing the device locale.
+        const auto code = bedrocktools::hud::effects::parseGameLanguage(contents);
+        if (!code.empty()) mCode.assign(code);
+    }
+
+    std::string mCode = "en_US";
+    std::string mPath;
+    std::int64_t mLastSize = -1;
+    std::int64_t mMtime = -1;
+    SteadyClock::time_point mNextPoll{};
+};
+
+GameLanguageWatcher g_gameLanguage;
+
 namespace effectlayout = bedrocktools::hud::effects;
 
 // Shared formatting helpers (level, duration, urgency color).
@@ -966,6 +1071,17 @@ using bedrocktools::hud::effects::durationColor;
 using bedrocktools::hud::effects::formatDuration;
 using bedrocktools::hud::effects::isInfiniteDuration;
 using bedrocktools::hud::effects::levelSuffix;
+
+// Localized effect names and the helpers that pick the active language.
+using bedrocktools::hud::effects::effectName;
+using bedrocktools::hud::effects::infiniteDurationLabel;
+using bedrocktools::hud::effects::kAutoLanguageOption;
+using bedrocktools::hud::effects::kFallbackLanguage;
+using bedrocktools::hud::effects::kLanguages;
+using bedrocktools::hud::effects::languageCount;
+using bedrocktools::hud::effects::languageIndexForCode;
+using bedrocktools::hud::effects::languageNeedsSystemFont;
+using bedrocktools::hud::effects::unknownEffectLabel;
 
 // Amplifier value meaning "the level could not be determined". The row then
 // shows only the effect name, which is far better than a wrong level.
@@ -1103,7 +1219,9 @@ void EffectDisplayModule::installVanillaBarHook() {
 }
 
 EffectDisplayModule::EffectDisplayModule()
-    : Module("Effect Display", "Shows every active status effect with its icon, level, and remaining duration.") {
+    : Module("Effect Display",
+             "Shows every active status effect with its icon, level, and remaining duration. "
+             "Effect names follow the game's language setting.") {
     g_effectDisplay = this;
 }
 
@@ -1124,7 +1242,7 @@ void EffectDisplayModule::registerResources() {
         if (!font.empty()) pl::modmenu::registerFont("minecraft", font);
     }
 
-    for (std::uint32_t id = 1; id < kEffects.size(); ++id) {
+    for (std::uint32_t id = 1; id < kEffectColors.size(); ++id) {
         ensureEffectIcon(id);
     }
     m_resourcesRegistered = true;
@@ -1263,6 +1381,21 @@ void EffectDisplayModule::onFrame() {
     const int visible = std::min<int>(static_cast<int>(effects.size()), std::max(1, m_maxVisible));
     const float panelHeight = padding * 2.0f + rowHeight * visible;
 
+    // Resolve the name language: a pinned module setting wins, "Auto" follows
+    // the game's own language setting and falls back to English for codes the
+    // bundled table does not know.
+    std::size_t language = kFallbackLanguage;
+    if (m_language > 0 && static_cast<std::size_t>(m_language) <= languageCount()) {
+        language = static_cast<std::size_t>(m_language) - 1;
+    } else {
+        const int detected = languageIndexForCode(g_gameLanguage.current());
+        if (detected >= 0) language = static_cast<std::size_t>(detected);
+    }
+    // Scripts the bundled pixel font has no glyphs for (Arabic, CJK, ...) are
+    // drawn with the launcher's default font instead; it also shapes RTL
+    // text correctly. An empty fontId means "launcher default".
+    const char* const textFontId = languageNeedsSystemFont(language) ? "" : "minecraft";
+
     // Whole-panel entrance: fade in with a gentle slide whenever the set of
     // active effects changes.
     float fade = 1.0f;
@@ -1356,13 +1489,15 @@ void EffectDisplayModule::onFrame() {
             textX += iconSize + 7.0f * scale;
         }
 
-        std::string name = definitionFor(effect.id).name;
-        if (name.empty()) name = "Unknown Effect";
+        std::string name = effectName(effect.id, language);
+        if (name.empty()) name = unknownEffectLabel(language);
         if (m_showLevel) {
             const auto level = levelSuffix(effect.amplifier, m_romanLevels, m_hideLevelOne);
             if (!level.empty()) name += " " + level;
         }
-        const std::string duration = formatDuration(effect.durationTicks);
+        const std::string duration = isInfiniteDuration(effect.durationTicks)
+            ? infiniteDurationLabel(language)
+            : formatDuration(effect.durationTicks);
         const float contentWidth = panelWidth - (textX - hudPosX) - padding;
 
         float durationAlpha = 1.0f;
@@ -1376,7 +1511,7 @@ void EffectDisplayModule::onFrame() {
         nameCommand.h = nameSize + 3.0f * scale;
         nameCommand.size = nameSize;
         nameCommand.color = withAlpha(0xFFF4F4F4, fade);
-        nameCommand.fontId = "minecraft";
+        nameCommand.fontId = textFontId;
         nameCommand.text = name;
         commands.push_back(nameCommand);
 
@@ -1388,7 +1523,7 @@ void EffectDisplayModule::onFrame() {
         durationCommand.h = durationSize + 2.0f * scale;
         durationCommand.size = durationSize;
         durationCommand.color = withAlpha(durationColorValue, fade * durationAlpha);
-        durationCommand.fontId = "minecraft";
+        durationCommand.fontId = textFontId;
         durationCommand.text = duration;
         commands.push_back(durationCommand);
 
@@ -1427,7 +1562,7 @@ void EffectDisplayModule::onFrame() {
                 fill.w = std::max(contentWidth * fraction, barHeight * 2.0f);
                 fill.h = barHeight;
                 fill.x3 = barRadius;
-                fill.color = withAlpha(definitionFor(effect.id).color, 0.85f * fade);
+                fill.color = withAlpha(colorFor(effect.id), 0.85f * fade);
                 commands.push_back(fill);
             }
         }
@@ -1454,6 +1589,27 @@ void EffectDisplayModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_animate")) m_animate = j["m_animate"].get<bool>();
     if (j.contains("m_preview")) m_preview = j["m_preview"].get<bool>();
     if (j.contains("m_maxVisible")) m_maxVisible = j["m_maxVisible"].get<int>();
+
+    // Language radio: persisted as "<index>,<option>..."; the menu reports a
+    // plain index when the selection changes.
+    if (j.contains("m_language")) {
+        const auto& value = j["m_language"];
+        int language = -1;
+        if (value.is_string()) {
+            const std::string text = value.get<std::string>();
+            const auto comma = text.find(',');
+            try {
+                language = std::stoi(text.substr(0, comma));
+            } catch (...) {
+            }
+        } else if (value.is_number_integer()) {
+            language = value.get<int>();
+        }
+        // 0 = Auto (follow the game), 1..languageCount() = pinned language.
+        if (language >= 0 && language <= static_cast<int>(languageCount())) {
+            m_language = language;
+        }
+    }
 }
 
 void EffectDisplayModule::saveConfig(nlohmann::json& j) {
@@ -1474,4 +1630,13 @@ void EffectDisplayModule::saveConfig(nlohmann::json& j) {
     j["m_animate"] = m_animate;
     j["m_preview"] = m_preview;
     j["m_maxVisible"] = m_maxVisible;
+
+    // Radio options: "Auto" follows the game's language setting, everything
+    // after it pins one of the bundled translations.
+    std::string languageOptions = std::to_string(m_language) + "," + kAutoLanguageOption;
+    for (std::size_t i = 0; i < languageCount(); ++i) {
+        languageOptions += ",";
+        languageOptions += kLanguages[i].nativeName;
+    }
+    j["m_language"] = languageOptions;
 }

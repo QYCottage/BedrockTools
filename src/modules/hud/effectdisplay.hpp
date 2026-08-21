@@ -86,6 +86,11 @@ private:
     bool m_preview = false;
     int m_maxVisible = 36;
 
+    // Effect-name language, persisted as a radio: 0 follows the game's own
+    // language setting (options.txt `game_language`), 1..N pin one of the
+    // languages from effecti18n.hpp. See saveConfig()/loadConfig().
+    int m_language = 0;
+
     // Vanilla potion-bar hook (installed once in onInit). The hook itself is
     // kept installed for the whole session; the detour decides per-frame
     // whether to skip the vanilla draw call.
