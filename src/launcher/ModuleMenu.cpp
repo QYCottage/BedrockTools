@@ -151,6 +151,11 @@ void registerModulesWithLauncher() {
                 } else if (isupper(sourceKey[i])) {
                     displayName += ' ';
                     displayName += sourceKey[i];
+                } else if (isdigit(sourceKey[i]) && i > 0 && !isdigit(sourceKey[i - 1])) {
+                    // Split before a digit so keys like "outline3d" render as
+                    // "Outline 3d" instead of "Outline3d".
+                    displayName += ' ';
+                    displayName += sourceKey[i];
                 } else {
                     displayName += sourceKey[i];
                 }
@@ -186,6 +191,11 @@ void registerModulesWithLauncher() {
                         maxVal = 30;
                     } else if (kLower.find("time") != std::string::npos) {
                         maxVal = 24000;
+                    } else if (kLower.find("red") != std::string::npos ||
+                               kLower.find("green") != std::string::npos ||
+                               kLower.find("blue") != std::string::npos) {
+                        // RGB channel sliders (Block Outline outlineRed/Green/Blue).
+                        maxVal = 255;
                     }
 
                     entry.min_value = std::to_string(minVal);
