@@ -83,6 +83,16 @@ inline constexpr std::size_t mBlockSource = 208;
 inline constexpr std::size_t mWeather = 0x1B8;
 }
 
+namespace ItemActor {
+// ItemActor holds its ItemStack as the first member right after the Actor
+// base, i.e. at sizeof(Actor). This value is the observed sizeof(Actor) on
+// the 1.20.60-1.21.0x Android builds this offset set targets. The Item
+// Labels module validates the value at runtime (and scans a small window
+// around it as a fallback), so a version mismatch degrades to "no label"
+// instead of crashing.
+inline constexpr std::size_t mItem = 0x2E8;
+}
+
 namespace Biome {
 inline constexpr std::size_t mHash = 400;
 }
