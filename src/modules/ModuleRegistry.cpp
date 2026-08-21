@@ -41,6 +41,7 @@
 #include "misc/commentkey.hpp"
 #include "misc/commandhotkey.hpp"
 #include "hud/crosshair.hpp"
+#include "hud/mobhealthindicator.hpp"
 
 
 ModuleRegistry& ModuleRegistry::get() {
@@ -138,4 +139,5 @@ void registerAllModules() {
     registry.emplace<CommentKey>();
     registry.emplace<CommandHotkeyModule>();
     registry.emplace<CrosshairModule>();
+    registry.emplace<MobHealthIndicatorModule>();
 }
