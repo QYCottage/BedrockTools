@@ -193,6 +193,10 @@ void registerModulesWithLauncher() {
                     if (kLower.find("cps") != std::string::npos) {
                         minVal = 1;
                         maxVal = 30;
+                    } else if (kLower.find("maxitems") != std::string::npos) {
+                        // Item Labels: how many nearest items get labels.
+                        minVal = 1;
+                        maxVal = 64;
                     } else if (kLower.find("time") != std::string::npos) {
                         maxVal = 24000;
                     } else if (kLower.find("red") != std::string::npos ||
@@ -240,7 +244,8 @@ void registerModulesWithLauncher() {
                            kLower.find("posx") != std::string::npos ||
                            kLower.find("posy") != std::string::npos) {
                     maxVal = 2000.0f;
-                } else if (kLower.find("range") != std::string::npos) {
+                } else if (kLower.find("range") != std::string::npos ||
+                           kLower.find("distance") != std::string::npos) {
                     maxVal = 180.0f;
                 } else if (kLower.find("fov") != std::string::npos) {
                     minVal = 1.0f;
