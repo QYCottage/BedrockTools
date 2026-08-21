@@ -9,6 +9,7 @@
 #include <bedrocktools/sdk/Types.hpp>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -286,9 +287,23 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
         static_cast<float>(target.y),
         static_cast<float>(target.z));
 
+    // Only geometry facing the camera is emitted. The fill material is not
+    // guaranteed to depth-test custom world geometry, and without this culling
+    // the far side of the block bleeds through it: the 3D tint looks like it
+    // is painted inside the block and thick lines read as a full 3D wireframe
+    // cube instead of a flat frame.
+    const bedrocktools::modules::blockoutline::Point eye{camX, camY, camZ};
+    const auto edgeVisible = bedrocktools::modules::blockoutline::makeEdgeVisibility(lines, eye);
+    int visibleEdgeCount = 0;
+    for (const bool visible : edgeVisible) {
+        if (visible) ++visibleEdgeCount;
+    }
+
     // 3D fill pass: translucent faces so the block reads as a solid volume.
     // The faces are expanded slightly (less than the wireframe) so they never
-    // z-fight with the block's own surface.
+    // z-fight with the block's own surface. Only the faces pointing at the
+    // camera are drawn, so the tint stays on the surface of the block and the
+    // color never bleeds through to its inside.
     if (g_module->outline3d) {
         constexpr float kFillAlpha = 0.25f;
         const auto faces = bedrocktools::modules::blockoutline::makeFaces(
@@ -296,37 +311,52 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
             static_cast<float>(target.y),
             static_cast<float>(target.z),
             0.001f);
-
-        // 6 faces, both windings (12 quads = 48 vertices) so back-face
-        // culling can never eat a face.
-        g_tessellatorBegin(tessellator, nullptr, kQuadPrimitive, 6 * 2 * 4, 0);
-        g_tessellatorColor(tessellator, red, green, blue, kFillAlpha);
-        for (const auto& face : faces) {
-            const bedrocktools::sdk::Vec3 verts[4] = {
-                {face.a.x - camX, face.a.y - camY, face.a.z - camZ},
-                {face.b.x - camX, face.b.y - camY, face.b.z - camZ},
-                {face.c.x - camX, face.c.y - camY, face.c.z - camZ},
-                {face.d.x - camX, face.d.y - camY, face.d.z - camZ},
-            };
-            for (int i = 0; i < 4; ++i) {
-                g_tessellatorVertex(tessellator, verts[i].x, verts[i].y, verts[i].z);
-            }
-            for (int i = 3; i >= 0; --i) {
-                g_tessellatorVertex(tessellator, verts[i].x, verts[i].y, verts[i].z);
-            }
+        const auto faceVisible =
+            bedrocktools::modules::blockoutline::makeFaceVisibility(faces, eye);
+        int visibleFaceCount = 0;
+        for (const bool visible : faceVisible) {
+            if (visible) ++visibleFaceCount;
         }
-        std::memset(meshParams, 0, sizeof(meshParams));
-        g_renderMesh(screenContext, tessellator, matFill, meshParams);
+
+        // Up to 3 visible faces, each with both windings (4 + 4 vertices) so
+        // back-face culling can never eat one.
+        if (visibleFaceCount > 0) {
+            g_tessellatorBegin(tessellator, nullptr, kQuadPrimitive,
+                               visibleFaceCount * 2 * 4, 0);
+            g_tessellatorColor(tessellator, red, green, blue, kFillAlpha);
+            for (std::size_t i = 0; i < faces.size(); ++i) {
+                if (!faceVisible[i]) continue;
+                const auto& face = faces[i];
+                const bedrocktools::sdk::Vec3 verts[4] = {
+                    {face.a.x - camX, face.a.y - camY, face.a.z - camZ},
+                    {face.b.x - camX, face.b.y - camY, face.b.z - camZ},
+                    {face.c.x - camX, face.c.y - camY, face.c.z - camZ},
+                    {face.d.x - camX, face.d.y - camY, face.d.z - camZ},
+                };
+                for (int j = 0; j < 4; ++j) {
+                    g_tessellatorVertex(tessellator, verts[j].x, verts[j].y, verts[j].z);
+                }
+                for (int j = 3; j >= 0; --j) {
+                    g_tessellatorVertex(tessellator, verts[j].x, verts[j].y, verts[j].z);
+                }
+            }
+            std::memset(meshParams, 0, sizeof(meshParams));
+            g_renderMesh(screenContext, tessellator, matFill, meshParams);
+        }
     }
 
-    // Thick pass: every edge becomes a camera-facing quad so the apparent
-    // width follows the line-size setting from any angle.
-    if (thickLines) {
+    // Thick pass: every camera-facing edge becomes a camera-facing quad so
+    // the apparent width follows the line-size setting from any angle. Edges
+    // on the far side of the block are skipped; without the depth test they
+    // would shine through the block and make the frame look 3D.
+    if (thickLines && visibleEdgeCount > 0) {
         g_tessellatorBegin(tessellator, nullptr, kQuadPrimitive,
-                           static_cast<int>(lines.size() * 8), 0);
+                           visibleEdgeCount * 8, 0);
         g_tessellatorColor(tessellator, red, green, blue, 1.0f);
 
-        for (const auto& line : lines) {
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (!edgeVisible[i]) continue;
+            const auto& line = lines[i];
             bedrocktools::sdk::Vec3 p1 = {
                 line.from.x - camX, line.from.y - camY, line.from.z - camZ};
             bedrocktools::sdk::Vec3 p2 = {
@@ -376,11 +406,11 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
 
             // Emitted with both windings so back-face culling never eats a
             // segment.
-            for (int i = 0; i < 4; ++i) {
-                g_tessellatorVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
+            for (int j = 0; j < 4; ++j) {
+                g_tessellatorVertex(tessellator, quad[j].x, quad[j].y, quad[j].z);
             }
-            for (int i = 3; i >= 0; --i) {
-                g_tessellatorVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
+            for (int j = 3; j >= 0; --j) {
+                g_tessellatorVertex(tessellator, quad[j].x, quad[j].y, quad[j].z);
             }
         }
 
@@ -389,19 +419,24 @@ void renderLevelHook(void* levelRenderer, void* screenContext, void* renderParam
     }
 
     // Core hairline pass: keeps the edge crisp and visible even when the
-    // quads shrink below a pixel at long range.
-    g_tessellatorBegin(tessellator, nullptr, kLinePrimitive,
-                       static_cast<int>(lines.size() * 2), 0);
-    g_tessellatorColor(tessellator, red, green, blue, 1.0f);
-    for (const auto& line : lines) {
-        g_tessellatorVertex(tessellator,
-            line.from.x - camX, line.from.y - camY, line.from.z - camZ);
-        g_tessellatorVertex(tessellator,
-            line.to.x - camX, line.to.y - camY, line.to.z - camZ);
-    }
+    // quads shrink below a pixel at long range. Same visibility set as the
+    // thick pass so both stay consistent.
+    if (visibleEdgeCount > 0) {
+        g_tessellatorBegin(tessellator, nullptr, kLinePrimitive,
+                           visibleEdgeCount * 2, 0);
+        g_tessellatorColor(tessellator, red, green, blue, 1.0f);
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (!edgeVisible[i]) continue;
+            const auto& line = lines[i];
+            g_tessellatorVertex(tessellator,
+                line.from.x - camX, line.from.y - camY, line.from.z - camZ);
+            g_tessellatorVertex(tessellator,
+                line.to.x - camX, line.to.y - camY, line.to.z - camZ);
+        }
 
-    std::memset(meshParams, 0, sizeof(meshParams));
-    g_renderMesh(screenContext, tessellator, matInner, meshParams);
+        std::memset(meshParams, 0, sizeof(meshParams));
+        g_renderMesh(screenContext, tessellator, matInner, meshParams);
+    }
 
     colorHolder[0] = savedColor[0];
     colorHolder[1] = savedColor[1];
@@ -490,40 +525,42 @@ void BlockOutlineModule::loadConfig(const nlohmann::json& json) {
     if (lineThickness < 1.0f) lineThickness = 1.0f;
     if (lineThickness > 10.0f) lineThickness = 10.0f;
 
-    auto readChannel = [&](const char* key, int fallback) -> int {
-        if (!json.contains(key) || !json[key].is_number_integer()) return fallback;
-        int value = json[key].get<int>();
-        if (value < 0) value = 0;
-        if (value > 255) value = 255;
-        return value;
-    };
-
-    const bool hasRgb = json.contains("outlineRed") ||
-                        json.contains("outlineGreen") ||
-                        json.contains("outlineBlue");
-    if (hasRgb) {
-        outlineRed = readChannel("outlineRed", outlineRed);
-        outlineGreen = readChannel("outlineGreen", outlineGreen);
-        outlineBlue = readChannel("outlineBlue", outlineBlue);
-        outlineColor = 0xFF000000u |
-                       (static_cast<std::uint32_t>(outlineRed) << 16) |
-                       (static_cast<std::uint32_t>(outlineGreen) << 8) |
-                       static_cast<std::uint32_t>(outlineBlue);
-    } else if (json.contains("outlineColor") && json["outlineColor"].is_string()) {
-        // Legacy configs only stored the hex picker value.
+    if (json.contains("outlineColor") && json["outlineColor"].is_string()) {
+        // Current configs store the single RGB picker value ("#RRGGBB").
         std::string value = json["outlineColor"].get<std::string>();
         if (!value.empty() && value.front() == '#') value.erase(value.begin());
         try {
             const auto parsed = std::stoul(value, nullptr, 16);
-            // Six-digit colors are RGB; eight-digit colors are AARRGGBB.
+            // Six-digit colors are RGB; eight-digit colors are AARRGGBB. Alpha
+            // is always forced opaque so the outline never washes out.
             outlineColor = value.size() <= 6
                 ? (0xFF000000u | static_cast<std::uint32_t>(parsed))
-                : static_cast<std::uint32_t>(parsed);
-            outlineRed = static_cast<int>((outlineColor >> 16) & 0xFFu);
-            outlineGreen = static_cast<int>((outlineColor >> 8) & 0xFFu);
-            outlineBlue = static_cast<int>(outlineColor & 0xFFu);
+                : (0xFF000000u | (static_cast<std::uint32_t>(parsed) & 0x00FFFFFFu));
         } catch (...) {
             // Preserve the last valid color.
+        }
+    } else {
+        // Legacy configs stored three 0-255 channel sliders instead of the
+        // RGB picker.
+        auto readChannel = [&](const char* key, int fallback) -> int {
+            if (!json.contains(key) || !json[key].is_number_integer()) return fallback;
+            int value = json[key].get<int>();
+            if (value < 0) value = 0;
+            if (value > 255) value = 255;
+            return value;
+        };
+
+        const bool hasRgb = json.contains("outlineRed") ||
+                            json.contains("outlineGreen") ||
+                            json.contains("outlineBlue");
+        if (hasRgb) {
+            const int r = readChannel("outlineRed", 0);
+            const int g = readChannel("outlineGreen", 255);
+            const int b = readChannel("outlineBlue", 255);
+            outlineColor = 0xFF000000u |
+                           (static_cast<std::uint32_t>(r) << 16) |
+                           (static_cast<std::uint32_t>(g) << 8) |
+                           static_cast<std::uint32_t>(b);
         }
     }
 }
@@ -534,9 +571,12 @@ void BlockOutlineModule::saveConfig(nlohmann::json& json) {
     // Keep alpha opaque so the line color never washes out.
     outlineColor |= 0xFF000000u;
 
+    // A single RGB picker value ("#RRGGBB") instead of the old separate
+    // Red/Green/Blue sliders.
+    char hex[8];
+    std::snprintf(hex, sizeof(hex), "%06X", outlineColor & 0x00FFFFFFu);
+    json["outlineColor"] = std::string("#") + hex;
+
     json["outline3d"] = outline3d;
     json["lineThickness"] = lineThickness;
-    json["outlineRed"] = outlineRed;
-    json["outlineGreen"] = outlineGreen;
-    json["outlineBlue"] = outlineBlue;
 }

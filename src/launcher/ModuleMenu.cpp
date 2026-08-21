@@ -194,7 +194,8 @@ void registerModulesWithLauncher() {
                     } else if (kLower.find("red") != std::string::npos ||
                                kLower.find("green") != std::string::npos ||
                                kLower.find("blue") != std::string::npos) {
-                        // RGB channel sliders (Block Outline outlineRed/Green/Blue).
+                        // Legacy RGB channel sliders (0-255); modules now use
+                        // a single "#RRGGBB" color picker instead.
                         maxVal = 255;
                     }
 
