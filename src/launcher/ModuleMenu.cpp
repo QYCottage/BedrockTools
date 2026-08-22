@@ -250,6 +250,10 @@ void registerModulesWithLauncher() {
                 } else if (kLower.find("speed") != std::string::npos || kLower.find("strength") != std::string::npos) {
                     minVal = 0.05f;
                     maxVal = 1.0f;
+                } else if (kLower.find("sensitivity") != std::string::npos || kLower.find("scroll") != std::string::npos) {
+                    // Scroll-drive zoom: FOV change per scroll notch.
+                    minVal = 0.05f;
+                    maxVal = 10.0f;
                 } else if (kLower == "linethickness") {
                     // 1.0 == classic hairline box, higher values widen the
                     // hitbox lines (Hitbox module).
