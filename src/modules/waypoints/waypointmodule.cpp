@@ -69,7 +69,10 @@ void renderHook(void* renderer, void* context, void* params) {
     auto ra=reinterpret_cast<std::uintptr_t>(renderer); auto lr=*reinterpret_cast<void**>(ra+bedrocktools::sdk::offsets::LevelRenderer::mLevelRendererPlayer); if(!lr) return;
     auto camera=*reinterpret_cast<const bedrocktools::sdk::Vec3*>(reinterpret_cast<std::uintptr_t>(lr)+bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos);
     auto tess=*reinterpret_cast<void**>(reinterpret_cast<std::uintptr_t>(context)+bedrocktools::sdk::offsets::ScreenContext::mTessellator); if(!tess) return;
-    if(!g_selection && g_materialGroup) g_selection=getMaterial("selection_box"); void* mat=g_selection ? &g_selection : reinterpret_cast<char*>(lr)+bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial;
+    if (!g_selection && g_materialGroup) g_selection = getMaterial("selection_box");
+    void* mat = g_selection
+        ? static_cast<void*>(&g_selection)
+        : static_cast<void*>(reinterpret_cast<char*>(lr) + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
     const float maxD=std::max(1.f,g_module->maxRenderDistance); const float maxSq=maxD*maxD;
     for(const auto& wp:list) { if(!wp.enabled || wp.dimensionId!=g_dimension || wp.blocks.empty()) continue; float nearestSq=INFINITY; for(const auto&p:wp.blocks) {float dx=p.x+.5f-g_player.x,dy=p.y+.5f-g_player.y,dz=p.z+.5f-g_player.z; nearestSq=std::min(nearestSq,dx*dx+dy*dy+dz*dz);} if(nearestSq>maxSq) continue; for(const auto&p:wp.blocks) drawBox(context,tess,mat,p,wp,camera.x,camera.y,camera.z); }
 }
