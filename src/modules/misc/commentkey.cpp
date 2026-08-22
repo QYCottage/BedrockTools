@@ -25,17 +25,25 @@ SendToServerFn gSendToServer = nullptr;
 GetPacketSenderFn gGetPacketSender = nullptr;
 CreatePacketFn gCreatePacket = nullptr;
 
-// Launcher overlay button palette ("keycap" preset used by the launcher's own
-// on-screen buttons).
-constexpr std::uint32_t kKeycapActiveBg = 0xC6C6C6;
-constexpr std::uint32_t kKeycapActiveText = 0xFF1F1F1Fu;
-
-std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
-    alpha = std::clamp(alpha, 0.0f, 1.0f);
-    return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
-}
-
 constexpr float kLauncherButtonBaseSize = 52.0f;
+
+// Keep Comment Key buttons visually consistent with the Zoom and Command
+// Hotkey overlay buttons. The label is deliberately left visible because the
+// comment text identifies what each button will send.
+static const char* commentButtonSvg = R"svg(<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <path fill="#C6C6C6" stroke="#373737" stroke-width="2" d="M2,2 L62,2 L62,62 L2,62 Z M4,4 L60,4 L60,60 L4,60 Z"/>
+    <path fill="#8B8B8B" stroke="#5B5B5B" stroke-width="2" d="M6,6 L58,6 L58,58 L6,58 Z M8,8 L56,8 L56,56 L8,56 Z"/>
+</svg>)svg";
+
+static const char* commentButtonActiveSvg = R"svg(<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <path fill="#C6C6C6" stroke="#373737" stroke-width="2" d="M2,2 L62,2 L62,62 L2,62 Z M4,4 L60,4 L60,60 L4,60 Z"/>
+    <g transform="translate(32, 32) scale(0.85) translate(-32, -32)">
+        <path fill="#8B8B8B" stroke="#5B5B5B" stroke-width="2" d="M6,6 L58,6 L58,58 L6,58 Z M8,8 L56,8 L56,56 L8,56 Z"/>
+    </g>
+</svg>)svg";
+
+constexpr float kDefaultCommentButtonWidth = 64.0f;
+constexpr float kDefaultCommentButtonHeight = 64.0f;
 
 // LeviLauncher derives an independent persisted HUD position from each stable
 // button ID ("external_button:<id>").
@@ -90,6 +98,8 @@ void CommentKey::applyDefaultComments() {
     for (std::size_t i = 0; i < MaxComments; ++i) {
         auto& comment = mComments[i];
         comment.screen = true;
+        comment.width = kDefaultCommentButtonWidth;
+        comment.height = kDefaultCommentButtonHeight;
     }
 }
 
@@ -163,15 +173,11 @@ void CommentKey::unregisterOverlayButtons() {
 
 void CommentKey::syncOverlayButtons() {
     std::vector<Comment> comments;
-    float opacity;
-    std::uint32_t faceColor;
-    std::uint32_t borderColor;
+    float buttonScale;
     {
         std::lock_guard<std::mutex> lock(mMutex);
         comments = mComments;
-        opacity = mButtonOpacity;
-        faceColor = mButtonColor;
-        borderColor = mButtonBorderColor;
+        buttonScale = mButtonScale;
     }
 
     unregisterOverlayButtons();
@@ -187,14 +193,16 @@ void CommentKey::syncOverlayButtons() {
             .label(label)
             .behavior(pl::modmenu::ButtonBehavior::Click)
             .defaultVisible(true)
-            .stylePreset(pl::modmenu::ButtonStylePreset::Keycap)
-            .styleColors(colorWithAlpha(faceColor, opacity),
-                         colorWithAlpha(kKeycapActiveBg, opacity),
-                         colorWithAlpha(borderColor, opacity))
+            // Use the same custom Minecraft-style frame as Zoom and Command
+            // Hotkey. The comment text remains visible on top of the frame.
+            .stylePreset(pl::modmenu::ButtonStylePreset::Accent)
+            .styleColors(0x00000001, 0x00000001, 0x00000001)
+            .svgIcon(commentButtonSvg, false)
+            .activeSvgIcon(commentButtonActiveSvg)
             .textColor(0xFF000000u | (comment.textColor & 0x00FFFFFFu))
-            .activeTextColor(kKeycapActiveText)
-            .sizeScale(comment.width / kLauncherButtonBaseSize,
-                       comment.height / kLauncherButtonBaseSize)
+            .activeTextColor(0xFF1F1F1Fu)
+            .sizeScale((comment.width / kLauncherButtonBaseSize) * buttonScale,
+                       (comment.height / kLauncherButtonBaseSize) * buttonScale)
             .onEvent([this, i](std::string_view, pl::modmenu::ButtonEvent event, float) {
                 if (event == pl::modmenu::ButtonEvent::Click)
                     sendComment(i);
@@ -283,6 +291,10 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
         }
     };
 
+    float loadedButtonScale = mButtonScale;
+    if (j.contains("m_buttonScale") && j["m_buttonScale"].is_number())
+        loadedButtonScale = std::clamp(j["m_buttonScale"].get<float>(), 0.5f, 2.0f);
+
     std::uint32_t loadedButtonColor = mButtonColor;
     std::uint32_t loadedBorderColor = mButtonBorderColor;
     float loadedOpacity = mButtonOpacity;
@@ -300,6 +312,7 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
     {
         std::lock_guard<std::mutex> lock(mMutex);
         cooldownTime = loadedCooldown;
+        mButtonScale = loadedButtonScale;
         mButtonOpacity = loadedOpacity;
         mButtonColor = loadedButtonColor;
         mButtonBorderColor = loadedBorderColor;
@@ -377,6 +390,9 @@ void CommentKey::saveConfig(nlohmann::json& j) {
 
     std::lock_guard<std::mutex> lock(mMutex);
     j["cooldownTime"] = cooldownTime;
+    // Uniform multiplier for all comment buttons. Individual Width/Height
+    // values below still allow per-comment fine tuning.
+    j["m_buttonScale"] = mButtonScale;
     j["m_buttonOpacity"] = mButtonOpacity;
 
     char buttonColorHex[10];
@@ -411,8 +427,8 @@ void CommentKey::saveConfig(nlohmann::json& j) {
             j[prefix + "Text"] = "";
             j[prefix + "Keybind"] = 0;
             j[prefix + "Screen"] = false;
-            j[prefix + "Width"] = 110.0f;
-            j[prefix + "Height"] = 40.0f;
+            j[prefix + "Width"] = kDefaultCommentButtonWidth;
+            j[prefix + "Height"] = kDefaultCommentButtonHeight;
             j[prefix + "TextColor"] = "#373737";
         }
     }
