@@ -225,6 +225,11 @@ void registerModulesWithLauncher() {
                     // clamps to the same range at render time.
                     minVal = 0.25f;
                     maxVal = 4.0f;
+                } else if (kLower.find("buttonscale") != std::string::npos) {
+                    // Uniform size multiplier for the Zoom-style external
+                    // command buttons.
+                    minVal = 0.5f;
+                    maxVal = 2.0f;
                 } else if (kLower.find("scale") != std::string::npos) {
                     minVal = 0.1f;
                     maxVal = 5.0f;

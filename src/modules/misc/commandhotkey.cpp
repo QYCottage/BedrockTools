@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -44,11 +45,6 @@ bool resolvePacketFunctions() {
     return g_sendToServer && g_getPacketSender && g_createPacket;
 }
 
-std::uint32_t colorWithAlpha(std::uint32_t rgb, float alpha) {
-    alpha = std::clamp(alpha, 0.0f, 1.0f);
-    return (static_cast<std::uint32_t>(alpha * 255.0f) << 24) | (rgb & 0x00FFFFFFu);
-}
-
 constexpr float kLauncherButtonBaseSize = 52.0f;
 
 // LeviLauncher derives an independent persisted HUD position from each stable
@@ -70,8 +66,24 @@ std::string launcherLabel(std::string value) {
     return value;
 }
 
-// Launcher overlay button palette (keycap preset).
-constexpr std::uint32_t kKeycapActiveBg = 0xC6C6C6;
+// The command buttons use the same Minecraft-style square frame as the
+// Zoom overlay button. The label is kept visible so every command remains
+// identifiable; the SVG supplies the frame while ButtonBuilder supplies the
+// command text.
+static const char* commandButtonSvg = R"svg(<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <path fill="#C6C6C6" stroke="#373737" stroke-width="2" d="M2,2 L62,2 L62,62 L2,62 Z M4,4 L60,4 L60,60 L4,60 Z"/>
+    <path fill="#8B8B8B" stroke="#5B5B5B" stroke-width="2" d="M6,6 L58,6 L58,58 L6,58 Z M8,8 L56,8 L56,56 L8,56 Z"/>
+</svg>)svg";
+
+static const char* commandButtonActiveSvg = R"svg(<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <path fill="#C6C6C6" stroke="#373737" stroke-width="2" d="M2,2 L62,2 L62,62 L2,62 Z M4,4 L60,4 L60,60 L4,60 Z"/>
+    <g transform="translate(32, 32) scale(0.85) translate(-32, -32)">
+        <path fill="#8B8B8B" stroke="#5B5B5B" stroke-width="2" d="M6,6 L58,6 L58,58 L6,58 Z M8,8 L56,8 L56,56 L8,56 Z"/>
+    </g>
+</svg>)svg";
+
+constexpr float kDefaultCommandButtonWidth = 64.0f;
+constexpr float kDefaultCommandButtonHeight = 64.0f;
 
 } // namespace
 
@@ -129,8 +141,10 @@ void CommandHotkeyModule::applyDefaultBindings() {
         m_commands[i] = Binding{};
         m_commands[i].enabled = true;
         m_commands[i].screen = true;
-        m_commands[i].width = 110.0f;
-        m_commands[i].height = 40.0f;
+        // Match the square Zoom button by default. Width and Height remain
+        // per-command controls for users who want a custom button shape.
+        m_commands[i].width = kDefaultCommandButtonWidth;
+        m_commands[i].height = kDefaultCommandButtonHeight;
         m_commands[i].label = "Command " + std::to_string(i + 1);
         m_commands[i].textColor = 0x373737;
     }
@@ -166,14 +180,16 @@ void CommandHotkeyModule::syncOverlayButtons() {
             .label(label)
             .behavior(pl::modmenu::ButtonBehavior::Click)
             .defaultVisible(true)
-            .stylePreset(pl::modmenu::ButtonStylePreset::Keycap)
-            .styleColors(colorWithAlpha(m_buttonColor, m_buttonOpacity),
-                         colorWithAlpha(kKeycapActiveBg, m_buttonOpacity),
-                         colorWithAlpha(m_buttonBorderColor, m_buttonOpacity))
+            // Use the same custom Minecraft-style frame as Zoom. Keeping the
+            // label visible makes the individual command buttons distinct.
+            .stylePreset(pl::modmenu::ButtonStylePreset::Accent)
+            .styleColors(0x00000001, 0x00000001, 0x00000001)
+            .svgIcon(commandButtonSvg, false)
+            .activeSvgIcon(commandButtonActiveSvg)
             .textColor(0xFF000000u | (binding.textColor & 0x00FFFFFFu))
             .activeTextColor(0xFF1F1F1Fu)
-            .sizeScale(binding.width / kLauncherButtonBaseSize,
-                       binding.height / kLauncherButtonBaseSize)
+            .sizeScale((binding.width / kLauncherButtonBaseSize) * m_buttonScale,
+                       (binding.height / kLauncherButtonBaseSize) * m_buttonScale)
             .onEvent([this, i](std::string_view, pl::modmenu::ButtonEvent event, float) {
                 if (event == pl::modmenu::ButtonEvent::Click)
                     execute(i);
@@ -239,6 +255,8 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     // white label color) are ignored so the buttons pick up the launcher look.
     const bool legacyStyle = !j.contains("m_buttonBorderColor");
 
+    if (j.contains("m_buttonScale") && j["m_buttonScale"].is_number())
+        m_buttonScale = std::clamp(j["m_buttonScale"].get<float>(), 0.5f, 2.0f);
     if (!legacyStyle && j.contains("m_buttonOpacity")) m_buttonOpacity = std::clamp(j["m_buttonOpacity"].get<float>(), 0.05f, 1.0f);
     if (j.contains("m_buttonBorderColor")) {
         const auto& v = j["m_buttonBorderColor"];
@@ -302,6 +320,9 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
 
+    // Uniform multiplier for all command buttons. Individual Width/Height
+    // values below still allow per-command fine tuning.
+    j["m_buttonScale"] = m_buttonScale;
     j["m_buttonOpacity"] = m_buttonOpacity;
 
     char borderHexBuf[10];
@@ -339,8 +360,8 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
             j[p + "Command"] = "";
             j[p + "Keybind"] = 0;
             j[p + "Screen"] = false;
-            j[p + "Width"] = 110.0f;
-            j[p + "Height"] = 40.0f;
+            j[p + "Width"] = kDefaultCommandButtonWidth;
+            j[p + "Height"] = kDefaultCommandButtonHeight;
             j[p + "TextColor"] = "#373737";
             j[p + "Label"] = "";
         }

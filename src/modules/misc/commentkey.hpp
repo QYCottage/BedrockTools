@@ -21,8 +21,8 @@ public:
         bool enabled{false};
         // Each comment can show or hide its launcher-managed on-screen button.
         bool screen{false};
-        float width{110.0f};
-        float height{40.0f};
+        float width{64.0f};
+        float height{64.0f};
         std::uint32_t textColor{0x373737};
     };
 
@@ -69,7 +69,12 @@ private:
     std::chrono::steady_clock::time_point mLastSendTime{};
     mutable std::mutex mMutex;
 
-    // Launcher keycap styling forwarded to each registered overlay button.
+    // Uniform multiplier for the Zoom-style comment button frame.
+    // Width/Height on each Comment remain available for per-button sizing.
+    float mButtonScale = 1.0f;
+
+    // Launcher styling values are kept in the config for compatibility with
+    // older profiles and with launchers that use the fallback preset.
     float mButtonOpacity = 0.85f;
     std::uint32_t mButtonColor = 0x8B8B8B;
     std::uint32_t mButtonBorderColor = 0x373737;
