@@ -41,7 +41,7 @@
 #include "misc/commentkey.hpp"
 #include "misc/commandhotkey.hpp"
 #include "hud/crosshair.hpp"
-#include "waypoints/waypoints.hpp"
+#include "waypoints/waypointmodule.hpp"
 
 
 ModuleRegistry& ModuleRegistry::get() {
@@ -139,5 +139,5 @@ void registerAllModules() {
     registry.emplace<CommentKey>();
     registry.emplace<CommandHotkeyModule>();
     registry.emplace<CrosshairModule>();
-    registry.emplace<WaypointsModule>();
+    registry.emplace<WaypointModule>();
 }
