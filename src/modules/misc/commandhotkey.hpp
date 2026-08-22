@@ -35,7 +35,12 @@ public:
 private:
     std::array<Binding, MaxCommands> m_commands{};
 
-    // Launcher keycap styling forwarded to each registered overlay button.
+    // Uniform multiplier for the Zoom-style command button frame.
+    // Width/Height on each Binding remain available for per-button sizing.
+    float m_buttonScale = 1.0f;
+
+    // Launcher styling values are kept in the config for compatibility with
+    // older profiles and with launchers that use the fallback preset.
     float m_buttonOpacity = 0.85f;
     std::uint32_t m_buttonColor = 0x8B8B8B;
     std::uint32_t m_buttonBorderColor = 0x373737;
