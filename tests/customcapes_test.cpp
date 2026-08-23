@@ -157,7 +157,7 @@ int main() {
     }
     {
         // 2x1 red|blue source: the design lands on the OUTER BACK face only,
-        // the box (12,1)..(22,17) on the 64x32 canvas.
+        // the box (1,1)..(11,17) on the 64x32 canvas.
         const std::uint8_t src[8] = {255, 0, 0, 255, 0, 0, 255, 255};
         const std::vector<std::uint8_t> out = cc::resampleToCape(src, 2, 1);
         check(out.size() == cc::kCapeWidth * cc::kCapeHeight * 4u, "output is 64x32 RGBA");
@@ -174,7 +174,7 @@ int main() {
                                   : (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 255);
             }
         }
-        check(backBlocks, "design is scaled onto the back face box (12,1)..(22,17)");
+        check(backBlocks, "design is scaled onto the back face box (1,1)..(11,17)");
 
         // inner front face: one flat lining color, never the design. The
         // average of (255,0,0,255) and (0,0,255,255) over the design is
@@ -242,7 +242,8 @@ int main() {
                     (y >= cc::kCapeSideY && y < cc::kCapeSideY + cc::kCapeBackHeight &&
                      x <= cc::kCapeSideRightX) ||
                     (y >= cc::kCapeFrontY && y < cc::kCapeFrontY + cc::kCapeBackHeight &&
-                     x >= cc::kCapeFrontX && x < cc::kCapeBackX + cc::kCapeBackWidth);
+                     x >= cc::kCapeSideRightX &&
+                     x < cc::kCapeFrontX + cc::kCapeBackWidth);
                 if (used) continue;
                 const std::size_t i = (static_cast<std::size_t>(y) * cc::kCapeWidth + x) * 4u;
                 outsideTransparent &= out[i] == 0 && out[i + 1] == 0 &&

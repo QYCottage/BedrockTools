@@ -14,7 +14,7 @@
 //
 // The selected file is decoded with stb_image and resampled onto the
 // classic-cape layout of the 64x32 canvas Minecraft uses: the image is
-// painted onto the outer back face only (x=12..22, y=1..17), the inner
+// painted onto the outer back face only (x=1..11, y=1..17), the inner
 // front face is filled with a flat lining color instead of a repeat of the
 // image, and the top/bottom/side edge strips are continued from the image's
 // edge colors so the 1-voxel-thick cape mesh does not look flat. Exact 64x32

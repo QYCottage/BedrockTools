@@ -34,21 +34,21 @@ namespace customcapes {
 // six faces over the canvas like this (standard box unwrap):
 //
 //     top    ( 1, 0) 10x 1      bottom (11, 0) 10x 1
-//     right  ( 0, 1)  1x16      front  ( 1, 1) 10x16   <- inner face
-//     left   (11, 1)  1x16      back   (12, 1) 10x16   <- outer face (design)
+//     right  ( 0, 1)  1x16      back   ( 1, 1) 10x16   <- outer face (design)
+//     left   (11, 1)  1x16      front  (12, 1) 10x16   <- inner face (lining)
 inline constexpr std::uint32_t kCapeWidth = 64;
 inline constexpr std::uint32_t kCapeHeight = 32;
 
 // The outer (worn, visible) face the image is painted onto — the region
-// x=12..22, y=1..17 of the 64x32 canvas.
-inline constexpr std::uint32_t kCapeBackX = 12;
+// x=1..11, y=1..17 of the 64x32 canvas.
+inline constexpr std::uint32_t kCapeBackX = 1;
 inline constexpr std::uint32_t kCapeBackY = 1;
 inline constexpr std::uint32_t kCapeBackWidth = 10;
 inline constexpr std::uint32_t kCapeBackHeight = 16;
 
 // The inner face on the other side of the cuboid (same 10x16 size). The
 // image is never repeated here; it is filled with one flat lining color.
-inline constexpr std::uint32_t kCapeFrontX = 1;
+inline constexpr std::uint32_t kCapeFrontX = 12;
 inline constexpr std::uint32_t kCapeFrontY = 1;
 
 // The 1-voxel-thick edge strips of the cuboid; painting them with colors
@@ -190,8 +190,8 @@ inline int resolveSelectionIndex(int parsedIndex, const std::string& parsedName,
 // Nearest-neighbor resample of an RGBA8 buffer onto the classic-cape layout
 // of the 64x32 canvas:
 //
-//   * the image is painted onto the outer BACK face only, (12,1) 10x16;
-//   * the inner FRONT face (1,1) never repeats the image — it gets one flat
+//   * the image is painted onto the outer BACK face only, (1,1) 10x16;
+//   * the inner FRONT face (12,1) never repeats the image — it gets one flat
 //     lining color (a half-brightness average of the visible design), so the
 //     same picture no longer shows on both sides of the cape;
 //   * the Top/Bottom/Side edge strips are painted from the adjacent
@@ -217,7 +217,7 @@ inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::u
         return &canvas[(static_cast<std::size_t>(y) * kCapeWidth + x) * 4u];
     };
 
-    // 1) Image -> outer back face only, x=12..22, y=1..17.
+    // 1) Image -> outer back face only, x=1..11, y=1..17.
     for (std::uint32_t y = 0; y < kCapeBackHeight; ++y) {
         const std::uint32_t srcY = static_cast<std::uint32_t>(
             (static_cast<std::uint64_t>(y) * height) / kCapeBackHeight);
