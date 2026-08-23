@@ -1,4 +1,5 @@
 #include "ModuleMenu.hpp"
+#include "ExternalButtonRefresh.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
