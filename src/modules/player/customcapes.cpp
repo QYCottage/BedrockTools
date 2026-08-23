@@ -134,25 +134,31 @@ void CustomCapesModule::ensureCapesDirectory() {
 }
 
 void CustomCapesModule::writeSamplePng(const std::string& path) const {
-    // 64x32 canvas with a purple gradient and bright accents — visibly a
-    // cape once mapped onto the vanilla cape geometry.
-    std::vector<std::uint8_t> px(customcapes::kCapeWidth * customcapes::kCapeHeight * 4u);
-    for (std::uint32_t y = 0; y < customcapes::kCapeHeight; ++y) {
-        for (std::uint32_t x = 0; x < customcapes::kCapeWidth; ++x) {
-            const std::size_t i = (static_cast<std::size_t>(y) * customcapes::kCapeWidth + x) * 4u;
-            const float t = static_cast<float>(y) / static_cast<float>(customcapes::kCapeHeight - 1);
-            px[i + 0] = static_cast<std::uint8_t>(70 + 120 * t);
-            px[i + 1] = static_cast<std::uint8_t>(30 + 30 * t);
-            px[i + 2] = static_cast<std::uint8_t>(160 + 60 * t);
-            px[i + 3] = 255;
+    // 10x16 purple gradient with bright accents. It is expanded onto the
+    // 64x32 canvas through the same layout rules as user-supplied images
+    // (design on the outer back face, lining color on the inner face, edge
+    // colors on the top/bottom/side strips), so the sample shows exactly
+    // what a picked file will look like in-game.
+    std::vector<std::uint8_t> src(customcapes::kCapeBackWidth * customcapes::kCapeBackHeight * 4u);
+    for (std::uint32_t y = 0; y < customcapes::kCapeBackHeight; ++y) {
+        for (std::uint32_t x = 0; x < customcapes::kCapeBackWidth; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * customcapes::kCapeBackWidth + x) * 4u;
+            const float t = static_cast<float>(y) / static_cast<float>(customcapes::kCapeBackHeight - 1);
+            src[i + 0] = static_cast<std::uint8_t>(70 + 120 * t);
+            src[i + 1] = static_cast<std::uint8_t>(30 + 30 * t);
+            src[i + 2] = static_cast<std::uint8_t>(160 + 60 * t);
+            src[i + 3] = 255;
             const bool border = x < 2 || y < 2 ||
-                                x >= customcapes::kCapeWidth - 2 || y >= customcapes::kCapeHeight - 2;
-            const bool stripe = x == 31 || x == 32;
+                                x >= customcapes::kCapeBackWidth - 2 ||
+                                y >= customcapes::kCapeBackHeight - 2;
+            const bool stripe = x == 4 || x == 5;
             if (border || stripe) {
-                px[i + 0] = 255; px[i + 1] = 220; px[i + 2] = 60; px[i + 3] = 255;
+                src[i + 0] = 255; src[i + 1] = 220; src[i + 2] = 60; src[i + 3] = 255;
             }
         }
     }
+    const std::vector<std::uint8_t> px = customcapes::resampleToCape(
+        src.data(), customcapes::kCapeBackWidth, customcapes::kCapeBackHeight);
     stbi_write_png(path.c_str(), customcapes::kCapeWidth, customcapes::kCapeHeight, 4,
                    px.data(), customcapes::kCapeWidth * 4);
 }

@@ -1,5 +1,8 @@
 // Unit tests for the Custom Capes module's pure helpers (folder scanning,
-// the launcher "radio" value format, and cape resampling).
+// the launcher "radio" value format, and the cape layout/resampling —
+// including the back-face-only design placement, the flat lining color on
+// the inner front face, and the edge strips that give the cape its
+// thickness).
 //
 // Build and run standalone (no game required):
 //     g++ -std=c++20 -I src tests/customcapes_test.cpp -o /tmp/customcapes_test
@@ -43,6 +46,15 @@ std::string join(const std::vector<std::string>& items) {
         out += items[i];
     }
     return out;
+}
+
+// True when the 64x32-canvas pixels at (ax,ay) and (bx,by) are identical.
+bool samePixel(const std::vector<std::uint8_t>& img, std::uint32_t ax, std::uint32_t ay,
+               std::uint32_t bx, std::uint32_t by) {
+    const std::size_t a = (static_cast<std::size_t>(ay) * cc::kCapeWidth + ax) * 4u;
+    const std::size_t b = (static_cast<std::size_t>(by) * cc::kCapeWidth + bx) * 4u;
+    return img[a] == img[b] && img[a + 1] == img[b + 1] &&
+           img[a + 2] == img[b + 2] && img[a + 3] == img[b + 3];
 }
 
 } // namespace
@@ -136,38 +148,139 @@ int main() {
     // --- resampling ---------------------------------------------------------
     std::printf("cape resampling\n");
     {
-        // identity: 64x32 input stays byte-identical
+        // identity: an exact 64x32 input is a complete cape canvas and stays
+        // byte-identical (full manual control over every face is preserved).
         std::vector<std::uint8_t> src(cc::kCapeWidth * cc::kCapeHeight * 4u);
         for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::uint8_t>(i % 251);
         const std::vector<std::uint8_t> out = cc::resampleToCape(src.data(), cc::kCapeWidth, cc::kCapeHeight);
         check(out == src, "64x32 input resamples to itself");
     }
     {
-        // 2x1 is scaled into the visible 10x16 box, not across the canvas.
+        // 2x1 red|blue source: the design lands on the OUTER BACK face only,
+        // the box (12,1)..(22,17) on the 64x32 canvas.
         const std::uint8_t src[8] = {255, 0, 0, 255, 0, 0, 255, 255};
         const std::vector<std::uint8_t> out = cc::resampleToCape(src, 2, 1);
         check(out.size() == cc::kCapeWidth * cc::kCapeHeight * 4u, "output is 64x32 RGBA");
-        bool visibleBlocks = true, outsideTransparent = true;
-        for (std::uint32_t y = 0; y < cc::kCapeHeight; ++y) {
-            for (std::uint32_t x = 0; x < cc::kCapeWidth; ++x) {
-                const std::size_t i = (y * cc::kCapeWidth + x) * 4u;
-                const bool visible = x >= cc::kVisibleCapeX &&
-                    x < cc::kVisibleCapeX + cc::kVisibleCapeWidth &&
-                    y >= cc::kVisibleCapeY &&
-                    y < cc::kVisibleCapeY + cc::kVisibleCapeHeight;
-                if (visible) {
-                    if (x < cc::kVisibleCapeX + cc::kVisibleCapeWidth / 2)
-                        visibleBlocks &= out[i] == 255 && out[i + 2] == 0;
-                    else
-                        visibleBlocks &= out[i] == 0 && out[i + 2] == 255;
-                } else {
-                    outsideTransparent &= out[i] == 0 && out[i + 1] == 0 &&
-                        out[i + 2] == 0 && out[i + 3] == 0;
-                }
+
+        bool backBlocks = true;
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+                const std::size_t i =
+                    (static_cast<std::size_t>(cc::kCapeBackY + y) * cc::kCapeWidth +
+                     cc::kCapeBackX + x) * 4u;
+                // nearest-neighbor: left half of the design <- red source pixel
+                const bool red = x < cc::kCapeBackWidth / 2;
+                backBlocks &= red ? (out[i] == 255 && out[i + 1] == 0 && out[i + 2] == 0)
+                                  : (out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 255);
             }
         }
-        check(visibleBlocks, "upscale preserves blocks inside visible cape box");
-        check(outsideTransparent, "upscale leaves canvas outside visible box transparent");
+        check(backBlocks, "design is scaled onto the back face box (12,1)..(22,17)");
+
+        // inner front face: one flat lining color, never the design. The
+        // average of (255,0,0,255) and (0,0,255,255) over the design is
+        // (127,0,127,255); halving RGB gives (63,0,63,255).
+        bool frontUniform = true, frontIsLiner = true, frontNoDesign = true;
+        const std::size_t first =
+            (static_cast<std::size_t>(cc::kCapeFrontY) * cc::kCapeWidth + cc::kCapeFrontX) * 4u;
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+                const std::size_t i =
+                    (static_cast<std::size_t>(cc::kCapeFrontY + y) * cc::kCapeWidth +
+                     cc::kCapeFrontX + x) * 4u;
+                frontIsLiner &= out[i] == 63 && out[i + 1] == 0 &&
+                                out[i + 2] == 63 && out[i + 3] == 255;
+                frontNoDesign &= !samePixel(out, cc::kCapeFrontX + x, cc::kCapeFrontY + y,
+                                            cc::kCapeBackX + x, cc::kCapeBackY + y);
+                frontNoDesign &= !(out[i] == 255 && out[i + 1] == 0 && out[i + 2] == 0 &&
+                                   out[i + 3] == 255);
+                frontNoDesign &= !(out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 255 &&
+                                   out[i + 3] == 255);
+                frontUniform &= out[i] == out[first] && out[i + 1] == out[first + 1] &&
+                                out[i + 2] == out[first + 2] && out[i + 3] == out[first + 3];
+            }
+        }
+        check(frontIsLiner, "front face is the flat lining color (63,0,63,255)");
+        check(frontUniform, "front face is a single uniform color");
+        check(frontNoDesign, "front face never repeats the design pixels");
+
+        // edges: top/bottom strips carry the design's top/bottom rows, the
+        // side strips carry the design's left/right columns.
+        bool edgesFromImage = true;
+        for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+            const bool red = x < cc::kCapeBackWidth / 2;
+            const std::size_t top =
+                (static_cast<std::size_t>(cc::kCapeTopY) * cc::kCapeWidth + cc::kCapeTopX + x) * 4u;
+            const std::size_t bottom =
+                (static_cast<std::size_t>(cc::kCapeBottomY) * cc::kCapeWidth +
+                 cc::kCapeBottomX + x) * 4u;
+            edgesFromImage &= red ? (out[top] == 255 && out[top + 2] == 0)
+                                  : (out[top] == 0 && out[top + 2] == 255);
+            edgesFromImage &= red ? (out[bottom] == 255 && out[bottom + 2] == 0)
+                                  : (out[bottom] == 0 && out[bottom + 2] == 255);
+        }
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            const std::size_t sideR =
+                (static_cast<std::size_t>(cc::kCapeSideY + y) * cc::kCapeWidth +
+                 cc::kCapeSideRightX) * 4u;
+            const std::size_t sideL =
+                (static_cast<std::size_t>(cc::kCapeSideY + y) * cc::kCapeWidth +
+                 cc::kCapeSideLeftX) * 4u;
+            edgesFromImage &= out[sideR] == 255 && out[sideR + 2] == 0; // design left column is red
+            edgesFromImage &= out[sideL] == 0 && out[sideL + 2] == 255; // right column is blue
+        }
+        check(edgesFromImage, "top/bottom/side strips carry the design edge colors");
+
+        // everything outside the cape layout stays transparent
+        bool outsideTransparent = true;
+        for (std::uint32_t y = 0; y < cc::kCapeHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeWidth; ++x) {
+                const bool used =
+                    (y == cc::kCapeTopY &&
+                     x >= cc::kCapeTopX && x < cc::kCapeTopX + cc::kCapeBackWidth) ||
+                    (y == cc::kCapeBottomY &&
+                     x >= cc::kCapeBottomX && x < cc::kCapeBottomX + cc::kCapeBackWidth) ||
+                    (y >= cc::kCapeSideY && y < cc::kCapeSideY + cc::kCapeBackHeight &&
+                     x <= cc::kCapeSideRightX) ||
+                    (y >= cc::kCapeFrontY && y < cc::kCapeFrontY + cc::kCapeBackHeight &&
+                     x >= cc::kCapeFrontX && x < cc::kCapeBackX + cc::kCapeBackWidth);
+                if (used) continue;
+                const std::size_t i = (static_cast<std::size_t>(y) * cc::kCapeWidth + x) * 4u;
+                outsideTransparent &= out[i] == 0 && out[i + 1] == 0 &&
+                                      out[i + 2] == 0 && out[i + 3] == 0;
+            }
+        }
+        check(outsideTransparent, "canvas outside the cape layout stays transparent");
+    }
+    {
+        // exact edge continuation: a 10x16 source maps 1:1 onto the back
+        // face, so every edge-strip pixel must equal its adjacent back-face
+        // edge pixel exactly.
+        std::vector<std::uint8_t> src(cc::kCapeBackWidth * cc::kCapeBackHeight * 4u);
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+                const std::size_t i = (static_cast<std::size_t>(y) * cc::kCapeBackWidth + x) * 4u;
+                src[i + 0] = static_cast<std::uint8_t>(x * 25);         // unique per column
+                src[i + 1] = static_cast<std::uint8_t>(y * 16 + 1);     // unique per row
+                src[i + 2] = 200;
+                src[i + 3] = 255;
+            }
+        }
+        const std::vector<std::uint8_t> out =
+            cc::resampleToCape(src.data(), cc::kCapeBackWidth, cc::kCapeBackHeight);
+        bool exact = true;
+        for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+            exact &= samePixel(out, cc::kCapeTopX + x, cc::kCapeTopY,
+                               cc::kCapeBackX + x, cc::kCapeBackY);
+            exact &= samePixel(out, cc::kCapeBottomX + x, cc::kCapeBottomY,
+                               cc::kCapeBackX + x, cc::kCapeBackY + cc::kCapeBackHeight - 1);
+        }
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            exact &= samePixel(out, cc::kCapeSideRightX, cc::kCapeSideY + y,
+                               cc::kCapeBackX, cc::kCapeBackY + y);
+            exact &= samePixel(out, cc::kCapeSideLeftX, cc::kCapeSideY + y,
+                               cc::kCapeBackX + cc::kCapeBackWidth - 1, cc::kCapeBackY + y);
+        }
+        check(exact, "edge strips exactly copy the adjacent back-face edge pixels");
     }
     {
         // degenerate input never crashes and stays transparent-black
