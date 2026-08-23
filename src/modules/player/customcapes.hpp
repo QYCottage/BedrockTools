@@ -12,9 +12,9 @@
 // launch together with a sample cape); every .png file in it shows up as an
 // option of the module's radio picker in the launcher mod menu.
 //
-// The selected file is decoded with stb_image, resampled onto the 64x32
-// canvas Minecraft uses for classic capes, and written into the local
-// player's SerializedSkinImpl::mCapeImage each tick. Modern game versions
+// The selected file is decoded with stb_image, resampled into the visible
+// 10x16 classic-cape box at (1,1) on the 64x32 canvas Minecraft uses, and
+// written into the local player's SerializedSkinImpl::mCapeImage each tick. Modern game versions
 // only render the classic cape when SerializedSkinImpl::mCapeId is
 // non-empty, so a synthetic short-string id is written alongside the image
 // and restored together with it. The blob handed to the
