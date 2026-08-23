@@ -36,6 +36,7 @@
 #include "visual/shulkerpreview.hpp"
 #include "visual/connectedglass.hpp"
 #include "player/skinstealer.hpp"
+#include "player/customcapes.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
 #include "misc/commentkey.hpp"
@@ -128,6 +129,7 @@ void registerAllModules() {
     registry.emplace<ZoomModule>();
     registry.emplace<BreadcrumbsModule>();
     registry.emplace<SkinStealerModule>();
+    registry.emplace<CustomCapesModule>();
     registry.emplace<AutoGG>();
     registry.emplace<AutoReQ>();
     registry.emplace<FPSUnlockerModule>();
