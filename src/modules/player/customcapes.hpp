@@ -77,6 +77,12 @@ private:
     bool m_loadFailed = false;
     int m_retryTicks = 0;
 
+    // Synthetic cape id that changes on every switch so the engine's texture
+    // cache (keyed by mCapeId) is invalidated and the new pixels show up
+    // without leaving/rejoining the world.
+    uint32_t m_capeIdSerial = 0;
+    std::string m_activeCapeId = \"bedrocktools\";
+
     // State of the in-game skin patch.
     void* m_patchedSkin = nullptr;  // SerializedSkinImpl* currently patched
     void* m_injectedBlob = nullptr; // pixel buffer currently handed to the game
