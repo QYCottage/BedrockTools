@@ -338,12 +338,17 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
                          oldBinding.label != newBinding.label ||
                          oldBinding.textColor != newBinding.textColor;
     }
-    // ModMenu sends partial updates while text is being edited. Always
-    // rebuild the native definitions so command and label changes are visible
-    // immediately, even if the update was normalized to the same value in the
-    // comparison above.
-    (void)overlayChanged;
-    syncOverlayButtons();
+    // Re-register the native button definitions whenever anything shown on a
+    // button changed (command/label text, width/height, text color, slot
+    // enable state, or the scale multiplier). The launcher keeps its own
+    // snapshot of each ExternalButton, so the native definition must be
+    // refreshed before refreshExternalButtonsForModule re-applies the new
+    // label/size/colors to the visible overlay. Registering a duplicate
+    // button id is rejected, so syncOverlayButtons unregisters before
+    // re-registering. Unchanged configs and updates that cannot affect a
+    // button (for example a keybind) skip the rebuild so unrelated edits do
+    // not churn the launcher's button registry.
+    if (overlayChanged) syncOverlayButtons();
 }
 
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
