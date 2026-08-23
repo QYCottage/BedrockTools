@@ -61,6 +61,7 @@ inline constexpr std::size_t mObject = 0;
 namespace SerializedSkinImpl {
 inline constexpr std::size_t mSkinImage = 120;
 inline constexpr std::size_t mCapeImage = 168;
+inline constexpr std::size_t mCapeId = 336;
 inline constexpr std::size_t mIsPersona = 442;
 inline constexpr std::size_t mIsPersonaCapeOnClassicSkin = 443;
 inline constexpr std::size_t mSkinAnimatedImages = 216;

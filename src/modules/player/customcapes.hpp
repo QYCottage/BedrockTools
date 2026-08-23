@@ -14,7 +14,10 @@
 //
 // The selected file is decoded with stb_image, resampled onto the 64x32
 // canvas Minecraft uses for classic capes, and written into the local
-// player's SerializedSkinImpl::mCapeImage each tick. The blob handed to the
+// player's SerializedSkinImpl::mCapeImage each tick. Modern game versions
+// only render the classic cape when SerializedSkinImpl::mCapeId is
+// non-empty, so a synthetic short-string id is written alongside the image
+// and restored together with it. The blob handed to the
 // game is malloc'd and tagged with free() as its deleter, so whatever the
 // engine does with the image afterwards (move, destroy, skin rebuild) is
 // memory-safe. The original cape is restored when the module is disabled or
@@ -85,6 +88,7 @@ private:
         size_t size = 0;
         std::vector<std::uint8_t> pixels; // deep copy of original pixels (may be empty)
         bool hadPixels = false;
+        std::uint8_t capeIdBytes[24] = {};  // raw copy of the original mCapeId std::string
     };
     CapeBackup m_backup;
     bool m_hasBackup = false;
