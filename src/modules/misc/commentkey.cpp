@@ -268,8 +268,10 @@ void CommentKey::sendComment(std::size_t index) {
 
 void CommentKey::loadConfig(const nlohmann::json& j) {
     // ModMenu invokes this callback for every character entered in a comment.
-    // Preserve the live overlay for text-only edits instead of unregistering
-    // and registering every button on each keystroke.
+    // The native button definitions are refreshed below so the launcher's
+    // overlay snapshot picks up the new text. ExternalButtonRefresh then
+    // re-applies the label in place (no hide/show), so there is no flicker
+    // while the comment text field is being typed.
     std::vector<Comment> previousComments;
     float previousButtonScale;
     {
@@ -388,9 +390,13 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
         for (std::size_t i = 0; i < mComments.size(); ++i) {
             const auto& oldComment = previousComments[i];
             const auto& newComment = mComments[i];
+            // Include text/textColor so the comment label shown on the button
+            // is refreshed as it is typed; ExternalButtonRefresh re-applies it.
             if (oldComment.enabled != newComment.enabled ||
                 oldComment.width != newComment.width ||
-                oldComment.height != newComment.height) {
+                oldComment.height != newComment.height ||
+                oldComment.text != newComment.text ||
+                oldComment.textColor != newComment.textColor) {
                 overlayChanged = true;
                 break;
             }

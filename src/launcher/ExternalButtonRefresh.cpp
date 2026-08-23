@@ -86,6 +86,22 @@ void refreshExternalButtonsForModule(std::string_view moduleId) {
         return;
     }
 
+    // Best-effort: applyConfigurationChanges resizes/recolors the existing
+    // view but does not re-apply the label text on every launcher build (the
+    // TextView text is only set in configureOverlayView at creation). Look up
+    // the view field and the configure method so the new command/comment label
+    // can be re-applied in place. These are optional: if absent on an older
+    // launcher build, the resize/recolor path above still runs.
+    jclass baseOverlayClass = env->GetSuperclass(overlayClass);
+    jfieldID overlayViewField = nullptr;
+    if (baseOverlayClass) {
+        overlayViewField = env->GetFieldID(baseOverlayClass, "overlayView", "Landroid/view/View;");
+        clearJavaException(env);
+    }
+    jmethodID configureOverlayView = env->GetMethodID(
+        overlayClass, "configureOverlayView", "(Landroid/view/View;)V");
+    clearJavaException(env);
+
     jobject manager = env->CallStaticObjectMethod(managerClass, getInstance);
     jobject overlays = manager ? env->GetObjectField(manager, overlaysField) : nullptr;
     if (!manager || !overlays || env->ExceptionCheck()) {
@@ -123,6 +139,19 @@ void refreshExternalButtonsForModule(std::string_view moduleId) {
         if (overlay) {
             env->SetObjectField(overlay, overlayButtonField, button);
             env->CallVoidMethod(overlay, applyChanges);
+
+            // Re-run the view configuration so a changed command/comment label
+            // is actually written to the label TextView. Safe to call on an
+            // already-shown view; it re-finds the same child views and re-sets
+            // their text/icon/colors. applyConfigurationChanges alone does not
+            // re-apply the label text on every launcher build.
+            if (overlayViewField && configureOverlayView) {
+                jobject overlayView = env->GetObjectField(overlay, overlayViewField);
+                if (overlayView) {
+                    env->CallVoidMethod(overlay, configureOverlayView, overlayView);
+                    env->DeleteLocalRef(overlayView);
+                }
+            }
         }
         if (buttonId) env->DeleteLocalRef(buttonId);
         if (buttonModule) env->DeleteLocalRef(buttonModule);
@@ -135,6 +164,7 @@ void refreshExternalButtonsForModule(std::string_view moduleId) {
     env->DeleteLocalRef(manager);
     env->DeleteLocalRef(buttonClass);
     env->DeleteLocalRef(overlayClass);
+    if (baseOverlayClass) env->DeleteLocalRef(baseOverlayClass);
     env->DeleteLocalRef(bridgeClass);
     env->DeleteLocalRef(managerClass);
 #endif
