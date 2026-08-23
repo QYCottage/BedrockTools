@@ -81,7 +81,7 @@ private:
     // cache (keyed by mCapeId) is invalidated and the new pixels show up
     // without leaving/rejoining the world.
     uint32_t m_capeIdSerial = 0;
-    std::string m_activeCapeId = \"bedrocktools\";
+    std::string m_activeCapeId = "bedrocktools";
 
     // State of the in-game skin patch.
     void* m_patchedSkin = nullptr;  // SerializedSkinImpl* currently patched
