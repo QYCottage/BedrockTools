@@ -34,10 +34,11 @@ void refreshExternalButtonsForModule(std::string_view moduleId) {
 #if !defined(__ANDROID__)
     (void)moduleId;
 #else
-    // Configuration callbacks arrive through the launcher's JNI bridge, so the
-    // current thread is already attached to the VM. Do not attach arbitrary
-    // game threads here: the overlay manager must be used on the Android UI
-    // thread, and this function is intentionally a no-op outside that path.
+    // The overlay keeps a Java ExternalButton object, so changing the native
+    // definition alone is not enough to update an already visible button.
+    // Replace that object in-place and ask the overlay to re-apply its view
+    // configuration. This avoids the old hide/show workaround (which made the
+    // buttons disappear while a text field was being edited).
     JavaVM* vm = gJavaVm.load(std::memory_order_acquire);
     if (!vm) return;
 
@@ -45,58 +46,96 @@ void refreshExternalButtonsForModule(std::string_view moduleId) {
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env)
         return;
 
-    constexpr const char* managerClassName =
+    constexpr const char* managerName =
         "org/levimc/launcher/core/mods/inbuilt/overlay/InbuiltOverlayManager";
-    jclass managerClass = env->FindClass(managerClassName);
-    if (!managerClass || env->ExceptionCheck()) {
+    constexpr const char* bridgeName =
+        "org/levimc/launcher/core/mods/inbuilt/ExternalModBridge";
+    constexpr const char* buttonName =
+        "org/levimc/launcher/core/mods/inbuilt/ExternalModBridge$ExternalButton";
+    constexpr const char* overlayName =
+        "org/levimc/launcher/core/mods/inbuilt/overlay/ExternalButtonOverlay";
+
+    jclass managerClass = env->FindClass(managerName);
+    jclass bridgeClass = env->FindClass(bridgeName);
+    jclass overlayClass = env->FindClass(overlayName);
+    jclass buttonClass = env->FindClass(buttonName);
+    if (!managerClass || !bridgeClass || !overlayClass || !buttonClass || env->ExceptionCheck()) {
         clearJavaException(env);
         return;
     }
 
     jmethodID getInstance = env->GetStaticMethodID(
-        managerClass, "getInstance", "()Lorg/levimc/launcher/core/mods/inbuilt/overlay/InbuiltOverlayManager;");
-    if (!getInstance || env->ExceptionCheck()) {
+        managerClass, "getInstance",
+        "()Lorg/levimc/launcher/core/mods/inbuilt/overlay/InbuiltOverlayManager;");
+    jmethodID getCount = env->GetStaticMethodID(bridgeClass, "getExternalButtonCount", "()I");
+    jmethodID getButton = env->GetStaticMethodID(
+        bridgeClass, "getExternalButton",
+        "(I)Lorg/levimc/launcher/core/mods/inbuilt/ExternalModBridge$ExternalButton;");
+    jfieldID overlaysField = env->GetFieldID(managerClass, "externalButtonOverlayMap", "Ljava/util/Map;");
+    jmethodID mapGet = env->GetMethodID(
+        env->FindClass("java/util/Map"), "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+    jfieldID buttonIdField = env->GetFieldID(buttonClass, "buttonId", "Ljava/lang/String;");
+    jfieldID moduleIdField = env->GetFieldID(buttonClass, "moduleId", "Ljava/lang/String;");
+    jfieldID overlayButtonField = env->GetFieldID(overlayClass, "button",
+                                                    "Lorg/levimc/launcher/core/mods/inbuilt/ExternalModBridge$ExternalButton;");
+    jmethodID applyChanges = env->GetMethodID(overlayClass, "applyConfigurationChanges", "()V");
+    if (!getInstance || !getCount || !getButton || !overlaysField || !mapGet ||
+        !buttonIdField || !moduleIdField || !overlayButtonField || !applyChanges ||
+        env->ExceptionCheck()) {
         clearJavaException(env);
-        env->DeleteLocalRef(managerClass);
         return;
     }
 
     jobject manager = env->CallStaticObjectMethod(managerClass, getInstance);
-    if (!manager || env->ExceptionCheck()) {
+    jobject overlays = manager ? env->GetObjectField(manager, overlaysField) : nullptr;
+    if (!manager || !overlays || env->ExceptionCheck()) {
         clearJavaException(env);
-        env->DeleteLocalRef(managerClass);
-        return;
-    }
-
-    jmethodID handleModuleToggle = env->GetMethodID(
-        managerClass, "handleExternalModuleToggle", "(Ljava/lang/String;Z)V");
-    if (!handleModuleToggle || env->ExceptionCheck()) {
-        clearJavaException(env);
-        env->DeleteLocalRef(manager);
-        env->DeleteLocalRef(managerClass);
         return;
     }
 
     const std::string moduleIdString(moduleId);
-    jstring javaModuleId = env->NewStringUTF(moduleIdString.c_str());
-    if (!javaModuleId || env->ExceptionCheck()) {
-        clearJavaException(env);
-        env->DeleteLocalRef(manager);
-        env->DeleteLocalRef(managerClass);
-        return;
+    jstring wantedModule = env->NewStringUTF(moduleIdString.c_str());
+    const jint count = env->CallStaticIntMethod(bridgeClass, getCount);
+    for (jint i = 0; i < count && !env->ExceptionCheck(); ++i) {
+        jobject button = env->CallStaticObjectMethod(bridgeClass, getButton, i);
+        if (!button) continue;
+        jstring buttonModule = static_cast<jstring>(env->GetObjectField(button, moduleIdField));
+        if (!buttonModule || env->IsSameObject(buttonModule, wantedModule)) {
+            if (buttonModule && env->GetStringUTFLength(buttonModule) ==
+                                    env->GetStringUTFLength(wantedModule)) {
+                // IsSameObject only compares references; compare the strings
+                // below for the normal case where they are different objects.
+                const char* actual = env->GetStringUTFChars(buttonModule, nullptr);
+                const bool matches = actual && moduleIdString == actual;
+                if (actual) env->ReleaseStringUTFChars(buttonModule, actual);
+                if (!matches) { env->DeleteLocalRef(button); continue; }
+            } else if (!buttonModule) {
+                env->DeleteLocalRef(button);
+                continue;
+            }
+        } else {
+            env->DeleteLocalRef(button);
+            continue;
+        }
+
+        jstring buttonId = static_cast<jstring>(env->GetObjectField(button, buttonIdField));
+        jobject overlay = buttonId ? env->CallObjectMethod(overlays, mapGet, buttonId) : nullptr;
+        if (overlay) {
+            env->SetObjectField(overlay, overlayButtonField, button);
+            env->CallVoidMethod(overlay, applyChanges);
+        }
+        if (buttonId) env->DeleteLocalRef(buttonId);
+        if (buttonModule) env->DeleteLocalRef(buttonModule);
+        env->DeleteLocalRef(button);
+        if (overlay) env->DeleteLocalRef(overlay);
     }
-
-    // Re-registering a button updates the native registry, but the launcher
-    // overlay stores the old ButtonInfo object. Reusing the launcher's normal
-    // hide/show path makes it fetch the freshly registered button definitions
-    // while preserving each button's position (the IDs stay stable).
-    env->CallVoidMethod(manager, handleModuleToggle, javaModuleId, JNI_FALSE);
     clearJavaException(env);
-    env->CallVoidMethod(manager, handleModuleToggle, javaModuleId, JNI_TRUE);
-    clearJavaException(env);
-
-    env->DeleteLocalRef(javaModuleId);
+    if (wantedModule) env->DeleteLocalRef(wantedModule);
+    env->DeleteLocalRef(overlays);
     env->DeleteLocalRef(manager);
+    env->DeleteLocalRef(buttonClass);
+    env->DeleteLocalRef(overlayClass);
+    env->DeleteLocalRef(bridgeClass);
     env->DeleteLocalRef(managerClass);
 #endif
 }

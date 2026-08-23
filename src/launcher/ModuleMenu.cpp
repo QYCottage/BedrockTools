@@ -1,5 +1,4 @@
 #include "ModuleMenu.hpp"
-#include "ExternalButtonRefresh.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
@@ -93,10 +92,10 @@ static void onModuleConfigChanged(std::string_view module_id, std::string_view k
     }
     mod->loadConfig(j);
 
-    // The native button registry is updated by loadConfig(), but the launcher
-    // keeps a snapshot of each external overlay button. Rebuild these modules' overlays now so a changed label/text is visible immediately.
     if (module_id == "bedrocktools.CommentKey" ||
         module_id == "bedrocktools.Command Hotkey") {
+        // Refresh the Java view in place. It replaces the button definition
+        // and reapplies its label without hiding the overlay.
         bedrocktools::launcher::refreshExternalButtonsForModule(module_id);
     }
 
