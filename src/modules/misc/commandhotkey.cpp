@@ -244,6 +244,11 @@ void CommandHotkeyModule::sendCommandPacket(const std::string& command) {
 }
 
 void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
+    // Text fields are edited one character at a time by ModMenu. Keep the
+    // current overlay alive while those fields change; rebuilding it on every
+    // callback makes all buttons blink/disappear during typing.
+    const auto previousBindings = m_commands;
+    const float previousScale = m_buttonScale;
     Module::loadConfig(j);
 
     // Start from the built-in defaults (all slots exist directly but are
@@ -313,7 +318,19 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     }
 
     normalizeBindings();
-    syncOverlayButtons();
+
+    // Only rebuild when the set or geometry of buttons changed. Labels and
+    // commands are deliberately excluded because they are updated for every
+    // keystroke in a text input.
+    bool overlayChanged = previousScale != m_buttonScale;
+    for (std::size_t i = 0; i < MaxCommands && !overlayChanged; ++i) {
+        const auto& oldBinding = previousBindings[i];
+        const auto& newBinding = m_commands[i];
+        overlayChanged = oldBinding.enabled != newBinding.enabled ||
+                         oldBinding.width != newBinding.width ||
+                         oldBinding.height != newBinding.height;
+    }
+    if (overlayChanged) syncOverlayButtons();
 }
 
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {

@@ -267,6 +267,16 @@ void CommentKey::sendComment(std::size_t index) {
 }
 
 void CommentKey::loadConfig(const nlohmann::json& j) {
+    // ModMenu invokes this callback for every character entered in a comment.
+    // Preserve the live overlay for text-only edits instead of unregistering
+    // and registering every button on each keystroke.
+    std::vector<Comment> previousComments;
+    float previousButtonScale;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        previousComments = mComments;
+        previousButtonScale = mButtonScale;
+    }
     Module::loadConfig(j);
 
     // Configs written before the launcher-style button look have no border
@@ -372,7 +382,21 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
         std::fill(mKeyDown.begin(), mKeyDown.end(), false);
         normalizeComments();
     }
-    syncOverlayButtons();
+
+    bool overlayChanged = previousButtonScale != mButtonScale;
+    if (!overlayChanged && previousComments.size() == mComments.size()) {
+        for (std::size_t i = 0; i < mComments.size(); ++i) {
+            const auto& oldComment = previousComments[i];
+            const auto& newComment = mComments[i];
+            if (oldComment.enabled != newComment.enabled ||
+                oldComment.width != newComment.width ||
+                oldComment.height != newComment.height) {
+                overlayChanged = true;
+                break;
+            }
+        }
+    }
+    if (overlayChanged) syncOverlayButtons();
 }
 
 void CommentKey::saveConfig(nlohmann::json& j) {
