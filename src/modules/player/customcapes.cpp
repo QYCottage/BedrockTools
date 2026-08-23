@@ -49,9 +49,14 @@ constexpr std::uint32_t kCapeImageFormat = 4;
 constexpr int kLoadRetryTicks = 120;
 
 // A synthetic non-empty cape id. Modern game versions gate cape rendering on
-// the id being present at all, so a bare image blob is not enough.
-constexpr const char* kCapeId = "bedrocktools";
-constexpr std::size_t kCapeIdLen = 12; // strlen("bedrocktools")
+// the id being present at all, so a bare image blob is not enough. The id is
+// changed every time the user picks a different file so the engine's texture
+// cache (keyed by mCapeId) is invalidated and the new cape shows up without
+// leaving the world.
+constexpr const char* kCapeIdBase = "bedrocktools";
+constexpr std::size_t kCapeIdBaseLen = 12; // strlen("bedrocktools")
+[[maybe_unused]] constexpr const char* kCapeId = kCapeIdBase;
+[[maybe_unused]] constexpr std::size_t kCapeIdLen = kCapeIdBaseLen;
 
 // Writes a short (SSO) std::string into a libc++ string slot (24 bytes) that
 // the game already owns, e.g. SerializedSkinImpl::mCapeId. libc++ packs a
@@ -238,6 +243,16 @@ void CustomCapesModule::loadSelectedCape() {
     }
     stbi_image_free(decoded);
     m_capeLoaded = true;
+
+    // Invalidate the engine's cached cape texture by changing mCapeId.
+    // Keep the string <=22 bytes so it stays inside libc++ SSO (no heap alloc).
+    ++m_capeIdSerial;
+    m_activeCapeId = std::string(kCapeIdBase) + "-" + std::to_string(m_capeIdSerial);
+    if (m_activeCapeId.size() > 22) {
+        // Fallback: if the counter grows huge, truncate to still fit SSO.
+        m_activeCapeId = std::string(kCapeIdBase) + "-" + std::to_string(m_capeIdSerial % 1000000);
+        if (m_activeCapeId.size() > 22) m_activeCapeId.resize(22);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,9 +384,10 @@ bool CustomCapesModule::applyCustomCape(void* skin) {
     m_injectedBlob = newBlob;
 
     // Modern versions skip classic-cape rendering for an empty mCapeId, so
-    // write a synthetic short-string id next to the image.
+    // write a synthetic short-string id next to the image. The id changes on
+    // every cape switch (m_activeCapeId) to bust the engine's texture cache.
     writeShortStdString(reinterpret_cast<uintptr_t>(skin) + SerializedSkinImpl::mCapeId,
-                        kCapeId, kCapeIdLen);
+                        m_activeCapeId.c_str(), m_activeCapeId.size());
 
     m_needsApply = false;
     return true;
