@@ -143,19 +143,31 @@ int main() {
         check(out == src, "64x32 input resamples to itself");
     }
     {
-        // upscale 2x1 -> 64x32 keeps the two solid color blocks
+        // 2x1 is scaled into the visible 10x16 box, not across the canvas.
         const std::uint8_t src[8] = {255, 0, 0, 255, 0, 0, 255, 255};
         const std::vector<std::uint8_t> out = cc::resampleToCape(src, 2, 1);
         check(out.size() == cc::kCapeWidth * cc::kCapeHeight * 4u, "output is 64x32 RGBA");
-        bool leftRed = true, rightBlue = true;
+        bool visibleBlocks = true, outsideTransparent = true;
         for (std::uint32_t y = 0; y < cc::kCapeHeight; ++y) {
             for (std::uint32_t x = 0; x < cc::kCapeWidth; ++x) {
                 const std::size_t i = (y * cc::kCapeWidth + x) * 4u;
-                if (x < 32) leftRed &= out[i] == 255 && out[i + 2] == 0;
-                else rightBlue &= out[i] == 0 && out[i + 2] == 255;
+                const bool visible = x >= cc::kVisibleCapeX &&
+                    x < cc::kVisibleCapeX + cc::kVisibleCapeWidth &&
+                    y >= cc::kVisibleCapeY &&
+                    y < cc::kVisibleCapeY + cc::kVisibleCapeHeight;
+                if (visible) {
+                    if (x < cc::kVisibleCapeX + cc::kVisibleCapeWidth / 2)
+                        visibleBlocks &= out[i] == 255 && out[i + 2] == 0;
+                    else
+                        visibleBlocks &= out[i] == 0 && out[i + 2] == 255;
+                } else {
+                    outsideTransparent &= out[i] == 0 && out[i + 1] == 0 &&
+                        out[i + 2] == 0 && out[i + 3] == 0;
+                }
             }
         }
-        check(leftRed && rightBlue, "upscale preserves left/right color blocks");
+        check(visibleBlocks, "upscale preserves blocks inside visible cape box");
+        check(outsideTransparent, "upscale leaves canvas outside visible box transparent");
     }
     {
         // degenerate input never crashes and stays transparent-black

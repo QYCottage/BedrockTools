@@ -9,8 +9,8 @@
 //
 //   * scanning the capes directory for usable PNG files
 //   * (de)serializing the launcher "radio" config value used for the picker
-//   * resampling an arbitrary RGBA image onto the 64x32 canvas Minecraft
-//     expects for classic capes
+//   * resampling an arbitrary RGBA image into the visible 10x16 classic-cape
+//     box at (1,1) on the 64x32 canvas Minecraft expects
 
 #include <algorithm>
 #include <cctype>
@@ -28,10 +28,14 @@
 
 namespace customcapes {
 
-// Vanilla classic capes are rendered from a 64x32 RGBA8 texture (the cape
-// body occupies sub-rectangles UV-mapped on this canvas).
+// Vanilla classic capes are rendered from a 64x32 RGBA8 texture, but the
+// classic cape geometry reads only this 10x16 box at (1,1) from that canvas.
 inline constexpr std::uint32_t kCapeWidth = 64;
 inline constexpr std::uint32_t kCapeHeight = 32;
+inline constexpr std::uint32_t kVisibleCapeX = 1;
+inline constexpr std::uint32_t kVisibleCapeY = 1;
+inline constexpr std::uint32_t kVisibleCapeWidth = 10;
+inline constexpr std::uint32_t kVisibleCapeHeight = 16;
 
 // Safety cap so a hostile/corrupt PNG can never exhaust device memory.
 inline constexpr std::uint32_t kMaxSourceDimension = 4096;
@@ -159,7 +163,9 @@ inline int resolveSelectionIndex(int parsedIndex, const std::string& parsedName,
     return 0;
 }
 
-// Nearest-neighbor resample of an RGBA8 buffer onto the 64x32 cape canvas.
+// Nearest-neighbor resample of an RGBA8 buffer into the visible 10x16
+// classic-cape box at (1,1) on the 64x32 canvas. An exact 64x32 input is
+// already a complete cape canvas and is therefore copied pixel-for-pixel.
 // Sequential input/output traversal keeps the cache behavior linear, which
 // is plenty for one-off loads of a few hundred KB.
 inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::uint32_t width,
@@ -167,14 +173,21 @@ inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::u
     std::vector<std::uint8_t> out;
     out.resize(static_cast<std::size_t>(kCapeWidth) * kCapeHeight * 4u, 0);
     if (!rgba || width == 0 || height == 0) return out;
-    for (std::uint32_t y = 0; y < kCapeHeight; ++y) {
+
+    if (width == kCapeWidth && height == kCapeHeight) {
+        out.assign(rgba, rgba + out.size());
+        return out;
+    }
+
+    for (std::uint32_t y = 0; y < kVisibleCapeHeight; ++y) {
         const std::uint32_t srcY = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(y) * height) / kCapeHeight);
-        for (std::uint32_t x = 0; x < kCapeWidth; ++x) {
+            (static_cast<std::uint64_t>(y) * height) / kVisibleCapeHeight);
+        for (std::uint32_t x = 0; x < kVisibleCapeWidth; ++x) {
             const std::uint32_t srcX = static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(x) * width) / kCapeWidth);
+                (static_cast<std::uint64_t>(x) * width) / kVisibleCapeWidth);
             const std::size_t src = (static_cast<std::size_t>(srcY) * width + srcX) * 4u;
-            const std::size_t dst = (static_cast<std::size_t>(y) * kCapeWidth + x) * 4u;
+            const std::size_t dst = (static_cast<std::size_t>(kVisibleCapeY + y) * kCapeWidth +
+                                     kVisibleCapeX + x) * 4u;
             out[dst + 0] = rgba[src + 0];
             out[dst + 1] = rgba[src + 1];
             out[dst + 2] = rgba[src + 2];
