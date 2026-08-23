@@ -402,7 +402,13 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
             }
         }
     }
-    if (overlayChanged) syncOverlayButtons();
+    // Rebuild even when the change is not one of the size/visibility fields.
+    // Text inputs are delivered incrementally by ModMenu and the launcher
+    // keeps a snapshot of the button definition; relying only on the diff can
+    // leave that snapshot stale when a field is normalized or omitted from a
+    // partial update.
+    (void)overlayChanged;
+    syncOverlayButtons();
 }
 
 void CommentKey::saveConfig(nlohmann::json& j) {
