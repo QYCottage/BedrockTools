@@ -338,7 +338,12 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
                          oldBinding.label != newBinding.label ||
                          oldBinding.textColor != newBinding.textColor;
     }
-    if (overlayChanged) syncOverlayButtons();
+    // ModMenu sends partial updates while text is being edited. Always
+    // rebuild the native definitions so command and label changes are visible
+    // immediately, even if the update was normalized to the same value in the
+    // comparison above.
+    (void)overlayChanged;
+    syncOverlayButtons();
 }
 
 void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
