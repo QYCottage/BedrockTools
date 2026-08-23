@@ -244,9 +244,11 @@ void CommandHotkeyModule::sendCommandPacket(const std::string& command) {
 }
 
 void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
-    // Text fields are edited one character at a time by ModMenu. Keep the
-    // current overlay alive while those fields change; rebuilding it on every
-    // callback makes all buttons blink/disappear during typing.
+    // ModMenu edits text fields one character at a time. The native button
+    // definitions are refreshed below so the launcher's overlay snapshot picks
+    // up the new command/label text. The overlay view itself is then updated
+    // in place by ExternalButtonRefresh (no hide/show), so there is no flicker
+    // while the command/label fields are being typed.
     const auto previousBindings = m_commands;
     const float previousScale = m_buttonScale;
     Module::loadConfig(j);
@@ -319,16 +321,22 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
 
     normalizeBindings();
 
-    // Only rebuild when the set or geometry of buttons changed. Labels and
-    // commands are deliberately excluded because they are updated for every
-    // keystroke in a text input.
+    // Re-register the native button definitions whenever anything shown on a
+    // button changes. This includes the command and label text: the launcher
+    // keeps its own snapshot of each ExternalButton, so the native definition
+    // must be refreshed first, after which ExternalButtonRefresh re-applies the
+    // new label in place. Registering a duplicate button id is rejected, so
+    // syncOverlayButtons unregisters before re-registering.
     bool overlayChanged = previousScale != m_buttonScale;
     for (std::size_t i = 0; i < MaxCommands && !overlayChanged; ++i) {
         const auto& oldBinding = previousBindings[i];
         const auto& newBinding = m_commands[i];
         overlayChanged = oldBinding.enabled != newBinding.enabled ||
                          oldBinding.width != newBinding.width ||
-                         oldBinding.height != newBinding.height;
+                         oldBinding.height != newBinding.height ||
+                         oldBinding.command != newBinding.command ||
+                         oldBinding.label != newBinding.label ||
+                         oldBinding.textColor != newBinding.textColor;
     }
     if (overlayChanged) syncOverlayButtons();
 }
