@@ -402,13 +402,14 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
             }
         }
     }
-    // Rebuild even when the change is not one of the size/visibility fields.
-    // Text inputs are delivered incrementally by ModMenu and the launcher
-    // keeps a snapshot of the button definition; relying only on the diff can
-    // leave that snapshot stale when a field is normalized or omitted from a
-    // partial update.
-    (void)overlayChanged;
-    syncOverlayButtons();
+    // Rebuild only when something shown on a button changed (comment text,
+    // width/height, text color, slot enable state, or the scale multiplier):
+    // the launcher keeps a snapshot of each button definition, and
+    // ExternalButtonRefresh re-applies the new text/size/colors in place once
+    // the native definitions are refreshed. Updates that cannot affect a
+    // button (for example the cooldown) skip the rebuild so unrelated edits
+    // do not churn the launcher's button registry.
+    if (overlayChanged) syncOverlayButtons();
 }
 
 void CommentKey::saveConfig(nlohmann::json& j) {
