@@ -139,7 +139,8 @@ bool CommandHotkeyModule::onKeyEvent(int key, bool isDown) {
 void CommandHotkeyModule::applyDefaultBindings() {
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         m_commands[i] = Binding{};
-        m_commands[i].enabled = true;
+        // Command slots start disabled. Users can enable only the buttons they
+        // need from the module settings.
         // Match the square Zoom button by default. Width and Height remain
         // per-command controls for users who want a custom button shape.
         m_commands[i].width = kDefaultCommandButtonWidth;
@@ -245,8 +246,8 @@ void CommandHotkeyModule::sendCommandPacket(const std::string& command) {
 void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
 
-    // Start from the built-in defaults (all slots exist directly) and then
-    // override each slot with whatever is stored in the config.
+    // Start from the built-in defaults (all slots exist directly but are
+    // disabled) and then override each slot with whatever is stored in the config.
     applyDefaultBindings();
 
     // Configs written before the launcher-style button look have no border
@@ -283,7 +284,7 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
         const std::string p = "m_command" + std::to_string(i + 1);
         auto& b = m_commands[i];
 
-        // Slot missing from the config -> keep the built-in default (enabled).
+        // Slot missing from the config -> keep the built-in default (disabled).
         if (!j.contains(p) || !j[p].is_boolean()) continue;
 
         // Slot explicitly disabled in the config -> no binding.
