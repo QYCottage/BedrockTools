@@ -48,6 +48,23 @@ constexpr std::uint32_t kCapeImageFormat = 4;
 // after the picker entry did.
 constexpr int kLoadRetryTicks = 120;
 
+// A synthetic non-empty cape id. Modern game versions gate cape rendering on
+// the id being present at all, so a bare image blob is not enough.
+constexpr const char* kCapeId = "bedrocktools";
+constexpr std::size_t kCapeIdLen = 12; // strlen("bedrocktools")
+
+// Writes a short (SSO) std::string into a libc++ string slot (24 bytes) that
+// the game already owns, e.g. SerializedSkinImpl::mCapeId. libc++ packs a
+// short string's length into the first byte as (len << 1) with the low bit
+// clear; len <= 22 always fits inline so no heap allocation and no capacity
+// bookkeeping is needed. The original bytes must be backed up first.
+void writeShortStdString(uintptr_t addr, const char* text, std::size_t len) {
+    unsigned char* p = reinterpret_cast<unsigned char*>(addr);
+    std::memset(p, 0, 24);
+    p[0] = static_cast<unsigned char>(len << 1);
+    std::memcpy(p + 1, text, len);
+}
+
 std::string capeDirectoryForConfig() {
     const std::string configPath = bedrocktools::config::ConfigManager::get().getConfigPath();
     const std::size_t lastSlash = configPath.find_last_of('/');
@@ -306,6 +323,10 @@ bool CustomCapesModule::applyCustomCape(void* skin) {
         } else {
             m_backup.pixels.clear();
         }
+        std::memcpy(m_backup.capeIdBytes,
+                    reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(skin) +
+                                            SerializedSkinImpl::mCapeId),
+                    24);
         m_patchedSkin = skin;
         m_injectedBlob = nullptr;
         m_needsApply = true;
@@ -340,6 +361,12 @@ bool CustomCapesModule::applyCustomCape(void* skin) {
     curBlobSize = bytes;
 
     m_injectedBlob = newBlob;
+
+    // Modern versions skip classic-cape rendering for an empty mCapeId, so
+    // write a synthetic short-string id next to the image.
+    writeShortStdString(reinterpret_cast<uintptr_t>(skin) + SerializedSkinImpl::mCapeId,
+                        kCapeId, kCapeIdLen);
+
     m_needsApply = false;
     return true;
 }
@@ -404,6 +431,12 @@ void CustomCapesModule::restoreOriginalCape(void* skin) {
         curDepth = 1;
         curUsage = static_cast<std::uint8_t>(m_backup.usage);
     }
+
+    // Put the original mCapeId back (it may be a heap pointer owned by the
+    // engine), byte-for-byte as it was backed up.
+    std::memcpy(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(m_patchedSkin) +
+                                        SerializedSkinImpl::mCapeId),
+                m_backup.capeIdBytes, 24);
 
     clearPatchState();
 }
