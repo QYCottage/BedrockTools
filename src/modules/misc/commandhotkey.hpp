@@ -14,7 +14,6 @@ public:
         bool enabled = false;
         std::string command;
         int key = 0;
-        bool screen = false;
         float width = 110.0f;
         float height = 40.0f;
         std::uint32_t textColor = 0x373737;

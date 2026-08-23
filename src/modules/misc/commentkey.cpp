@@ -97,7 +97,6 @@ void CommentKey::applyDefaultComments() {
     mComments.assign(MaxComments, Comment{});
     for (std::size_t i = 0; i < MaxComments; ++i) {
         auto& comment = mComments[i];
-        comment.screen = true;
         comment.width = kDefaultCommentButtonWidth;
         comment.height = kDefaultCommentButtonHeight;
     }
@@ -183,7 +182,7 @@ void CommentKey::syncOverlayButtons() {
     unregisterOverlayButtons();
     for (std::size_t i = 0; i < comments.size(); ++i) {
         const auto& comment = comments[i];
-        if (!comment.enabled || !comment.screen)
+        if (!comment.enabled)
             continue;
 
         const std::string fallback = "Comment " + std::to_string(i + 1);
@@ -221,7 +220,6 @@ void CommentKey::addComment(std::string text, int keyCode) {
         slot->text = std::move(text);
         slot->keyCode = keyCode;
         slot->enabled = true;
-        slot->screen = true;
         normalizeComments();
     }
     syncOverlayButtons();
@@ -331,16 +329,11 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
                 }
 
                 comment.enabled = true;
-                // Enabled slots default to showing their on-screen button unless
-                // the stored config says otherwise.
-                comment.screen = true;
 
                 if (j.contains(prefix + "Text") && j[prefix + "Text"].is_string())
                     comment.text = j[prefix + "Text"].get<std::string>();
                 if (j.contains(prefix + "Keybind") && j[prefix + "Keybind"].is_number())
                     comment.keyCode = j[prefix + "Keybind"].get<int>();
-                if (j.contains(prefix + "Screen") && j[prefix + "Screen"].is_boolean())
-                    comment.screen = j[prefix + "Screen"].get<bool>();
                 if (j.contains(prefix + "Width") && j[prefix + "Width"].is_number())
                     comment.width = j[prefix + "Width"].get<float>();
                 if (j.contains(prefix + "Height") && j[prefix + "Height"].is_number())
@@ -362,13 +355,10 @@ void CommentKey::loadConfig(const nlohmann::json& j) {
                     }
                 }
             } else {
-                // Migrate configs written before the on-screen button settings.
-                // Such comments used to have an always-visible touch button, so
-                // keep it on screen.
+                // Migrate configs written before the fixed comment-slot settings.
                 const bool wasEnabled = j.value(legacyPrefix + "_enabled", false);
                 if (wasEnabled) {
                     comment.enabled = true;
-                    comment.screen = true;
                     comment.text = j.value(legacyPrefix + "_text", std::string());
                     if (j.contains(legacyPrefix + "_keybind") &&
                         j[legacyPrefix + "_keybind"].is_number())
@@ -416,7 +406,6 @@ void CommentKey::saveConfig(nlohmann::json& j) {
         if (comment.enabled) {
             j[prefix + "Text"] = comment.text;
             j[prefix + "Keybind"] = comment.keyCode;
-            j[prefix + "Screen"] = comment.screen;
             j[prefix + "Width"] = comment.width;
             j[prefix + "Height"] = comment.height;
             char textColor[10];
@@ -426,7 +415,6 @@ void CommentKey::saveConfig(nlohmann::json& j) {
         } else {
             j[prefix + "Text"] = "";
             j[prefix + "Keybind"] = 0;
-            j[prefix + "Screen"] = false;
             j[prefix + "Width"] = kDefaultCommentButtonWidth;
             j[prefix + "Height"] = kDefaultCommentButtonHeight;
             j[prefix + "TextColor"] = "#373737";

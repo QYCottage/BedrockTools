@@ -140,7 +140,6 @@ void CommandHotkeyModule::applyDefaultBindings() {
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         m_commands[i] = Binding{};
         m_commands[i].enabled = true;
-        m_commands[i].screen = true;
         // Match the square Zoom button by default. Width and Height remain
         // per-command controls for users who want a custom button shape.
         m_commands[i].width = kDefaultCommandButtonWidth;
@@ -170,7 +169,7 @@ void CommandHotkeyModule::syncOverlayButtons() {
     unregisterOverlayButtons();
     for (std::size_t i = 0; i < MaxCommands; ++i) {
         const auto& binding = m_commands[i];
-        if (!binding.enabled || !binding.screen)
+        if (!binding.enabled)
             continue;
 
         const std::string label = launcherLabel(defaultLabel(binding, i));
@@ -296,7 +295,6 @@ void CommandHotkeyModule::loadConfig(const nlohmann::json& j) {
         b.enabled = true;
         if (j.contains(p + "Command")) b.command = j[p + "Command"].get<std::string>();
         if (j.contains(p + "Keybind")) b.key = j[p + "Keybind"].get<int>();
-        if (j.contains(p + "Screen")) b.screen = j[p + "Screen"].get<bool>();
         if (j.contains(p + "Width")) b.width = j[p + "Width"].get<float>();
         if (j.contains(p + "Height")) b.height = j[p + "Height"].get<float>();
         if (!legacyStyle && j.contains(p + "TextColor")) {
@@ -347,7 +345,6 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
         if (enabled) {
             j[p + "Command"] = b.command;
             j[p + "Keybind"] = b.key;
-            j[p + "Screen"] = b.screen;
             j[p + "Width"] = b.width;
             j[p + "Height"] = b.height;
             char commandTextColor[10];
@@ -359,7 +356,6 @@ void CommandHotkeyModule::saveConfig(nlohmann::json& j) {
             // immediately when the slot is enabled.
             j[p + "Command"] = "";
             j[p + "Keybind"] = 0;
-            j[p + "Screen"] = false;
             j[p + "Width"] = kDefaultCommandButtonWidth;
             j[p + "Height"] = kDefaultCommandButtonHeight;
             j[p + "TextColor"] = "#373737";

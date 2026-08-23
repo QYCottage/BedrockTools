@@ -19,8 +19,6 @@ public:
         std::string text;
         int keyCode{0};
         bool enabled{false};
-        // Each comment can show or hide its launcher-managed on-screen button.
-        bool screen{false};
         float width{110.0f};
         float height{40.0f};
         std::uint32_t textColor{0x373737};
