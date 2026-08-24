@@ -37,6 +37,16 @@ Images that are not exactly 64x32 are scaled onto the cape's outer back face (`x
 
 The change is fully client-side and visual only; it does not affect servers, accounts, or other players. Persona skins are not affected (capes are persona pieces there).
 
+## Cape Physics (Minecraft Bedrock 1.26.x)
+
+The release build also produces **`BedrockTools-Cape-Physics.mcpack`**. Import it into Minecraft and enable it in **Settings → Global Resources**, above resource packs which change the player or cape model. It replaces only the vanilla `geometry.cape` mesh and `animation.player.cape` animation with a 24-segment, movement-reactive cape. This works with both official capes and capes supplied by **Custom Capes**; it remains client-side.
+
+For a local development build, generate the pack directly with:
+
+```sh
+python3 scripts/generate_cape_physics_pack.py --mcpack BedrockTools-Cape-Physics.mcpack
+```
+
 ## System Requirements
 
 - Android 9 or newer
