@@ -1,8 +1,8 @@
 // Unit tests for the Custom Capes module's pure helpers (folder scanning,
 // the launcher "radio" value format, and the cape layout/resampling —
 // including the back-face-only design placement, the flat lining color on
-// the inner front face, and the edge strips that give the cape its
-// thickness).
+// the inner front face, the edge strips that give the cape its thickness,
+// and the tapered Elytra UV fallback generated from the same artwork).
 //
 // Build and run standalone (no game required):
 //     g++ -std=c++20 -I src tests/customcapes_test.cpp -o /tmp/customcapes_test
@@ -148,12 +148,47 @@ int main() {
     // --- resampling ---------------------------------------------------------
     std::printf("cape resampling\n");
     {
-        // identity: an exact 64x32 input is a complete cape canvas and stays
-        // byte-identical (full manual control over every face is preserved).
+        // Identity for a complete manually-authored canvas that already has
+        // Elytra pixels: every byte and every custom wing shape is preserved.
         std::vector<std::uint8_t> src(cc::kCapeWidth * cc::kCapeHeight * 4u);
         for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::uint8_t>(i % 251);
         const std::vector<std::uint8_t> out = cc::resampleToCape(src.data(), cc::kCapeWidth, cc::kCapeHeight);
-        check(out == src, "64x32 input resamples to itself");
+        check(out == src, "64x32 input with authored Elytra pixels stays byte-identical");
+    }
+    {
+        // A traditional 64x32 cape with an empty right-hand/Elytra area gets
+        // a generated wing fallback, while its authored cape face stays put.
+        std::vector<std::uint8_t> src(cc::kCapeWidth * cc::kCapeHeight * 4u, 0);
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+                const std::size_t i =
+                    (static_cast<std::size_t>(cc::kCapeBackY + y) * cc::kCapeWidth +
+                     cc::kCapeBackX + x) * 4u;
+                src[i + 0] = 20;
+                src[i + 1] = 180;
+                src[i + 2] = 60;
+                src[i + 3] = 255;
+            }
+        }
+        check(!cc::hasElytraArtwork(src), "transparent Elytra UV is detected as empty");
+        const std::vector<std::uint8_t> out =
+            cc::resampleToCape(src.data(), cc::kCapeWidth, cc::kCapeHeight);
+        check(cc::hasElytraArtwork(out), "empty 64x32 Elytra UV receives generated artwork");
+        const std::size_t wing =
+            (static_cast<std::size_t>(11) * cc::kCapeWidth + cc::kElytraBackX) * 4u;
+        check(out[wing] == 20 && out[wing + 1] == 180 &&
+                  out[wing + 2] == 60 && out[wing + 3] == 255,
+              "generated Elytra uses the existing cape-face colors");
+        bool capeUnchanged = true;
+        for (std::uint32_t y = 0; y < cc::kCapeBackHeight; ++y) {
+            for (std::uint32_t x = 0; x < cc::kCapeBackWidth; ++x) {
+                const std::size_t i =
+                    (static_cast<std::size_t>(cc::kCapeBackY + y) * cc::kCapeWidth +
+                     cc::kCapeBackX + x) * 4u;
+                for (int c = 0; c < 4; ++c) capeUnchanged &= out[i + c] == src[i + c];
+            }
+        }
+        check(capeUnchanged, "authored cape face remains intact while adding Elytra artwork");
     }
     {
         // 2x1 red|blue source: the design lands on the OUTER BACK face only,
@@ -230,7 +265,34 @@ int main() {
         }
         check(edgesFromImage, "top/bottom/side strips carry the design edge colors");
 
-        // everything outside the cape layout stays transparent
+        // Elytra: the visible large wing face receives the same red|blue
+        // artwork, clipped to the vanilla tapered silhouette. Both in-game
+        // wings share/mirror this one UV area.
+        const std::size_t wingRed =
+            (static_cast<std::size_t>(11) * cc::kCapeWidth + cc::kElytraBackX) * 4u;
+        const std::size_t wingBlue =
+            (static_cast<std::size_t>(11) * cc::kCapeWidth +
+             cc::kElytraBackX + cc::kElytraFaceWidth - 1) * 4u;
+        check(out[wingRed] == 255 && out[wingRed + 1] == 0 &&
+                  out[wingRed + 2] == 0 && out[wingRed + 3] == 255 &&
+                  out[wingBlue] == 0 && out[wingBlue + 1] == 0 &&
+                  out[wingBlue + 2] == 255 && out[wingBlue + 3] == 255,
+              "cape design is mapped across the visible Elytra face");
+
+        bool exactWingMask = true;
+        for (std::uint32_t y = 0; y < cc::kElytraUvHeight; ++y) {
+            for (std::uint32_t x = cc::kElytraUvX;
+                 x < cc::kElytraUvX + cc::kElytraUvWidth; ++x) {
+                if (!cc::isElytraUvPixel(x, y)) continue;
+                const std::size_t i =
+                    (static_cast<std::size_t>(y) * cc::kCapeWidth + x) * 4u;
+                exactWingMask &= (out[i + 3] != 0) == cc::isElytraMaskPixel(x, y);
+            }
+        }
+        check(exactWingMask, "Elytra artwork keeps the vanilla tapered alpha silhouette");
+        check(cc::hasElytraArtwork(out), "generated cape reports visible Elytra artwork");
+
+        // everything outside the cape and generated Elytra layouts stays transparent
         bool outsideTransparent = true;
         for (std::uint32_t y = 0; y < cc::kCapeHeight; ++y) {
             for (std::uint32_t x = 0; x < cc::kCapeWidth; ++x) {
@@ -243,14 +305,15 @@ int main() {
                      x <= cc::kCapeSideRightX) ||
                     (y >= cc::kCapeFrontY && y < cc::kCapeFrontY + cc::kCapeBackHeight &&
                      x >= cc::kCapeSideRightX &&
-                     x < cc::kCapeFrontX + cc::kCapeBackWidth);
+                     x < cc::kCapeFrontX + cc::kCapeBackWidth) ||
+                    cc::isElytraMaskPixel(x, y);
                 if (used) continue;
                 const std::size_t i = (static_cast<std::size_t>(y) * cc::kCapeWidth + x) * 4u;
                 outsideTransparent &= out[i] == 0 && out[i + 1] == 0 &&
                                       out[i + 2] == 0 && out[i + 3] == 0;
             }
         }
-        check(outsideTransparent, "canvas outside the cape layout stays transparent");
+        check(outsideTransparent, "canvas outside the cape/Elytra layouts stays transparent");
     }
     {
         // exact edge continuation: a 10x16 source maps 1:1 onto the back
