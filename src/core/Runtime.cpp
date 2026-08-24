@@ -94,6 +94,13 @@ void Runtime::wireEvents() {
         bus().publish(event);
         return event.cancelled();
     });
+    pl::input::registerKeyCallback([](const pl::input::KeyEvent& input) {
+        return ModuleRegistry::get().onKeyEvent(input.keyCode, input.isKeyDown);
+    });
+    pl::input::registerTouchCallback([](const pl::input::TouchEvent& input) {
+        if (input.action != 0 && input.action != 1 && input.action != 3) return false;
+        return ModuleRegistry::get().onTouchEvent(input.x, input.y, input.action == 0);
+    });
 }
 
 bool Runtime::install() {
