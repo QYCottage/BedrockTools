@@ -56,12 +56,4 @@ target("BedrockTools")
         table.insert(args, "--output")
         table.insert(args, path.join(target:targetdir(), "BedrockTools.levipack"))
         os.vrunv(python.program, args)
-
-        -- Cape Physics is a Minecraft resource pack, not a native-library
-        -- asset. Build it alongside the levipack so releases contain the
-        -- separately importable .mcpack required for the animated geometry.
-        local capeArgs = {path.join(os.projectdir(), "scripts", "generate_cape_physics_pack.py"),
-                          "--output", path.join(target:targetdir(), "cape-physics-source"),
-                          "--mcpack", path.join(target:targetdir(), "BedrockTools-Cape-Physics.mcpack")}
-        os.vrunv(python.program, capeArgs)
     end)
