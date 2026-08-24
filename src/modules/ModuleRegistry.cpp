@@ -12,6 +12,7 @@
 #include "hud/playercoords.hpp"
 #include "hud/compass.hpp"
 #include "player/timechanger.hpp"
+#include "player/autosprint.hpp"
 #include "player/weatherchanger.hpp"
 #include "player/nick.hpp"
 #include "misc/nodisconnect.hpp"
@@ -20,7 +21,6 @@
 #include "misc/forceglobalrp.hpp"
 #include "misc/cpslimiter.hpp"
 #include "hud/speeddisplay.hpp"
-#include "hud/effectdisplay.hpp"
 #include "hud/debugmenu.hpp"
 #include "visual/viewmodel.hpp"
 #include "hud/keystrokes.hpp"
@@ -28,7 +28,6 @@
 #include "hud/tablist.hpp"
 #include "hud/combocounter.hpp"
 #include "visual/chunkborder.hpp"
-#include "visual/blockoutline.hpp"
 #include "visual/hitbox.hpp"
 #include "visual/zoom.hpp"
 #include "visual/breadcrumbs.hpp"
@@ -36,13 +35,9 @@
 #include "visual/shulkerpreview.hpp"
 #include "visual/connectedglass.hpp"
 #include "player/skinstealer.hpp"
-#include "player/customcapes.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
-#include "misc/commentkey.hpp"
-#include "misc/commandhotkey.hpp"
-#include "hud/crosshair.hpp"
-
+#include "visual/swingmodifier.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
     static ModuleRegistry registry;
@@ -74,18 +69,6 @@ bool ModuleRegistry::onMouseEvent(int button, bool isDown) {
     return consumed;
 }
 
-bool ModuleRegistry::onKeyEvent(int key, bool isDown) {
-    bool consumed = false;
-    for (auto* module : mView) if (module->onKeyEvent(key, isDown)) consumed = true;
-    return consumed;
-}
-
-bool ModuleRegistry::onTouchEvent(float x, float y, bool isDown) {
-    bool consumed = false;
-    for (auto* module : mView) if (module->onTouchEvent(x, y, isDown)) consumed = true;
-    return consumed;
-}
-
 void ModuleRegistry::setKeybindBlocked(bool blocked) {
     mKeybindBlocked = blocked;
 }
@@ -110,6 +93,7 @@ void registerAllModules() {
     registry.emplace<PlayerCoordsModule>();
     registry.emplace<CompassModule>();
     registry.emplace<TimeChangerModule>();
+    registry.emplace<AutoSprintModule>();
     registry.emplace<WeatherChangerModule>();
     registry.emplace<NickModule>();
     registry.emplace<NoDisconnectModule>();
@@ -117,19 +101,17 @@ void registerAllModules() {
     registry.emplace<NoTouchBorderModule>();
     registry.emplace<CpsLimiterModule>();
     registry.emplace<SpeedDisplayModule>();
-    registry.emplace<EffectDisplayModule>();
     registry.emplace<DebugMenuModule>();
     registry.emplace<ViewModelModule>();
+    registry.emplace<SwingModifierModule>();
     registry.emplace<KeystrokesModule>();
     registry.emplace<ThirdPersonNametagModule>();
     registry.emplace<TablistModule>();
     registry.emplace<ChunkBorderModule>();
-    registry.emplace<BlockOutlineModule>();
     registry.emplace<HitboxModule>();
     registry.emplace<ZoomModule>();
     registry.emplace<BreadcrumbsModule>();
     registry.emplace<SkinStealerModule>();
-    registry.emplace<CustomCapesModule>();
     registry.emplace<AutoGG>();
     registry.emplace<AutoReQ>();
     registry.emplace<FPSUnlockerModule>();
@@ -137,7 +119,4 @@ void registerAllModules() {
     registry.emplace<ShulkerPreviewModule>();
     registry.emplace<ConnectedGlassModule>();
     registry.emplace<ForceGlobalRPModule>();
-    registry.emplace<CommentKey>();
-    registry.emplace<CommandHotkeyModule>();
-    registry.emplace<CrosshairModule>();
 }

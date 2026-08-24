@@ -42,8 +42,6 @@ public:
     void initialize();
     void onFrame();
     bool onMouseEvent(int button, bool isDown);
-    bool onKeyEvent(int key, bool isDown);
-    bool onTouchEvent(float x, float y, bool isDown);
     void setKeybindBlocked(bool blocked);
     bool keybindBlocked() const;
 

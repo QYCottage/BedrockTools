@@ -1,5 +1,4 @@
 #include "ModuleMenu.hpp"
-#include "ExternalButtonRefresh.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
@@ -9,39 +8,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-// Child settings are normally attached to a toggle whose key is a prefix of
-// theirs (e.g. "crosshairIndicator" owns "crosshairIndicatorColor"). A few
-// settings are named differently but are still owned by a toggle, so they are
-// mapped explicitly here. The parent must be a toggle that exists in the same
-// module for the dependency to be applied.
-struct ExplicitDependency {
-    const char* child;
-    const char* parent;
-};
-
-static const ExplicitDependency kExplicitDependencies[] = {
-    // Hitbox module: the indicator colors only matter while the hitbox
-    // indicator itself is enabled.
-    {"indicatorDefaultColor", "hitboxIndicator"},
-    {"indicatorActiveColor", "hitboxIndicator"},
-
-    // Effect Display: how the level is rendered only matters while the level
-    // is shown at all.
-    {"m_romanLevels", "m_showLevel"},
-    {"m_hideLevelOne", "m_showLevel"},
-
-    // Effect Display: the potion-icon size only matters while the icons are
-    // shown at all.
-    {"m_iconScale", "m_showIcons"},
-};
-
-static const char* explicitParentFor(const std::string& key) {
-    for (const auto& dep : kExplicitDependencies) {
-        if (key == dep.child) return dep.parent;
-    }
-    return nullptr;
-}
 
 static void onModuleToggle(std::string_view module_id, bool enabled) {
     auto* mod = ModuleRegistry::get().find(module_id);
@@ -66,40 +32,31 @@ static void onModuleConfigChanged(std::string_view module_id, std::string_view k
 
     std::string safeValue(value);
     std::string safeKey(key);
-    try {
-        if (j.contains(safeKey)) {
-            if (j[safeKey].is_boolean()) {
-                if (safeValue == "true") j[safeKey] = true;
-                else if (safeValue == "false") j[safeKey] = false;
-            } else if (j[safeKey].is_number_integer()) {
-                char* end = nullptr;
-                const long val = std::strtol(safeValue.c_str(), &end, 10);
-                if (end != safeValue.c_str() && *end == '\0') j[safeKey] = val;
-            } else if (j[safeKey].is_number_float()) {
-                char* end = nullptr;
-                const float val = std::strtof(safeValue.c_str(), &end);
-                if (end != safeValue.c_str() && *end == '\0') j[safeKey] = val;
+    if (!safeValue.empty()) {
+        try {
+            if (j.contains(safeKey)) {
+                if (j[safeKey].is_boolean()) {
+                    if (safeValue == "true") j[safeKey] = true;
+                    else if (safeValue == "false") j[safeKey] = false;
+                } else if (j[safeKey].is_number_integer()) {
+                    char* end;
+                    int val = std::strtol(safeValue.c_str(), &end, 10);
+                    if (end != safeValue.c_str()) j[safeKey] = val;
+                } else if (j[safeKey].is_number_float()) {
+                    char* end;
+                    float val = std::strtof(safeValue.c_str(), &end);
+                    if (end != safeValue.c_str()) j[safeKey] = val;
+                } else {
+                    j[safeKey] = safeValue;
+                }
             } else {
-                // Text fields need to be allowed to become empty as well;
-                // otherwise deleting the last character leaves the previous
-                // value in the module and in its overlay button.
                 j[safeKey] = safeValue;
             }
-        } else {
+        } catch (...) {
             j[safeKey] = safeValue;
         }
-    } catch (...) {
-        j[safeKey] = safeValue;
     }
     mod->loadConfig(j);
-
-    if (module_id == "bedrocktools.CommentKey" ||
-        module_id == "bedrocktools.Command Hotkey") {
-        // Refresh the Java view in place. It replaces the button definition
-        // and reapplies its label without hiding the overlay.
-        bedrocktools::launcher::refreshExternalButtonsForModule(module_id);
-    }
-
     bedrocktools::config::ConfigManager::get().save();
 }
 
@@ -155,11 +112,6 @@ void registerModulesWithLauncher() {
                 } else if (isupper(sourceKey[i])) {
                     displayName += ' ';
                     displayName += sourceKey[i];
-                } else if (isdigit(sourceKey[i]) && i > 0 && !isdigit(sourceKey[i - 1])) {
-                    // Split before a digit so keys like "block3d" render as
-                    // "Block 3d" instead of "Block3d".
-                    displayName += ' ';
-                    displayName += sourceKey[i];
                 } else {
                     displayName += sourceKey[i];
                 }
@@ -195,12 +147,6 @@ void registerModulesWithLauncher() {
                         maxVal = 30;
                     } else if (kLower.find("time") != std::string::npos) {
                         maxVal = 24000;
-                    } else if (kLower.find("red") != std::string::npos ||
-                               kLower.find("green") != std::string::npos ||
-                               kLower.find("blue") != std::string::npos) {
-                        // Legacy RGB channel sliders (0-255); modules now use
-                        // a single "#RRGGBB" color picker instead.
-                        maxVal = 255;
                     }
 
                     entry.min_value = std::to_string(minVal);
@@ -220,25 +166,11 @@ void registerModulesWithLauncher() {
                     kLower.find("color") != std::string::npos ||
                     kLower.find("alpha") != std::string::npos) {
                     maxVal = 1.0f;
-                } else if (kLower.find("iconscale") != std::string::npos) {
-                    // Potion-icon size multiplier (Effect Display); the module
-                    // clamps to the same range at render time.
-                    minVal = 0.25f;
-                    maxVal = 4.0f;
-                } else if (kLower.find("buttonscale") != std::string::npos) {
-                    // Uniform size multiplier for the Zoom-style external
-                    // command buttons.
-                    minVal = 0.5f;
-                    maxVal = 2.0f;
                 } else if (kLower.find("scale") != std::string::npos) {
                     minVal = 0.1f;
                     maxVal = 5.0f;
                 } else if (kLower == "borderwidth") {
                     maxVal = 4.0f;
-                } else if (kLower.find("borderwidth") != std::string::npos) {
-                    // Outline thickness in pixels (e.g. the launcher-style
-                    // border around the Command Hotkey buttons).
-                    maxVal = 8.0f;
                 } else if (kLower.find("width") != std::string::npos) {
                     maxVal = 1000.0f;
                 } else if (kLower.find("position") != std::string::npos ||
@@ -255,15 +187,6 @@ void registerModulesWithLauncher() {
                 } else if (kLower.find("speed") != std::string::npos || kLower.find("strength") != std::string::npos) {
                     minVal = 0.05f;
                     maxVal = 1.0f;
-                } else if (kLower.find("sensitivity") != std::string::npos || kLower.find("scroll") != std::string::npos) {
-                    // Scroll-drive zoom: FOV change per scroll notch.
-                    minVal = 0.05f;
-                    maxVal = 10.0f;
-                } else if (kLower == "linethickness") {
-                    // 1.0 == classic hairline box, higher values widen the
-                    // hitbox lines (Hitbox module).
-                    minVal = 1.0f;
-                    maxVal = 10.0f;
                 } else if (kLower.find("thick") != std::string::npos) {
                     maxVal = 20.0f;
                 }
@@ -292,29 +215,14 @@ void registerModulesWithLauncher() {
 
                 for (auto& entry : configs) {
             std::string k = entry.key;
-            // A toggle can still be owned by another toggle, but only through
-            // an explicit mapping: the name-prefix heuristic below would
-            // otherwise nest unrelated toggles under each other.
-            const char* explicitParent = explicitParentFor(k);
-            if (entry.type != pl::modmenu::ConfigType::Toggle || explicitParent != nullptr) {
+            if (entry.type != pl::modmenu::ConfigType::Toggle) {
                 std::string bestParent = "";
-                if (explicitParent) {
-                    for (const auto& parentCandidate : configs) {
-                        if (parentCandidate.type == pl::modmenu::ConfigType::Toggle &&
-                            parentCandidate.key == explicitParent) {
-                            bestParent = parentCandidate.key;
-                            break;
-                        }
-                    }
-                }
-                if (bestParent.empty() && entry.type != pl::modmenu::ConfigType::Toggle) {
-                    for (const auto& parentCandidate : configs) {
-                        if (parentCandidate.type == pl::modmenu::ConfigType::Toggle) {
-                            std::string pKey = parentCandidate.key;
-                            if (k.length() > pKey.length() && k.compare(0, pKey.length(), pKey) == 0) {
-                                if (pKey.length() > bestParent.length()) {
-                                    bestParent = pKey;
-                                }
+                for (const auto& parentCandidate : configs) {
+                    if (parentCandidate.type == pl::modmenu::ConfigType::Toggle) {
+                        std::string pKey = parentCandidate.key;
+                        if (k.length() > pKey.length() && k.compare(0, pKey.length(), pKey) == 0) {
+                            if (pKey.length() > bestParent.length()) {
+                                bestParent = pKey;
                             }
                         }
                     }

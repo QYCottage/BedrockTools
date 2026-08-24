@@ -15,6 +15,7 @@ typedef void (*Tessellator_color_t)(void* tessellator, float r, float g, float b
 typedef void (*Tessellator_vertex_t)(void* tessellator, float x, float y, float z);
 typedef void (*MeshHelpers_renderMeshImmediately_t)(void* screenContext, void* tessellator, void* material, char* pad);
 
+typedef void* (*HitResult_getEntity_t)(void* hitResult);
 typedef bool (*Actor_isPlayer_t)(void* actor);
 typedef bool (*Actor_isInvisible_t)(void* actor);
 struct DistanceSortedActor {
@@ -30,14 +31,6 @@ struct ActorVec {
 };
 
 typedef ActorVec (*Actor_fetchNearbyActorsSorted_t)(void* actor, void* extent, int actorType);
-
-// BlockSource::isSolidBlockingBlock(BlockPos const&) -- true for full opaque
-// blocks that block movement and sight (stone, dirt, planks...), false for
-// transparent or partial blocks (glass, water, leaves, fences, slabs...).
-struct BlockPosI {
-    int x, y, z;
-};
-typedef bool (*BlockSource_isSolidBlockingBlock_t)(void* region, const BlockPosI& pos);
 
 struct HashedString {
     uint64_t mStrHash;
@@ -129,18 +122,13 @@ static Tessellator_color_t                s_tessColor = nullptr;
 static Tessellator_vertex_t               s_tessVertex = nullptr;
 static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 
+static HitResult_getEntity_t              s_hitResultGetEntity = nullptr;
 static Actor_isPlayer_t                   s_actorIsPlayer = nullptr;
 static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
-static BlockSource_isSolidBlockingBlock_t s_isSolidBlockingBlock = nullptr;
 
 static MaterialPtr s_matSelection;
-static MaterialPtr s_matFill;
 static uintptr_t    s_renderMaterialGroup = 0;
-
-static uint32_t forceOpaqueColor(uint32_t color) {
-    return color | 0xFF000000u;
-}
 
 static void (*_renderLevel_orig)(void* _this, void* screenContext, void* a3);
 
@@ -151,8 +139,6 @@ struct AABB {
     bedrocktools::sdk::Vec3 min;
     bedrocktools::sdk::Vec3 max;
 };
-
-static bool hasCategory(void* actor, uint32_t categoryBit);
 
 static void s_hitboxTickCallback(void* _this) {
     if (!g_hitboxMod || !g_hitboxMod->enabled) return;
@@ -176,142 +162,10 @@ static MaterialPtr getMaterial(const char* name) {
 }
 
 static void ensureMaterials() {
+    if (s_matSelection) return;
     if (!s_renderMaterialGroup) return;
 
     if (!s_matSelection) s_matSelection = getMaterial("selection_box");
-
-    // Thick geometry is drawn as filled quads. The selection overlay
-    // material is built for a translucent block highlight, so using it
-    // makes the hitbox color look washed-out as soon as line thickness
-    // goes above the hairline. Prefer a vertex-color fill instead.
-    if (!s_matFill) {
-        static const char* kFillNames[] = {
-            "ui_fill_color",
-            "ui_textured_and_glcolor",
-            "debug_filled_box",
-            "selection_box"
-        };
-        for (const char* name : kFillNames) {
-            s_matFill = getMaterial(name);
-            if (s_matFill) break;
-        }
-    }
-}
-
-static bool rayHitsAABB(float ox, float oy, float oz,
-                        float dx, float dy, float dz,
-                        const AABB& aabb,
-                        float maxDist,
-                        float& outDist) {
-    float tmin = 0.0f;
-    float tmax = maxDist;
-
-    auto slab = [&](float origin, float dir, float mn, float mx) -> bool {
-        if (fabsf(dir) < 1e-8f) {
-            return origin >= mn && origin <= mx;
-        }
-        float inv = 1.0f / dir;
-        float t1 = (mn - origin) * inv;
-        float t2 = (mx - origin) * inv;
-        if (t1 > t2) {
-            float tmp = t1;
-            t1 = t2;
-            t2 = tmp;
-        }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
-        return tmin <= tmax;
-    };
-
-    if (!slab(ox, dx, aabb.min.x, aabb.max.x)) return false;
-    if (!slab(oy, dy, aabb.min.y, aabb.max.y)) return false;
-    if (!slab(oz, dz, aabb.min.z, aabb.max.z)) return false;
-    if (tmax < 0.0f) return false;
-    outDist = tmin > 0.0f ? tmin : 0.0f;
-    return true;
-}
-
-// Amanatides & Woo voxel traversal: walks every voxel the segment
-// camera -> target passes through and returns true as soon as a solid
-// blocking block is found. The camera's own voxel is never tested, so
-// the check keeps working when the camera clips into geometry.
-static bool rayHitsSolid(void* region,
-                         float ox, float oy, float oz,
-                         float tx, float ty, float tz) {
-    if (!region || !s_isSolidBlockingBlock) return false;
-
-    const float dx = tx - ox;
-    const float dy = ty - oy;
-    const float dz = tz - oz;
-    const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (dist < 0.01f) return false;
-
-    int x = (int)floorf(ox);
-    int y = (int)floorf(oy);
-    int z = (int)floorf(oz);
-    const int ex = (int)floorf(tx);
-    const int ey = (int)floorf(ty);
-    const int ez = (int)floorf(tz);
-    if (x == ex && y == ey && z == ez) return false;
-
-    int stepX, stepY, stepZ;
-    float tMaxX, tMaxY, tMaxZ;
-    float tDeltaX, tDeltaY, tDeltaZ;
-    constexpr float kInf = 1e30f;
-
-    if (dx > 0.0f)      { stepX = 1;  tDeltaX = 1.0f / dx;      tMaxX = (x + 1 - ox) * tDeltaX; }
-    else if (dx < 0.0f) { stepX = -1; tDeltaX = -1.0f / dx;     tMaxX = (ox - x) * tDeltaX; }
-    else                { stepX = 0;  tDeltaX = kInf;           tMaxX = kInf; }
-
-    if (dy > 0.0f)      { stepY = 1;  tDeltaY = 1.0f / dy;      tMaxY = (y + 1 - oy) * tDeltaY; }
-    else if (dy < 0.0f) { stepY = -1; tDeltaY = -1.0f / dy;     tMaxY = (oy - y) * tDeltaY; }
-    else                { stepY = 0;  tDeltaY = kInf;           tMaxY = kInf; }
-
-    if (dz > 0.0f)      { stepZ = 1;  tDeltaZ = 1.0f / dz;      tMaxZ = (z + 1 - oz) * tDeltaZ; }
-    else if (dz < 0.0f) { stepZ = -1; tDeltaZ = -1.0f / dz;     tMaxZ = (oz - z) * tDeltaZ; }
-    else                { stepZ = 0;  tDeltaZ = kInf;           tMaxZ = kInf; }
-
-    while (true) {
-        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-            x += stepX;
-            if (tMaxX > dist) break;
-            tMaxX += tDeltaX;
-        } else if (tMaxY < tMaxZ) {
-            y += stepY;
-            if (tMaxY > dist) break;
-            tMaxY += tDeltaY;
-        } else {
-            z += stepZ;
-            if (tMaxZ > dist) break;
-            tMaxZ += tDeltaZ;
-        }
-
-        // Reached the voxel holding the target point: the target itself is
-        // never treated as blocking (a mob hugging a wall stays visible).
-        if (x == ex && y == ey && z == ez) break;
-
-        BlockPosI bp{x, y, z};
-        if (s_isSolidBlockingBlock(region, bp)) return true;
-    }
-
-    return false;
-}
-
-// True when every sampled point of the actor's box is hidden behind solid
-// blocks. Samples the box center and the top-center, so a tall mob whose
-// head pokes over a low wall stays visible while a fully hidden one is culled.
-static bool isOccluded(void* region,
-                       float camX, float camY, float camZ,
-                       const AABB& aabb) {
-    if (!region || !s_isSolidBlockingBlock) return false;
-
-    const float cx = (aabb.min.x + aabb.max.x) * 0.5f;
-    const float cz = (aabb.min.z + aabb.max.z) * 0.5f;
-    const float cy = (aabb.min.y + aabb.max.y) * 0.5f;
-
-    if (!rayHitsSolid(region, camX, camY, camZ, cx, cy, cz)) return false;
-    if (!rayHitsSolid(region, camX, camY, camZ, cx, aabb.max.y, cz)) return false;
-    return true;
 }
 
 static AABB getActorAABB(void* actor) {
@@ -368,26 +222,10 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     float camY = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 4);
     float camZ = *(float*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mCamPos + 8);
 
-    // Wall occlusion: resolve the dimension's BlockSource once per frame so
-    // hitboxes behind solid blocks are always culled, with no menu setting.
-    void* region = nullptr;
-    if (s_isSolidBlockingBlock) {
-        uintptr_t dimension = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mDimension);
-        if (dimension >= 0x1000) {
-            uintptr_t blockSource = *(uintptr_t*)(dimension + bedrocktools::sdk::offsets::Dimension::mBlockSource);
-            if (blockSource >= 0x1000) region = (void*)blockSource;
-        }
-    }
-
     ensureMaterials();
 
-    void* overlayMaterial = (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
-    void* matInner = s_matSelection ? (void*)&s_matSelection : overlayMaterial;
-
-    // Prefer an opaque vertex-color fill so raising line thickness keeps
-    // the chosen RGB solid instead of inheriting the overlay's alpha.
-    void* matFill = s_matFill ? (void*)&s_matFill : matInner;
-    if (!matFill) matFill = overlayMaterial;
+    void* matInner = s_matSelection ? (void*)&s_matSelection
+                                    : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
 
     uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
     if (!colorHolderPtr || colorHolderPtr < 0x1000) return;
@@ -399,95 +237,13 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     colorHolder[2] = 1.0f;
     colorHolder[3] = 1.0f;
 
-    // Menu thickness slider -> world-space half width. 1.0 (or lower) keeps
-    // the classic hairline box; anything above is drawn as real geometry,
-    // because GL line width is ignored by nearly every mobile GLES driver.
-    float thicknessSetting = g_hitboxMod->lineThickness;
-    if (thicknessSetting < 1.0f) thicknessSetting = 1.0f;
-    if (thicknessSetting > 20.0f) thicknessSetting = 20.0f;
-    const bool thickLines = thicknessSetting > 1.05f;
-    const float halfWidth = thicknessSetting * 0.01f * 0.5f;
-
     auto drawLines = [&](const std::vector<std::pair<bedrocktools::sdk::Vec3, bedrocktools::sdk::Vec3>>& lines, uint32_t color) {
         if (lines.empty()) return;
         float r = ((color >> 16) & 0xFF) / 255.0f;
         float g = ((color >>  8) & 0xFF) / 255.0f;
         float b = ((color      ) & 0xFF) / 255.0f;
-        // Hitbox lines stay fully opaque at every thickness. The menu
-        // color picker often stores #RRGGBB (alpha 0) or a low alpha,
-        // which used to make thicker geometry look transparent.
-        const float a = 1.0f;
+        float a = ((color >> 24) & 0xFF) / 255.0f;
 
-        char pad[0x58];
-
-        // Thick pass: every segment becomes a camera-facing quad, so the
-        // apparent width follows the thickness setting from any angle.
-        if (thickLines) {
-            s_tessBegin(tessellator, nullptr, 1, static_cast<int>(lines.size() * 8), 0);
-            s_tessColor(tessellator, r, g, b, a);
-
-            for (const auto& line : lines) {
-                bedrocktools::sdk::Vec3 p1 = line.first;
-                bedrocktools::sdk::Vec3 p2 = line.second;
-                p1.x -= camX; p1.y -= camY; p1.z -= camZ;
-                p2.x -= camX; p2.y -= camY; p2.z -= camZ;
-
-                float dx = p2.x - p1.x;
-                float dy = p2.y - p1.y;
-                float dz = p2.z - p1.z;
-                float len = sqrtf(dx * dx + dy * dy + dz * dz);
-                if (len < 1e-5f) continue;
-                dx /= len; dy /= len; dz /= len;
-
-                // The camera sits at the origin of this relative space, so
-                // the vector to the segment midpoint is the view direction.
-                float mx = (p1.x + p2.x) * 0.5f;
-                float my = (p1.y + p2.y) * 0.5f;
-                float mz = (p1.z + p2.z) * 0.5f;
-
-                // side = dir x view, i.e. perpendicular to both the segment
-                // and the eye ray => the quad always faces the player.
-                float sx = dy * mz - dz * my;
-                float sy = dz * mx - dx * mz;
-                float sz = dx * my - dy * mx;
-                float sLen = sqrtf(sx * sx + sy * sy + sz * sz);
-                if (sLen < 1e-5f) {
-                    // Looking straight down the segment: pick any perpendicular.
-                    if (fabsf(dy) < 0.9f) { sx = -dz; sy = 0.0f; sz = dx; }
-                    else { sx = 1.0f; sy = 0.0f; sz = 0.0f; }
-                    sLen = sqrtf(sx * sx + sy * sy + sz * sz);
-                    if (sLen < 1e-5f) continue;
-                }
-                sx = sx / sLen * halfWidth;
-                sy = sy / sLen * halfWidth;
-                sz = sz / sLen * halfWidth;
-
-                // Overshoot both ends by half the width so corners stay solid.
-                float ex = dx * halfWidth;
-                float ey = dy * halfWidth;
-                float ez = dz * halfWidth;
-
-                bedrocktools::sdk::Vec3 quad[4] = {
-                    {p1.x - ex - sx, p1.y - ey - sy, p1.z - ez - sz},
-                    {p2.x + ex - sx, p2.y + ey - sy, p2.z + ez - sz},
-                    {p2.x + ex + sx, p2.y + ey + sy, p2.z + ez + sz},
-                    {p1.x - ex + sx, p1.y - ey + sy, p1.z - ez + sz}
-                };
-
-                // Emitted with both windings so back-face culling never
-                // eats a segment.
-                for (int i = 0; i < 4; ++i)
-                    s_tessVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
-                for (int i = 3; i >= 0; --i)
-                    s_tessVertex(tessellator, quad[i].x, quad[i].y, quad[i].z);
-            }
-
-            memset(pad, 0, sizeof(pad));
-            s_renderMesh(screenContext, tessellator, matFill, pad);
-        }
-
-        // Core hairline pass: keeps the edge crisp and visible even when the
-        // quads shrink below a pixel at long range.
         s_tessBegin(tessellator, nullptr, 4, static_cast<int>(lines.size() * 2), 0);
         s_tessColor(tessellator, r, g, b, a);
 
@@ -500,6 +256,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
             s_tessVertex(tessellator, p2.x, p2.y, p2.z);
         }
 
+        char pad[0x58];
         memset(pad, 0, sizeof(pad));
         s_renderMesh(screenContext, tessellator, matInner, pad);
     };
@@ -527,70 +284,30 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         drawLines(lines, color);
     };
 
+    void* selectedEntity = nullptr;
+    uintptr_t levelPtr = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mLevel);
+    if (levelPtr && s_hitResultGetEntity) {
+        uintptr_t hitResultWrapper = levelPtr + bedrocktools::sdk::offsets::Level::mHitResultWrapper;
+        void* hitResult = (void*)(hitResultWrapper + bedrocktools::sdk::offsets::HitResultWrapper::mHitResult);
+
+        int hitType = *(int*)((uintptr_t)hitResult + bedrocktools::sdk::offsets::HitResult::mType);
+        if (hitType == 1) {
+            selectedEntity = s_hitResultGetEntity(hitResult);
+        }
+    }
+
     bedrocktools::sdk::Vec3 localPos = g_playerPos;
     float dx = camX - localPos.x;
     float dy = camY - (localPos.y + 1.62f);
     float dz = camZ - localPos.z;
     bool isThirdPerson = (dx*dx + dy*dy + dz*dz) > 0.05f;
 
-    ActorVec actors{};
-    if (s_actorFetchNearby) {
-        constexpr float kActorFetchRadius = 30.0f;
-        bedrocktools::sdk::Vec3 extent = {kActorFetchRadius, kActorFetchRadius, kActorFetchRadius};
-        actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
-    }
-
-    void* selectedEntity = nullptr;
-    if (g_hitboxMod->hitboxIndicator && actors.begin && actors.end) {
-        bedrocktools::sdk::Vec2 lookRot = getActorRotation(g_localPlayerPtr);
-        static constexpr float kPi = 3.14159265f;
-        static constexpr float kDegToRad = kPi / 180.0f;
-        const float yawR = lookRot.y * kDegToRad;
-        const float pitchR = lookRot.x * kDegToRad;
-        const float lookX = -sinf(yawR) * cosf(pitchR);
-        const float lookY = -sinf(pitchR);
-        const float lookZ = cosf(yawR) * cosf(pitchR);
-
-        // Pick the nearest actor along the look ray. No reach limit is
-        // applied: any fetched entity the crosshair touches gets selected.
-        constexpr float kSelectionRayLength = 3.0f;
-
-        float bestDist = 1e9f;
-        for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
-            void* ent = it->mActor;
-            if (!ent || ent == g_localPlayerPtr) continue;
-            AABB aabb = getActorAABB(ent);
-            float hitDist = 0.0f;
-            if (!rayHitsAABB(camX, camY, camZ, lookX, lookY, lookZ, aabb, kSelectionRayLength, hitDist)) continue;
-            if (hitDist < bestDist) {
-                bestDist = hitDist;
-                selectedEntity = ent;
-            }
-        }
-    }
-
     auto renderActor = [&](void* ent) {
         AABB aabb = getActorAABB(ent);
         if (aabb.min.x == 0.f && aabb.min.y == 0.f && aabb.min.z == 0.f &&
             aabb.max.x == 0.f && aabb.max.y == 0.f && aabb.max.z == 0.f) return;
 
-        // Cull hitboxes that are fully hidden behind solid blocks instead of
-        // drawing them through walls. Skips the eye/look lines too, since
-        // they belong to the same box.
-        if (region && isOccluded(region, camX, camY, camZ, aabb)) return;
-
-        uint32_t boxColor = g_hitboxMod->hitboxColor;
-        if (g_hitboxMod->hitboxIndicator) {
-            // The indicator is active for the entity currently under the
-            // crosshair. Every other nearby entity keeps the default
-            // indicator color.
-            boxColor = g_hitboxMod->indicatorDefaultColor;
-            if (ent == selectedEntity) {
-                boxColor = g_hitboxMod->indicatorActiveColor;
-            }
-        }
-
-        drawBox(aabb, boxColor);
+        drawBox(aabb, g_hitboxMod->hitboxColor);
 
         if (g_hitboxMod->showEyeLine) {
             float minX = aabb.min.x;
@@ -639,23 +356,28 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         renderActor(g_localPlayerPtr);
     }
 
-    if (actors.begin && actors.end) {
-        for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
-            void* ent = it->mActor;
-            if (!ent || ent == g_localPlayerPtr) continue;
+    if (s_actorFetchNearby) {
+        bedrocktools::sdk::Vec3 extent = {30.0f, 30.0f, 30.0f};
+        ActorVec actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
 
-            bool isPlayer = false;
-            if (s_actorIsPlayer) {
-                isPlayer = s_actorIsPlayer(ent);
+        if (actors.begin && actors.end) {
+            for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
+                void* ent = it->mActor;
+                if (!ent || ent == g_localPlayerPtr) continue;
+
+                bool isPlayer = false;
+                if (s_actorIsPlayer) {
+                    isPlayer = s_actorIsPlayer(ent);
+                }
+
+                if (isPlayer && !g_hitboxMod->showPlayers) continue;
+
+                if (!isPlayer && (!g_hitboxMod->showEntities || !hasCategory(ent, 2))) continue;
+
+                if (s_actorIsInvisible && s_actorIsInvisible(ent)) continue;
+
+                renderActor(ent);
             }
-
-            if (isPlayer && !g_hitboxMod->showPlayers) continue;
-
-            if (!isPlayer && (!g_hitboxMod->showEntities || !hasCategory(ent, 2))) continue;
-
-            if (s_actorIsInvisible && s_actorIsInvisible(ent)) continue;
-
-            renderActor(ent);
         }
     }
 
@@ -669,9 +391,6 @@ HitboxModule::HitboxModule()
     : Module("Hitbox", "Displays hitboxes of entities.") {
 
     showInMenu = true;
-
-    // World overlay, not a HUD element.
-    hideInHudEditor = true;
 
     m_patched = false;
     m_patchTarget = nullptr;
@@ -718,6 +437,9 @@ void HitboxModule::onInit() {
         }
     }
 
+    uintptr_t hrge = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
+    if (hrge) s_hitResultGetEntity = (HitResult_getEntity_t)hrge;
+
     uintptr_t aip = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorIsPlayer);
     if (aip) s_actorIsPlayer = (Actor_isPlayer_t)aip;
 
@@ -726,9 +448,6 @@ void HitboxModule::onInit() {
 
     uintptr_t afn = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorFetchNearbyActorsSorted);
     if (afn) s_actorFetchNearby = (Actor_fetchNearbyActorsSorted_t)afn;
-
-    uintptr_t isb = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BlockSourceIsSolidBlockingBlock);
-    if (isb) s_isSolidBlockingBlock = (BlockSource_isSolidBlockingBlock_t)isb;
 
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([](auto& event) { s_hitboxTickCallback(event.player); });
 }
@@ -746,9 +465,6 @@ void HitboxModule::onEnable() {
 void HitboxModule::onDisable() {
 }
 
-void HitboxModule::onFrame() {
-}
-
 void HitboxModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     showEntities = j.value("showEntities", showEntities);
@@ -758,38 +474,18 @@ void HitboxModule::loadConfig(const nlohmann::json& j) {
     showLookLine = j.value("showLookLine", showLookLine);
     lookLineLength = j.value("lookLineLength", lookLineLength);
 
-    if (j.contains("lineThickness")) {
-        try { lineThickness = j["lineThickness"].get<float>(); } catch (...) {}
-    }
-    if (lineThickness < 1.0f) lineThickness = 1.0f;
-    if (lineThickness > 20.0f) lineThickness = 20.0f;
-
-    if (j.contains("hitboxIndicator")) {
-        hitboxIndicator = j["hitboxIndicator"].get<bool>();
-    }
     auto parseColor = [&](const std::string& key, uint32_t& outColor) {
-        if (!j.contains(key) || !j[key].is_string()) return;
-        std::string hexStr = j[key].get<std::string>();
-        if (hexStr.empty()) return;
-        if (hexStr[0] == '#') hexStr = hexStr.substr(1);
-        else if (hexStr.size() > 1 && hexStr[0] == '0' && (hexStr[1] == 'x' || hexStr[1] == 'X')) hexStr = hexStr.substr(2);
-        try {
-            unsigned long parsed = std::stoul(hexStr, nullptr, 16);
-            if (hexStr.size() <= 6) {
-                // #RRGGBB from the color picker has no alpha byte.
-                outColor = 0xFF000000u | static_cast<uint32_t>(parsed);
-            } else {
-                // Keep RGB, drop any stored transparency.
-                outColor = forceOpaqueColor(static_cast<uint32_t>(parsed));
+        if (j.contains(key)) {
+            std::string hexStr = j[key].get<std::string>();
+            if (!hexStr.empty() && hexStr[0] == '#') {
+                try { outColor = std::stoul(hexStr.substr(1), nullptr, 16); } catch (...) {}
             }
-        } catch (...) {}
+        }
     };
 
     parseColor("hitboxColor", hitboxColor);
     parseColor("eyeLineColor", eyeLineColor);
     parseColor("lookLineColor", lookLineColor);
-    parseColor("indicatorDefaultColor", indicatorDefaultColor);
-    parseColor("indicatorActiveColor", indicatorActiveColor);
 }
 
 void HitboxModule::saveConfig(nlohmann::json& j) {
@@ -800,19 +496,13 @@ void HitboxModule::saveConfig(nlohmann::json& j) {
     j["showEyeLine"] = showEyeLine;
     j["showLookLine"] = showLookLine;
     j["lookLineLength"] = lookLineLength;
-    j["lineThickness"] = lineThickness;
-    j["hitboxIndicator"] = hitboxIndicator;
 
-    char hexH[12], hexE[12], hexL[12], hexD[12], hexA[12];
-    snprintf(hexH, sizeof(hexH), "#%08X", forceOpaqueColor(hitboxColor));
-    snprintf(hexE, sizeof(hexE), "#%08X", forceOpaqueColor(eyeLineColor));
-    snprintf(hexL, sizeof(hexL), "#%08X", forceOpaqueColor(lookLineColor));
-    snprintf(hexD, sizeof(hexD), "#%08X", forceOpaqueColor(indicatorDefaultColor));
-    snprintf(hexA, sizeof(hexA), "#%08X", forceOpaqueColor(indicatorActiveColor));
+    char hexH[12], hexE[12], hexL[12];
+    snprintf(hexH, sizeof(hexH), "#%08X", hitboxColor);
+    snprintf(hexE, sizeof(hexE), "#%08X", eyeLineColor);
+    snprintf(hexL, sizeof(hexL), "#%08X", lookLineColor);
 
     j["hitboxColor"] = std::string(hexH);
     j["eyeLineColor"] = std::string(hexE);
     j["lookLineColor"] = std::string(hexL);
-    j["indicatorDefaultColor"] = std::string(hexD);
-    j["indicatorActiveColor"] = std::string(hexA);
 }

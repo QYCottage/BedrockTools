@@ -1,89 +1,13 @@
 #include "keystrokes.hpp"
 #include "modules/ModuleRegistry.hpp"
 #include "core/memory/Hooks.hpp"
-#include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
-#include <bedrocktools/sdk/Types.hpp>
-#include <bedrocktools/sdk/Offsets.hpp>
-#include <entt/entt.hpp>
-#include <array>
+#include <bedrocktools/events/EventBus.hpp>
+#include <bedrocktools/sdk/input/MoveInput.hpp>
 #include <cmath>
-#include <cstdint>
-#include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
-
-using uint = uint32_t;
-using ushort = uint16_t;
-using uchar = unsigned char;
-
-enum class EntityId : uint32_t {};
-
-template <size_t N, typename T>
-struct bitset {
-    T value;
-    void set(size_t index, bool v) {
-        if (v) value |= (1ULL << index);
-        else value &= ~(1ULL << index);
-    }
-    bool test(size_t index) const {
-        return (value & (1ULL << index)) != 0;
-    }
-};
-
-struct EntityIdTraits {
-    using value_type = EntityId;
-    using entity_type = uint32_t;
-    using version_type = uint16_t;
-    static constexpr uint32_t entity_mask = 0x3FFFF;
-    static constexpr uint32_t version_mask = 0x3FFF;
-};
-
-template<>
-struct entt::entt_traits<EntityId> : entt::basic_entt_traits<EntityIdTraits> {
-    static constexpr std::size_t page_size = ENTT_SPARSE_PAGE;
-};
-
-struct MoveInputState {
-    bitset<27, uint> mFlagValues;
-    bedrocktools::sdk::Vec2 mAnalogMoveVector;
-    uchar mLookSlightDirField;
-    uchar mLookNormalDirField;
-    uchar mLookSmoothDirField;
-    uchar pad[1];
-};
-
-struct MoveInputComponent {
-    MoveInputState mInputState;
-    MoveInputState mRawInputState;
-    uchar mHoldAutoJumpInWaterTicks;
-    uchar pad[3];
-    bedrocktools::sdk::Vec2 mMove;
-    bedrocktools::sdk::Vec2 mLookDelta;
-    bedrocktools::sdk::Vec2 mInteractDir;
-    bedrocktools::sdk::Vec3 mDisplacement;
-    bedrocktools::sdk::Vec3 mDisplacementDelta;
-    bedrocktools::sdk::Vec3 mCameraOrientation;
-    bitset<11, ushort> mFlagValues;
-    std::array<bool, 2> mIsPaddling;
-};
-
-class EntityRegistry;
-
-class EntityContext {
-public:
-    inline entt::basic_registry<EntityId>& getRegistry() { return mEnTTRegistry; }
-
-    template <class T>
-    inline T* tryGetComponent() {
-        return getRegistry().try_get<T>(mEntity);
-    }
-
-    EntityRegistry& mRegistry;
-    entt::basic_registry<EntityId>& mEnTTRegistry;
-    EntityId const mEntity;
-};
+#include <cstdint>
 
 static void keystrokesHSVtoRGB(float h, float s, float v, float& out_r, float& out_g, float& out_b) {
     if (s == 0.0f) {
@@ -108,151 +32,50 @@ static void keystrokesHSVtoRGB(float h, float s, float v, float& out_r, float& o
 
 static KeystrokesModule* g_keystrokesMod = nullptr;
 
-// ---------------------------------------------------------------------------
-// Mobile touch attack/build button support.
-//
-// The mobile touch buttons never produce mouse events, so the LMB/RMB keys
-// are driven from the same GameMode calls the buttons trigger:
-//   * attack button -> GameMode::attack, startDestroyBlock, continueDestroyBlock
-//   * build button  -> GameMode::useItemOn
-//
-// GameMode::useItemOn and the destroy functions are discovered at runtime
-// through the GameMode vtable: the first attack event carries the GameMode
-// instance, we locate the attack slot (verified against the already-resolved
-// attack signatures) and read the sibling slots at their fixed offsets
-// (GameMode vtable layout: useItemOn = attack - 11, continueDestroyBlock =
-// attack - 15, startDestroyBlock = attack - 17).
-// ---------------------------------------------------------------------------
-namespace {
-
-constexpr int kUseItemOnSlotOffset = -11;
-constexpr int kStartDestroySlotOffset = -17;
-constexpr int kContinueDestroySlotOffset = -15;
-constexpr int kMaxVtableScan = 96;
-constexpr long long kTouchPulseUs = 250000;
-
-using UseItemOnFn = bool (*)(void*, void*, void*, void*, unsigned char, void*, void*);
-using DestroyFn = bool (*)(void*, void*, unsigned char, void*);
-using ContinueDestroyFn = bool (*)(void*, void*, unsigned char, void*, void*);
-
-UseItemOnFn g_useItemOnOriginal = nullptr;
-DestroyFn g_startDestroyOriginal = nullptr;
-ContinueDestroyFn g_continueDestroyOriginal = nullptr;
-
-std::mutex g_touchHookMutex;
-std::vector<std::uintptr_t> g_touchHookedAddrs;
-
-long long keystrokesNowUs() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+static constexpr std::uint16_t swingSourceBit(std::uint8_t source) {
+    return source < 16 ? static_cast<std::uint16_t>(1u << source) : 0;
 }
 
-void keystrokesHookIfNew(std::uintptr_t address, void* detour, void** originalSlot) {
-    if (!address) return;
-    std::lock_guard<std::mutex> lock(g_touchHookMutex);
-    for (const auto hooked : g_touchHookedAddrs) {
-        if (hooked == address) return;
-    }
-    if (bedrocktools::hooks::install(reinterpret_cast<void*>(address), detour, originalSlot)) {
-        g_touchHookedAddrs.push_back(address);
-    }
+static constexpr std::uint16_t buildSwingMask = static_cast<std::uint16_t>((1u << 1) | (1u << 3) | (1u << 5));
+static constexpr std::uint16_t interactSwingMask = static_cast<std::uint16_t>(1u << 3);
+static constexpr std::uint16_t useItemSwingMask = static_cast<std::uint16_t>(1u << 5);
+KeystrokesModule::PlayerSwingFn KeystrokesModule::s_playerSwingOriginal = nullptr;
+
+static std::int64_t keystrokesNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool useItemOnDetour(void* gameMode, void* player, void* item, void* pos, unsigned char face, void* facePos, void* block) {
-    if (g_keystrokesMod && g_keystrokesMod->enabled && g_keystrokesMod->touchMode()) {
-        g_keystrokesMod->onTouchUse();
-    }
-    return g_useItemOnOriginal ? g_useItemOnOriginal(gameMode, player, item, pos, face, facePos, block) : false;
-}
-
-bool startDestroyBlockDetour(void* gameMode, void* pos, unsigned char face, void* outBool) {
-    if (g_keystrokesMod && g_keystrokesMod->enabled && g_keystrokesMod->touchMode()) {
-        g_keystrokesMod->onTouchAttack();
-    }
-    return g_startDestroyOriginal ? g_startDestroyOriginal(gameMode, pos, face, outBool) : false;
-}
-
-bool continueDestroyBlockDetour(void* gameMode, void* pos, unsigned char face, void* facePos, void* outBool) {
-    if (g_keystrokesMod && g_keystrokesMod->enabled && g_keystrokesMod->touchMode()) {
-        // Refreshes the pressed pulse while mining, without counting CPS for
-        // every game tick (that would inflate the counter).
-        g_keystrokesMod->onTouchAttackPulse();
-    }
-    return g_continueDestroyOriginal ? g_continueDestroyOriginal(gameMode, pos, face, facePos, outBool) : false;
-}
-
-void keystrokesTryInstallTouchHooks(void* gameMode) {
-    if (!gameMode) return;
-
-    const std::uintptr_t gmAttack = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::GameModeAttack);
-    const std::uintptr_t smAttack = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::SurvivalModeAttack);
-    if (!gmAttack && !smAttack) return;
-
-    std::uintptr_t* const vtable = *reinterpret_cast<std::uintptr_t**>(gameMode);
-    if (!vtable) return;
-
-    int attackSlot = -1;
-    for (int i = 0; i < kMaxVtableScan; ++i) {
-        const std::uintptr_t fn = vtable[i];
-        if (fn == gmAttack || fn == smAttack) {
-            attackSlot = i;
-            break;
+bool KeystrokesModule::playerSwingDetour(void* player, std::uint8_t source) {
+    const bool result = s_playerSwingOriginal ? s_playerSwingOriginal(player, source) : false;
+    if (result && g_keystrokesMod && g_keystrokesMod->enabled) {
+        constexpr std::uint8_t buildSource = 1;
+        constexpr std::uint8_t mineSource = 2;
+        if (source == buildSource) {
+            g_keystrokesMod->queueNativeRight(buildSwingMask);
+        } else {
+            const bool miningSwing = source == mineSource && g_keystrokesMod->m_destroyActive.load(std::memory_order_relaxed);
+            if (!miningSwing) g_keystrokesMod->queueNativeSwing(source);
         }
     }
-    if (attackSlot < 0) return;
-
-    const auto slotAddress = [&](int offset) -> std::uintptr_t {
-        const int index = attackSlot + offset;
-        if (index < 0 || index >= kMaxVtableScan) return 0;
-        return vtable[index];
-    };
-
-    keystrokesHookIfNew(slotAddress(kUseItemOnSlotOffset), reinterpret_cast<void*>(&useItemOnDetour), reinterpret_cast<void**>(&g_useItemOnOriginal));
-    keystrokesHookIfNew(slotAddress(kStartDestroySlotOffset), reinterpret_cast<void*>(&startDestroyBlockDetour), reinterpret_cast<void**>(&g_startDestroyOriginal));
-    keystrokesHookIfNew(slotAddress(kContinueDestroySlotOffset), reinterpret_cast<void*>(&continueDestroyBlockDetour), reinterpret_cast<void**>(&g_continueDestroyOriginal));
+    return result;
 }
 
-}  // namespace
-
-static void s_normalTickCallback(void* _this) {
+static void s_normalTickCallback(void* player) {
     if (!g_keystrokesMod || !g_keystrokesMod->enabled) return;
 
-    EntityContext* ctx = reinterpret_cast<EntityContext*>(reinterpret_cast<char*>(_this) + bedrocktools::sdk::offsets::Actor::mEntityContext);
-    if (!ctx) return;
-
-    auto* moveInput = ctx->tryGetComponent<MoveInputComponent>();
+    auto* moveInput = bedrocktools::sdk::moveInputComponent(player);
     if (!moveInput) return;
 
-    // The input handler writes keyboard flags into mRawInputState, but some
-    // game builds (and the touch path) only populate the processed mInputState
-    // copy, so consult both.
-    const auto& rawFlags = moveInput->mRawInputState.mFlagValues;
-    const auto& inFlags = moveInput->mInputState.mFlagValues;
-    const bool rawForward = rawFlags.test(13) || inFlags.test(13);
-    const bool rawBackward = rawFlags.test(14) || inFlags.test(14);
-    const bool rawLeft = rawFlags.test(15) || inFlags.test(15);
-    const bool rawRight = rawFlags.test(16) || inFlags.test(16);
-    const bool rawJump = rawFlags.test(7) || inFlags.test(7);
-    const bool rawSneak = rawFlags.test(0) || inFlags.test(0);
+    const auto& raw = moveInput->mRawInputState;
+    const auto analog = raw.mAnalogMoveVector;
+    constexpr float analogThreshold = 0.05f;
 
-    // On touch/mobile the joystick drives the analog move vector instead of
-    // the keyboard flag bits, so map it to W/A/S/D as well. The vector uses
-    // the game's own movement convention: +Y = forward, -Y = back, and on X
-    // +X = left, -X = right (sideways is positive to the LEFT, matching the
-    // game's move-vector convention). Getting X backwards shows A/D swapped.
-    constexpr float kAnalogDeadzone = 0.2f;
-    const auto& rawAnalog = moveInput->mRawInputState.mAnalogMoveVector;
-    const auto& inAnalog = moveInput->mInputState.mAnalogMoveVector;
-    const float analogX = std::abs(inAnalog.x) > std::abs(rawAnalog.x) ? inAnalog.x : rawAnalog.x;
-    const float analogY = std::abs(inAnalog.y) > std::abs(rawAnalog.y) ? inAnalog.y : rawAnalog.y;
-
-    g_keystrokesMod->bW = rawForward || analogY > kAnalogDeadzone;
-    g_keystrokesMod->bS = rawBackward || analogY < -kAnalogDeadzone;
-    g_keystrokesMod->bA = rawLeft || analogX > kAnalogDeadzone;
-    g_keystrokesMod->bD = rawRight || analogX < -kAnalogDeadzone;
-    g_keystrokesMod->bSpace = rawJump;
-    g_keystrokesMod->bSneak = rawSneak;
+    g_keystrokesMod->bW = raw.test(MoveInputState::Flag::Up) || raw.test(MoveInputState::Flag::UpLeft) || raw.test(MoveInputState::Flag::UpRight) || analog.y > analogThreshold;
+    g_keystrokesMod->bA = raw.test(MoveInputState::Flag::Left) || raw.test(MoveInputState::Flag::UpLeft) || raw.test(MoveInputState::Flag::DownLeft) || analog.x > analogThreshold;
+    g_keystrokesMod->bS = raw.test(MoveInputState::Flag::Down) || raw.test(MoveInputState::Flag::DownLeft) || raw.test(MoveInputState::Flag::DownRight) || analog.y < -analogThreshold;
+    g_keystrokesMod->bD = raw.test(MoveInputState::Flag::Right) || raw.test(MoveInputState::Flag::UpRight) || raw.test(MoveInputState::Flag::DownRight) || analog.x < -analogThreshold;
+    g_keystrokesMod->bSpace = raw.test(MoveInputState::Flag::JumpDown);
+    g_keystrokesMod->bSneak = raw.test(MoveInputState::Flag::SneakDown);
 }
 
 KeystrokesModule::KeystrokesModule()
@@ -265,15 +88,42 @@ KeystrokesModule::~KeystrokesModule() {
 }
 
 void KeystrokesModule::onInit() {
-    bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([](auto& event) { s_normalTickCallback(event.player); });
-    bedrocktools::events::bus().subscribe<bedrocktools::events::AttackEvent>([](auto& event) {
-        if (!g_keystrokesMod) return;
-        // First attack also hands us the GameMode instance used to discover
-        // the touch build/break hooks (no signature required for them).
-        keystrokesTryInstallTouchHooks(event.gameMode);
-        if (!g_keystrokesMod->enabled || !g_keystrokesMod->touchMode()) return;
-        g_keystrokesMod->onTouchAttack();
+    bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>([this](auto& event) {
+        resolveNativeInputTick();
+        s_normalTickCallback(event.player);
     });
+    bedrocktools::events::bus().subscribe<bedrocktools::events::GameModeActionEvent>([this](auto& event) {
+        switch (event.action) {
+            case bedrocktools::events::GameModeAction::StartDestroyBlock:
+                if (!m_destroyActive.exchange(true, std::memory_order_relaxed)) queueNativeExplicitLeft();
+                break;
+            case bedrocktools::events::GameModeAction::StopDestroyBlock:
+                m_destroyActive.store(false, std::memory_order_relaxed);
+                break;
+            case bedrocktools::events::GameModeAction::Attack:
+                queueNativeExplicitLeft();
+                break;
+            case bedrocktools::events::GameModeAction::Interact:
+                queueNativeRight(interactSwingMask);
+                break;
+            case bedrocktools::events::GameModeAction::UseItemOn:
+                break;
+            case bedrocktools::events::GameModeAction::UseItem:
+                if (event.hasNativeResult && event.nativeResult) queueNativeRight(useItemSwingMask);
+                break;
+            case bedrocktools::events::GameModeAction::StartBuildBlock:
+            case bedrocktools::events::GameModeAction::UseItemAsAttack:
+                break;
+        }
+    });
+
+    if (!m_playerSwingHooked) {
+        const auto address = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LocalPlayerSwing);
+        if (address) {
+            const auto handle = bedrocktools::hooks::install(reinterpret_cast<void*>(address), reinterpret_cast<void*>(playerSwingDetour), reinterpret_cast<void**>(&s_playerSwingOriginal));
+            m_playerSwingHooked = handle != nullptr;
+        }
+    }
 }
 
 void KeystrokesModule::onEnable() {
@@ -286,7 +136,6 @@ void KeystrokesModule::onDisable() {
 }
 
 bool KeystrokesModule::onMouseEvent(int button, bool isDown) {
-    m_lastMouseMs.store(keystrokesNowUs(), std::memory_order_relaxed);
     if (button == 1) {
         if (!isDown) {
             m_lmbDown.store(false, std::memory_order_relaxed);
@@ -294,8 +143,10 @@ bool KeystrokesModule::onMouseEvent(int button, bool isDown) {
         }
         if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return false;
         m_lmbDown.store(true, std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now();
+        m_lastMouseLmbNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(m_mouseMutex);
-        m_leftClicks.push_back(std::chrono::steady_clock::now());
+        m_leftClicks.push_back(now);
     } else if (button == 2) {
         if (!isDown) {
             m_rmbDown.store(false, std::memory_order_relaxed);
@@ -303,10 +154,145 @@ bool KeystrokesModule::onMouseEvent(int button, bool isDown) {
         }
         if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return false;
         m_rmbDown.store(true, std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now();
+        m_lastMouseRmbNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(m_mouseMutex);
-        m_rightClicks.push_back(std::chrono::steady_clock::now());
+        m_rightClicks.push_back(now);
     }
     return false;
+}
+
+void KeystrokesModule::commitNativeClickBatchLocked() {
+    if (!m_nativeBatchActive) return;
+
+    constexpr std::int64_t mouseCorrelationNs = 120000000;
+    constexpr std::int64_t pressDurationNs = 110000000;
+    const auto lmbMouseNs = m_lastMouseLmbNs.load(std::memory_order_relaxed);
+    const auto rmbMouseNs = m_lastMouseRmbNs.load(std::memory_order_relaxed);
+    const auto nearBatch = [&](std::int64_t value) {
+        if (value == 0) return false;
+        const auto delta = value > m_nativeBatchLastNs ? value - m_nativeBatchLastNs : m_nativeBatchLastNs - value;
+        return delta < mouseCorrelationNs;
+    };
+
+    if (!nearBatch(lmbMouseNs) && !nearBatch(rmbMouseNs)) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        if (m_nativeBatchRight) {
+            m_rightClicks.push_back(now);
+            m_nativeRmbUntilNs.store(nowNs + pressDurationNs, std::memory_order_relaxed);
+        } else if (m_nativeBatchLeft) {
+            m_leftClicks.push_back(now);
+            m_nativeLmbUntilNs.store(nowNs + pressDurationNs, std::memory_order_relaxed);
+        }
+    }
+
+    m_nativeBatchActive = false;
+    m_nativeBatchLeft = false;
+    m_nativeBatchRight = false;
+    m_nativeBatchLastNs = 0;
+}
+
+void KeystrokesModule::queueNativeClick(bool left) {
+    if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return;
+
+    constexpr std::int64_t batchGapNs = 45000000;
+    const auto nowNs = keystrokesNowNs();
+    std::lock_guard<std::mutex> lock(m_mouseMutex);
+
+    if (m_nativeBatchActive && nowNs - m_nativeBatchLastNs > batchGapNs) commitNativeClickBatchLocked();
+    if (!m_nativeBatchActive) m_nativeBatchActive = true;
+    if (left) m_nativeBatchLeft = true;
+    else m_nativeBatchRight = true;
+    m_nativeBatchLastNs = nowNs;
+}
+
+void KeystrokesModule::queueNativeSwing(std::uint8_t source) {
+    if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(m_mouseMutex);
+    const bool ambiguous = source == 1 || source == 3 || source == 5;
+    const auto sourceBit = swingSourceBit(source);
+    if (sourceBit != 0 && (m_nativeRmbSwingSuppressMask & sourceBit) != 0) return;
+    if (m_nativeRightThisTick && ambiguous) return;
+    if (m_nativeExplicitLeftThisTick) return;
+    if (ambiguous && m_nativeSwingSuppressCount > 0) {
+        --m_nativeSwingSuppressCount;
+        if (m_nativeSwingSuppressCount == 0) m_nativeSwingSuppressTicks = 0;
+        return;
+    }
+    m_pendingNativeSwings.push_back(PendingNativeSwing{source, static_cast<std::uint8_t>(ambiguous ? 2 : 1)});
+}
+
+void KeystrokesModule::queueNativeExplicitLeft() {
+    if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return;
+    bool shouldQueue = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mouseMutex);
+        if (m_nativeExplicitLeftThisTick) return;
+        if (!m_pendingNativeSwings.empty()) m_pendingNativeSwings.pop_back();
+        else {
+            m_nativeSwingSuppressCount = 1;
+            m_nativeSwingSuppressTicks = 1;
+        }
+        m_nativeExplicitLeftThisTick = true;
+        shouldQueue = true;
+    }
+    if (shouldQueue) queueNativeClick(true);
+}
+
+void KeystrokesModule::queueNativeRight(std::uint16_t swingSourceMask) {
+    if (!m_mouseActive.load(std::memory_order_acquire) || !m_showMouseCps.load(std::memory_order_relaxed)) return;
+    bool shouldQueue = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mouseMutex);
+        for (auto it = m_pendingNativeSwings.begin(); it != m_pendingNativeSwings.end();) {
+            const auto bit = swingSourceBit(it->source);
+            if (bit != 0 && (swingSourceMask & bit) != 0) it = m_pendingNativeSwings.erase(it);
+            else ++it;
+        }
+        m_nativeRmbSwingSuppressMask = static_cast<std::uint16_t>(m_nativeRmbSwingSuppressMask | swingSourceMask);
+        if (m_nativeRmbSwingSuppressTicks < 2) m_nativeRmbSwingSuppressTicks = 2;
+        if (!m_nativeRightThisTick) {
+            m_nativeRightThisTick = true;
+            shouldQueue = true;
+        }
+    }
+    if (shouldQueue) queueNativeClick(false);
+}
+
+void KeystrokesModule::resolveNativeInputTick() {
+    std::uint32_t expiredSwings = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mouseMutex);
+        for (auto it = m_pendingNativeSwings.begin(); it != m_pendingNativeSwings.end();) {
+            if (it->ticksRemaining > 0) --it->ticksRemaining;
+            if (it->ticksRemaining == 0) {
+                ++expiredSwings;
+                it = m_pendingNativeSwings.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (m_nativeSwingSuppressTicks > 0) {
+            --m_nativeSwingSuppressTicks;
+            if (m_nativeSwingSuppressTicks == 0) m_nativeSwingSuppressCount = 0;
+        }
+        if (m_nativeRmbSwingSuppressTicks > 0) {
+            --m_nativeRmbSwingSuppressTicks;
+            if (m_nativeRmbSwingSuppressTicks == 0) m_nativeRmbSwingSuppressMask = 0;
+        }
+        m_nativeExplicitLeftThisTick = false;
+        m_nativeRightThisTick = false;
+    }
+    if (expiredSwings > 0) queueNativeClick(true);
+}
+
+void KeystrokesModule::flushNativeClickBatch(bool force) {
+    constexpr std::int64_t batchGapNs = 45000000;
+    const auto nowNs = keystrokesNowNs();
+    std::lock_guard<std::mutex> lock(m_mouseMutex);
+    if (!m_nativeBatchActive) return;
+    if (force || nowNs - m_nativeBatchLastNs >= batchGapNs) commitNativeClickBatchLocked();
 }
 
 std::pair<int, int> KeystrokesModule::getMouseCps() {
@@ -320,43 +306,31 @@ std::pair<int, int> KeystrokesModule::getMouseCps() {
 void KeystrokesModule::clearMouseState() {
     m_lmbDown.store(false, std::memory_order_relaxed);
     m_rmbDown.store(false, std::memory_order_relaxed);
+    m_nativeLmbUntilNs.store(0, std::memory_order_relaxed);
+    m_nativeRmbUntilNs.store(0, std::memory_order_relaxed);
+    m_lastMouseLmbNs.store(0, std::memory_order_relaxed);
+    m_lastMouseRmbNs.store(0, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(m_mouseMutex);
+    m_nativeBatchActive = false;
+    m_nativeBatchLeft = false;
+    m_nativeBatchRight = false;
+    m_nativeBatchLastNs = 0;
+    m_pendingNativeSwings.clear();
+    m_nativeSwingSuppressCount = 0;
+    m_nativeSwingSuppressTicks = 0;
+    m_nativeRmbSwingSuppressMask = 0;
+    m_nativeRmbSwingSuppressTicks = 0;
+    m_nativeExplicitLeftThisTick = false;
+    m_nativeRightThisTick = false;
+    m_destroyActive.store(false, std::memory_order_relaxed);
     m_leftClicks.clear();
     m_rightClicks.clear();
 }
 
-bool KeystrokesModule::onTouchEvent(float x, float y, bool isDown) {
-    (void)x;
-    (void)y;
-    (void)isDown;
-    m_lastTouchMs.store(keystrokesNowUs(), std::memory_order_relaxed);
-    return false;
-}
-
-bool KeystrokesModule::touchMode() const {
-    return m_lastTouchMs.load(std::memory_order_relaxed) > m_lastMouseMs.load(std::memory_order_relaxed);
-}
-
-void KeystrokesModule::onTouchAttack() {
-    m_touchRmbMs.store(keystrokesNowUs(), std::memory_order_relaxed);
-    if (!m_showMouseCps.load(std::memory_order_relaxed)) return;
-    std::lock_guard<std::mutex> lock(m_mouseMutex);
-    m_rightClicks.push_back(std::chrono::steady_clock::now());
-}
-
-void KeystrokesModule::onTouchAttackPulse() {
-    m_touchRmbMs.store(keystrokesNowUs(), std::memory_order_relaxed);
-}
-
-void KeystrokesModule::onTouchUse() {
-    m_touchLmbMs.store(keystrokesNowUs(), std::memory_order_relaxed);
-    if (!m_showMouseCps.load(std::memory_order_relaxed)) return;
-    std::lock_guard<std::mutex> lock(m_mouseMutex);
-    m_leftClicks.push_back(std::chrono::steady_clock::now());
-}
-
 void KeystrokesModule::onFrame() {
     if (!enabled) return;
+
+    flushNativeClickBatch(false);
 
     m_rainbowHue += 0.002f * m_rainbowSpeed;
     if (m_rainbowHue > 1.0f) m_rainbowHue -= 1.0f;
@@ -378,43 +352,18 @@ void KeystrokesModule::onFrame() {
     updateAnim(m_dState, bD);
     updateAnim(m_jumpState, bSpace);
     updateAnim(m_sneakState, bSneak);
-
-    // Touch buttons have no down/up events; each GameMode call (attack or
-    // build press) refreshes a short pulse that keeps the key lit.
-    const long long now = keystrokesNowUs();
-    const bool touchLmb = now - m_touchLmbMs.load(std::memory_order_relaxed) < kTouchPulseUs;
-    const bool touchRmb = now - m_touchRmbMs.load(std::memory_order_relaxed) < kTouchPulseUs;
-    updateAnim(m_lmbState, showMouseCps && (m_lmbDown.load(std::memory_order_relaxed) || touchLmb));
-    updateAnim(m_rmbState, showMouseCps && (m_rmbDown.load(std::memory_order_relaxed) || touchRmb));
+    const auto nowNs = keystrokesNowNs();
+    const bool lmbPressed = m_lmbDown.load(std::memory_order_relaxed) || nowNs < m_nativeLmbUntilNs.load(std::memory_order_relaxed);
+    const bool rmbPressed = m_rmbDown.load(std::memory_order_relaxed) || nowNs < m_nativeRmbUntilNs.load(std::memory_order_relaxed);
+    updateAnim(m_lmbState, showMouseCps && lmbPressed);
+    updateAnim(m_rmbState, showMouseCps && rmbPressed);
 
     std::vector<PLModMenu_DrawCommand> cmds;
-    std::vector<std::string> textStore;
-    textStore.reserve(16);
 
     float startX = hudPosX;
     float startY = hudPosY;
     float keySize = static_cast<float>(m_size);
     float spacing = 5.0f;
-
-    // HUD editor hitbox: transparent full-bounds rect to make gaps draggable
-    {
-        const bool showMouseCps = m_showMouseCps.load(std::memory_order_relaxed);
-        int rows = 2; // W and ASD
-        if (showMouseCps) rows++;
-        if (m_showJump) rows++;
-        if (m_showSneak) rows++;
-        float totalW = (keySize * 3) + (spacing * 2);
-        float totalH = rows * keySize + (rows - 1) * spacing;
-        PLModMenu_DrawCommand hitbox = {};
-        hitbox.type = PL_DRAW_RECT_FILLED;
-        hitbox.x = startX;
-        hitbox.y = startY;
-        hitbox.w = totalW;
-        hitbox.h = totalH;
-        hitbox.color = 0x02000000; // nearly transparent, keeps module draggable in hud editor
-        if (m_roundKeys) hitbox.x3 = keySize * 0.08f;
-        cmds.push_back(std::move(hitbox));
-    }
 
     auto addKey = [&](float x, float y, float w, std::string_view label, std::string_view detail, const KeyAnimState& state) {
         float progress = state.pressProgress;

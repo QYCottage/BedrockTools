@@ -9,7 +9,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 ## Features
 
 - Native C++20 mod built for LeviLauncher and Preloader
-- 43 configurable modules
+- 36 configurable modules
 - Public headers for Minecraft wrappers, offsets, signatures, and utilities
 - Typed event system with runtime subscriptions for other native mods
 - LeviLauncher mod-menu integration and persistent configuration
@@ -17,25 +17,13 @@ The source is public so people can study how a real LeviLauncher mod is structur
 
 ## Modules
 
-**Visual:** Fullbright, Motion Blur, Fog Color, Glint Color, TNT Timer, NoFog, View Model, Third Person Nametag, Chunk Border, Block Outline, Hitbox, Zoom, Breadcrumbs, FPS Unlocker, Light Overlay, ShulkerPreview, Connected Glass
+**Visual:** Fullbright, Motion Blur, Fog Color, Glint Color, TNT Timer, NoFog, View Model, Third Person Nametag, Chunk Border, Hitbox, Zoom, Breadcrumbs, FPS Unlocker, Light Overlay, ShulkerPreview, Connected Glass
 
-**HUD:** Ping Counter, Reach Counter, Combo Display, Break Indicator, Player Coords, Compass, Speed Display, Effect Display, Debug Menu, Keystrokes, Tablist, Crosshair
+**HUD:** Ping Counter, Reach Counter, Combo Display, Break Indicator, Player Coords, Compass, Speed Display, Debug Menu, Keystrokes, Tablist
 
-**Player:** Time Changer, Weather Changer, Nick, Skin Stealer, Custom Capes, AutoGG, AutoReQ
+**Player:** Time Changer, Weather Changer, Nick, Skin Stealer, AutoGG, AutoReQ
 
 **Misc:** No Disconnect, Chat Timestamps, No Touch Border, CPS Limiter
-
-## Custom Capes
-
-The **Custom Capes** module lets you wear any PNG as a classic cape.
-
-1. Put cape images (`.png`, ideally 64x32 — any other size is scaled automatically) into the `capes` folder next to your `config.json` (`<mod config dir>/capes`, created automatically on first launch along with a sample cape).
-2. (Re)launch the game, open the BedrockTools mod menu and enable **Custom Capes**.
-3. Pick a file in the module's **Cape** selector — the cape updates in-game immediately. Choose `None` to bring your vanilla cape back.
-
-Images that are not exactly 64x32 are scaled onto the cape's outer back face (`x=1..11, y=1..17` of the 64x32 cape canvas); the inner front face gets a flat lining color instead of a repeat of the image, and the top/bottom/side edge strips pick up the image's edge colors so the cape keeps its visible thickness. Exact 64x32 images are used pixel-for-pixel with no processing.
-
-The change is fully client-side and visual only; it does not affect servers, accounts, or other players. Persona skins are not affected (capes are persona pieces there).
 
 ## System Requirements
 

@@ -6,15 +6,6 @@
 #include <cmath>
 #include <algorithm>
 
-// Zoom is applied through the camera FOV: a smaller FOV means a larger zoom.
-// The scroll gesture on the zoom button adjusts the target FOV between these
-// bounds. kZoomFovMax matches the vanilla FOV so zooming out can never widen
-// the view beyond normal (i.e. "no zoom").
-namespace {
-constexpr float kZoomFovMin = 5.0f;
-constexpr float kZoomFovMax = 70.0f;
-} // namespace
-
 static ZoomModule* g_zoomMod = nullptr;
 
 static float (*_getFov_orig)(void*, float, int) = nullptr;
@@ -154,19 +145,10 @@ void ZoomModule::onKeybindEvent(const std::string& key, bool isDown) {
     }
 }
 
-void ZoomModule::adjustZoomByScroll(float delta) {
-    // Positive scroll (drag / wheel up) zooms in by lowering the target FOV;
-    // negative scroll zooms out by raising it. The result is clamped so you
-    // never zoom past the minimum FOV or widen beyond the vanilla FOV.
-    m_targetZoomFov -= delta * m_scrollSensitivity;
-    m_targetZoomFov = std::clamp(m_targetZoomFov, kZoomFovMin, kZoomFovMax);
-}
-
 void ZoomModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     if (j.contains("m_targetZoomFov")) m_targetZoomFov = j["m_targetZoomFov"].get<float>();
     if (j.contains("m_animSpeed")) m_animSpeed = j["m_animSpeed"].get<float>();
-    if (j.contains("m_scrollSensitivity")) m_scrollSensitivity = j["m_scrollSensitivity"].get<float>();
     if (j.contains("m_lowSens")) m_lowSens = j["m_lowSens"].get<bool>();
     if (j.contains("m_lowSensStrength")) m_lowSensStrength = j["m_lowSensStrength"].get<float>();
     if (j.contains("m_hideHand")) m_hideHand = j["m_hideHand"].get<bool>();
@@ -179,7 +161,6 @@ void ZoomModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
     j["m_targetZoomFov"] = m_targetZoomFov;
     j["m_animSpeed"] = m_animSpeed;
-    j["m_scrollSensitivity"] = m_scrollSensitivity;
     j["m_lowSens"] = m_lowSens;
     j["m_lowSensStrength"] = m_lowSensStrength;
     j["m_hideHand"] = m_hideHand;
@@ -204,30 +185,21 @@ void ZoomModule::updateZoomButton() {
     if (m_overlayToggle) {
         pl::modmenu::ButtonBuilder("bedrocktools.Zoom.Button", "Zoom")
                 .moduleId("bedrocktools.Zoom")
-                // Hold-to-zoom: zoom is active only while the button is held,
-                // and stops as soon as it is released.
-                .behavior(pl::modmenu::ButtonBehavior::Hold)
+                .behavior(pl::modmenu::ButtonBehavior::Toggle)
                 .stylePreset(pl::modmenu::ButtonStylePreset::Accent)
                 .styleColors(0x00000001, 0x00000001, 0x00000001)
                 .svgIcon(zoomDisabledSvg)
                 .activeSvgIcon(zoomEnabledSvg)
                 .onEvent([this](std::string_view buttonId, pl::modmenu::ButtonEvent event, float value) {
-                    (void)buttonId;
-                    // Hold mode: zoom starts as soon as the button is pressed
-                    // and stops as soon as it is released.
-                    if (event == pl::modmenu::ButtonEvent::Down) {
-                        if (!this->m_buttonZooming) {
-                            this->m_buttonZooming = true;
-                            this->m_isFirstTime = true;
-                            this->m_animationFinished = false;
+                    if (event == pl::modmenu::ButtonEvent::StateChanged) {
+                        bool newState = (value > 0.5f);
+                        if (newState != this->m_buttonZooming) {
+                            this->m_buttonZooming = newState;
+                            if (newState) {
+                                this->m_isFirstTime = true;
+                                this->m_animationFinished = false;
+                            }
                         }
-                    } else if (event == pl::modmenu::ButtonEvent::Up) {
-                        this->m_buttonZooming = false;
-                    } else if (event == pl::modmenu::ButtonEvent::Scroll) {
-                        // While held, dragging/scrolling up zooms in and down
-                        // zooms out by adjusting the target FOV.
-                        if (this->m_buttonZooming)
-                            this->adjustZoomByScroll(value);
                     }
                 })
                 .registerButton();

@@ -24,8 +24,6 @@ public:
     virtual void onDisable()  {}
     virtual void onFrame()    {}
     virtual bool onMouseEvent(int button, bool isDown) { return false; }
-    virtual bool onKeyEvent(int key, bool isDown) { return false; }
-    virtual bool onTouchEvent(float x, float y, bool isDown) { return false; }
     
     virtual void onKeybindEvent(const std::string& key, bool isDown) {
         if (key == "keybind" && isDown) {

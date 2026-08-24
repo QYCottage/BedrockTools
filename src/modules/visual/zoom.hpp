@@ -8,7 +8,6 @@ public:
     float m_currentFov = 90.0f;
     float m_baseFov = 90.0f;
     float m_animSpeed = 1.0f;
-    float m_scrollSensitivity = 2.5f;
     bool  m_lowSens = true;
     float m_lowSensStrength = 0.9f;
     bool  m_hideHand = true;
@@ -31,7 +30,6 @@ public:
     void loadConfig(const nlohmann::json& j) override;
     void saveConfig(nlohmann::json& j) override;
 
-    void adjustZoomByScroll(float delta);
     void updateZoomButton();
 
 private:
