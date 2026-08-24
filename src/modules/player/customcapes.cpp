@@ -233,14 +233,11 @@ void CustomCapesModule::loadSelectedCape() {
         return;
     }
 
-    if (width == static_cast<int>(customcapes::kCapeWidth) &&
-        height == static_cast<int>(customcapes::kCapeHeight)) {
-        const std::size_t bytes = customcapes::kCapeWidth * customcapes::kCapeHeight * 4u;
-        m_pixels.assign(decoded, decoded + bytes);
-    } else {
-        m_pixels = customcapes::resampleToCape(decoded, static_cast<std::uint32_t>(width),
-                                               static_cast<std::uint32_t>(height));
-    }
+    // Even an exact 64x32 cape goes through the helper: authored Elytra UVs
+    // stay byte-identical, while a traditional cape with an empty wing area
+    // receives the generated Elytra fallback.
+    m_pixels = customcapes::resampleToCape(decoded, static_cast<std::uint32_t>(width),
+                                           static_cast<std::uint32_t>(height));
     stbi_image_free(decoded);
     m_capeLoaded = true;
 

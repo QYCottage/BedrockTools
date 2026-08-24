@@ -9,10 +9,11 @@
 //
 //   * scanning the capes directory for usable PNG files
 //   * (de)serializing the launcher "radio" config value used for the picker
-//   * resampling an arbitrary RGBA image into the visible 10x16 classic-cape
-//     box at (1,1) on the 64x32 canvas Minecraft expects
+//   * resampling an arbitrary RGBA image into the visible classic-cape face
+//     and the Elytra UV area of the 64x32 canvas Minecraft expects
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -60,6 +61,59 @@ inline constexpr std::uint32_t kCapeBottomY = 0;
 inline constexpr std::uint32_t kCapeSideRightX = 0; // 1x16 strip at x=0
 inline constexpr std::uint32_t kCapeSideLeftX = 11; // 1x16 strip at x=11
 inline constexpr std::uint32_t kCapeSideY = 1;
+
+// When an Elytra is equipped, Bedrock renders its 10x20x2 wing cube from the
+// same cape image, at UV (22,0). Both wings share this area (the other wing is
+// mirrored by the model), so a cape image with a transparent right-hand side
+// produces an untextured/default Elytra. These are the six box-unwrapped
+// regions sampled by geometry.elytra.
+inline constexpr std::uint32_t kElytraUvX = 22;
+inline constexpr std::uint32_t kElytraUvY = 0;
+inline constexpr std::uint32_t kElytraUvWidth = 24;
+inline constexpr std::uint32_t kElytraUvHeight = 22;
+inline constexpr std::uint32_t kElytraFaceWidth = 10;
+inline constexpr std::uint32_t kElytraFaceHeight = 20;
+inline constexpr std::uint32_t kElytraDepth = 2;
+inline constexpr std::uint32_t kElytraTopX = 24;       // 10x2
+inline constexpr std::uint32_t kElytraTopY = 0;
+inline constexpr std::uint32_t kElytraBottomX = 34;    // 10x2
+inline constexpr std::uint32_t kElytraBottomY = 0;
+inline constexpr std::uint32_t kElytraSideRightX = 22; // 2x20
+inline constexpr std::uint32_t kElytraFrontX = 24;     // 10x20
+inline constexpr std::uint32_t kElytraSideLeftX = 34;  // 2x20
+inline constexpr std::uint32_t kElytraBackX = 36;      // 10x20, visible design
+inline constexpr std::uint32_t kElytraSideY = 2;
+
+// Vanilla's wing cube is rectangular, but transparent texels cut it into the
+// familiar tapered Elytra silhouette. Each bit below represents x=22..45 for
+// one row y=0..21 of textures/models/armor/elytra.png. Reusing only its alpha
+// silhouette lets a custom cape supply the colors without turning the Elytra
+// into two opaque rectangular slabs.
+inline constexpr std::array<std::uint32_t, kElytraUvHeight> kElytraAlphaMask = {
+    0x03fe00u, 0x000c00u, 0x0ff000u, 0x1ff000u, 0x3fe000u, 0x3fe000u,
+    0x3fe000u, 0x7fe000u, 0x7fe000u, 0x7fe000u, 0x7fe000u, 0xffc001u,
+    0xffc001u, 0xffc001u, 0xffc001u, 0xffc001u, 0xff8001u, 0xff8001u,
+    0xff8001u, 0xff0001u, 0xff0001u, 0xfe0001u,
+};
+
+// True for every texel actually addressed by the Elytra box unwrap. The two
+// unused 2x2 corners on the first two rows are deliberately excluded.
+inline constexpr bool isElytraUvPixel(std::uint32_t x, std::uint32_t y) {
+    if (x < kElytraUvX || x >= kElytraUvX + kElytraUvWidth ||
+        y < kElytraUvY || y >= kElytraUvY + kElytraUvHeight) {
+        return false;
+    }
+    return y >= kElytraDepth ||
+           (x >= kElytraTopX && x < kElytraBottomX + kElytraFaceWidth);
+}
+
+inline constexpr bool isElytraMaskPixel(std::uint32_t x, std::uint32_t y) {
+    if (x < kElytraUvX || x >= kElytraUvX + kElytraUvWidth ||
+        y >= kElytraUvHeight) {
+        return false;
+    }
+    return (kElytraAlphaMask[y] & (1u << (x - kElytraUvX))) != 0;
+}
 
 // Safety cap so a hostile/corrupt PNG can never exhaust device memory.
 inline constexpr std::uint32_t kMaxSourceDimension = 4096;
@@ -187,18 +241,86 @@ inline int resolveSelectionIndex(int parsedIndex, const std::string& parsedName,
     return 0;
 }
 
-// Nearest-neighbor resample of an RGBA8 buffer onto the classic-cape layout
-// of the 64x32 canvas:
+// Returns true when a complete 64x32 cape canvas already contains visible
+// artwork in any texel used by geometry.elytra. Checking the whole UV unwrap,
+// rather than only the vanilla silhouette, preserves custom wing shapes.
+inline bool hasElytraArtwork(const std::vector<std::uint8_t>& canvas) {
+    const std::size_t expected = static_cast<std::size_t>(kCapeWidth) * kCapeHeight * 4u;
+    if (canvas.size() < expected) return false;
+    for (std::uint32_t y = 0; y < kElytraUvHeight; ++y) {
+        for (std::uint32_t x = kElytraUvX; x < kElytraUvX + kElytraUvWidth; ++x) {
+            if (!isElytraUvPixel(x, y)) continue;
+            const std::size_t i = (static_cast<std::size_t>(y) * kCapeWidth + x) * 4u;
+            if (canvas[i + 3] != 0) return true;
+        }
+    }
+    return false;
+}
+
+// Paints the visible cape design onto the shared Elytra wing UV. This is a
+// fallback for generated capes and complete 64x32 capes whose Elytra area is
+// empty. The RGB and source alpha come from the cape's outer face; the final
+// alpha is also clipped by the vanilla tapered-wing mask.
+inline void paintElytraFromCape(std::vector<std::uint8_t>& canvas) {
+    const std::size_t expected = static_cast<std::size_t>(kCapeWidth) * kCapeHeight * 4u;
+    if (canvas.size() < expected) return;
+
+    const auto pixel = [&](std::uint32_t x, std::uint32_t y) -> std::uint8_t* {
+        return &canvas[(static_cast<std::size_t>(y) * kCapeWidth + x) * 4u];
+    };
+
+    // Remove invisible RGB left in an otherwise transparent input, then add
+    // only the texels belonging to the vanilla wing silhouette.
+    for (std::uint32_t y = 0; y < kElytraUvHeight; ++y) {
+        for (std::uint32_t x = kElytraUvX; x < kElytraUvX + kElytraUvWidth; ++x) {
+            if (!isElytraUvPixel(x, y)) continue;
+            std::memset(pixel(x, y), 0, 4);
+        }
+    }
+
+    for (std::uint32_t y = 0; y < kElytraUvHeight; ++y) {
+        for (std::uint32_t x = kElytraUvX; x < kElytraUvX + kElytraUvWidth; ++x) {
+            if (!isElytraMaskPixel(x, y)) continue;
+
+            // Map each unwrapped face back to an adjacent column of the cape
+            // design. The large visible face (x=36..45) gets all ten columns;
+            // the thin side strips continue the corresponding edge color.
+            std::uint32_t designX = 0;
+            if (x < kElytraTopX) {
+                designX = kCapeBackWidth - 1;
+            } else if (x < kElytraTopX + kElytraFaceWidth) {
+                designX = x - kElytraTopX;
+            } else if (x < kElytraBackX) {
+                designX = 0;
+            } else {
+                designX = std::min(x - kElytraBackX, kCapeBackWidth - 1);
+            }
+
+            const std::uint32_t wingY = y < kElytraSideY ? 0 : y - kElytraSideY;
+            const std::uint32_t designY = std::min(
+                static_cast<std::uint32_t>(
+                    (static_cast<std::uint64_t>(wingY) * kCapeBackHeight) /
+                    kElytraFaceHeight),
+                kCapeBackHeight - 1);
+
+            std::memcpy(pixel(x, y),
+                        pixel(kCapeBackX + designX, kCapeBackY + designY), 4);
+        }
+    }
+}
+
+// Nearest-neighbor resample of an RGBA8 buffer onto the classic-cape and
+// Elytra layouts of the 64x32 canvas:
 //
-//   * the image is painted onto the outer BACK face only, (1,1) 10x16;
+//   * the image is painted onto the outer BACK face, (1,1) 10x16;
 //   * the inner FRONT face (12,1) never repeats the image — it gets one flat
-//     lining color (a half-brightness average of the visible design), so the
-//     same picture no longer shows on both sides of the cape;
-//   * the Top/Bottom/Side edge strips are painted from the adjacent
-//     back-face edge pixels, giving the 1-voxel-thick mesh visible thickness.
+//     lining color (a half-brightness average of the visible design);
+//   * the cape's Top/Bottom/Side strips continue the adjacent edge pixels;
+//   * the same design is mapped onto the tapered Elytra UV at (22,0), so it
+//     remains visible when the player equips an Elytra.
 //
-// An exact 64x32 input is already a complete cape canvas and is therefore
-// copied pixel-for-pixel, preserving full manual control over every face.
+// An exact 64x32 input keeps its manually authored Elytra pixels. If that UV
+// area is fully transparent, the fallback is generated from the cape face.
 // Sequential input/output traversal keeps the cache behavior linear, which
 // is plenty for one-off loads of a few hundred KB.
 inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::uint32_t width,
@@ -209,6 +331,7 @@ inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::u
 
     if (width == kCapeWidth && height == kCapeHeight) {
         out.assign(rgba, rgba + out.size());
+        if (!hasElytraArtwork(out)) paintElytraFromCape(out);
         return out;
     }
 
@@ -270,6 +393,9 @@ inline std::vector<std::uint8_t> resampleToCape(const std::uint8_t* rgba, std::u
                     px(out, kCapeBackX + kCapeBackWidth - 1, kCapeBackY + y),
                     4);                                                      // <- design right column
     }
+
+    // 4) Elytra: reuse the cape design in the UV area sampled by both wings.
+    paintElytraFromCape(out);
 
     return out;
 }

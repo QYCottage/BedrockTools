@@ -17,9 +17,11 @@
 // painted onto the outer back face only (x=1..11, y=1..17), the inner
 // front face is filled with a flat lining color instead of a repeat of the
 // image, and the top/bottom/side edge strips are continued from the image's
-// edge colors so the 1-voxel-thick cape mesh does not look flat. Exact 64x32
-// inputs are copied pixel-for-pixel for full manual control. The result is
-// written into the local player's SerializedSkinImpl::mCapeImage each tick. Modern game versions
+// edge colors so the 1-voxel-thick cape mesh does not look flat. The design
+// is also mapped onto the tapered Elytra UV area used by both wings. Exact
+// 64x32 inputs keep manually-authored Elytra pixels; if that area is empty,
+// the wing fallback is generated from the cape face. The result is written
+// into the local player's SerializedSkinImpl::mCapeImage each tick. Modern game versions
 // only render the classic cape when SerializedSkinImpl::mCapeId is
 // non-empty, so a synthetic short-string id is written alongside the image
 // and restored together with it. The blob handed to the
