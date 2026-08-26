@@ -12,6 +12,7 @@
 #include "hud/playercoords.hpp"
 #include "hud/compass.hpp"
 #include "player/timechanger.hpp"
+#include "player/autosprint.hpp"
 #include "player/weatherchanger.hpp"
 #include "player/nick.hpp"
 #include "misc/nodisconnect.hpp"
@@ -36,6 +37,7 @@
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
 #include "player/autoreq.hpp"
+#include "visual/swingmodifier.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
     static ModuleRegistry registry;
@@ -91,6 +93,7 @@ void registerAllModules() {
     registry.emplace<PlayerCoordsModule>();
     registry.emplace<CompassModule>();
     registry.emplace<TimeChangerModule>();
+    registry.emplace<AutoSprintModule>();
     registry.emplace<WeatherChangerModule>();
     registry.emplace<NickModule>();
     registry.emplace<NoDisconnectModule>();
@@ -100,6 +103,7 @@ void registerAllModules() {
     registry.emplace<SpeedDisplayModule>();
     registry.emplace<DebugMenuModule>();
     registry.emplace<ViewModelModule>();
+    registry.emplace<SwingModifierModule>();
     registry.emplace<KeystrokesModule>();
     registry.emplace<ThirdPersonNametagModule>();
     registry.emplace<TablistModule>();

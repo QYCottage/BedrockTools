@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <cstdint>
 #include <mutex>
 #include <utility>
 
@@ -54,14 +55,46 @@ public:
     bool isHudModule = true;
 
 private:
+    using PlayerSwingFn = bool(*)(void*, std::uint8_t);
+    static bool playerSwingDetour(void* player, std::uint8_t source);
+    static PlayerSwingFn s_playerSwingOriginal;
+
     std::pair<int, int> getMouseCps();
     void clearMouseState();
+    void queueNativeClick(bool left);
+    void queueNativeSwing(std::uint8_t source);
+    void queueNativeExplicitLeft();
+    void queueNativeRight(std::uint16_t swingSourceMask);
+    void resolveNativeInputTick();
+    void flushNativeClickBatch(bool force);
+    void commitNativeClickBatchLocked();
 
+    bool m_playerSwingHooked = false;
+    std::atomic_bool m_destroyActive{false};
     std::atomic_bool m_mouseActive{false};
     std::atomic_bool m_showMouseCps{true};
     std::atomic_bool m_lmbDown{false};
     std::atomic_bool m_rmbDown{false};
+    std::atomic<std::int64_t> m_nativeLmbUntilNs{0};
+    std::atomic<std::int64_t> m_nativeRmbUntilNs{0};
+    std::atomic<std::int64_t> m_lastMouseLmbNs{0};
+    std::atomic<std::int64_t> m_lastMouseRmbNs{0};
     std::deque<std::chrono::steady_clock::time_point> m_leftClicks;
     std::deque<std::chrono::steady_clock::time_point> m_rightClicks;
+    bool m_nativeBatchActive = false;
+    bool m_nativeBatchLeft = false;
+    bool m_nativeBatchRight = false;
+    std::int64_t m_nativeBatchLastNs = 0;
+    struct PendingNativeSwing {
+        std::uint8_t source = 0;
+        std::uint8_t ticksRemaining = 0;
+    };
+    std::deque<PendingNativeSwing> m_pendingNativeSwings;
+    std::uint32_t m_nativeSwingSuppressCount = 0;
+    std::uint8_t m_nativeSwingSuppressTicks = 0;
+    std::uint16_t m_nativeRmbSwingSuppressMask = 0;
+    std::uint8_t m_nativeRmbSwingSuppressTicks = 0;
+    bool m_nativeExplicitLeftThisTick = false;
+    bool m_nativeRightThisTick = false;
     std::mutex m_mouseMutex;
 };

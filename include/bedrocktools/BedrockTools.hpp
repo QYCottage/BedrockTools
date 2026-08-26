@@ -10,6 +10,7 @@
 #include <bedrocktools/sdk/Functions.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/Types.hpp>
+#include <bedrocktools/sdk/input/MoveInput.hpp>
 #include <bedrocktools/sdk/client/ClientInstance.hpp>
 #include <bedrocktools/sdk/network/Packet.hpp>
 #include <bedrocktools/sdk/render/Block.hpp>
