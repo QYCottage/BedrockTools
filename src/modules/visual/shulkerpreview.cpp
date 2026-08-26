@@ -186,6 +186,7 @@ struct CachedUiTextures {
 using NbtTreeFindFn = void* (*)(void*, const NbtTreeKey*);
 using ItemStackBaseLoadItemFn = void (*)(void*, void*);
 using ItemStackBaseGetDamageValueFn = short (*)(ItemStackBase*);
+using ItemStackBaseGetRawNameIdFn = std::string (*)(ItemStackBase*);
 using BaseActorRenderContextCtorFn = void (*)(void*, void*, void*, void*);
 using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(void*, void*, void*, unsigned int, unsigned char, std::uint64_t, float, float, float, float, float);
 using DrawTextFn = void (*)(void*, Font&, const RectangleArea&, const std::string&, const mce::Color&, TextAlignment, float, const TextMeasureData&, const CaretMeasureData&);
@@ -197,6 +198,7 @@ using ScreenViewRenderFn = void (*)(void*, void*, void*, void*, void*, void*, vo
 NbtTreeFindFn nbtTreeFind = nullptr;
 ItemStackBaseLoadItemFn itemStackBaseLoadItem = nullptr;
 ItemStackBaseGetDamageValueFn itemStackBaseGetDamageValue = nullptr;
+ItemStackBaseGetRawNameIdFn itemStackBaseGetRawNameId = nullptr;
 BaseActorRenderContextCtorFn baseActorRenderContextCtor = nullptr;
 ItemRendererRenderGuiItemNewFn itemRendererRenderGuiItemNew = nullptr;
 ContainerSlotSelectedFn containerSlotSelectedOriginal = nullptr;
@@ -244,6 +246,18 @@ short getItemMaxDamage(Item* item) {
     void** vtable = *reinterpret_cast<void***>(item);
     if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::ItemGetMaxDamage]) return 0;
     return reinterpret_cast<short (*)(Item*)>(vtable[bedrocktools::sdk::offsets::VTable::ItemGetMaxDamage])(item);
+}
+
+// the effect need apply for these only
+bool Tex2(ItemStackBase* stack) {
+    if (!stack || !itemStackBaseGetRawNameId) return false;
+    const std::string name = itemStackBaseGetRawNameId(stack);
+    return name == "leather_helmet"
+        || name == "leather_chestplate"
+        || name == "leather_leggings"
+        || name == "leather_boots"
+        || name == "firework_star"
+        || name == "leather_horse_armor";
 }
 
 void* treeFindNode(void* compound, const char* key, std::size_t length) {
@@ -437,6 +451,22 @@ mce::TexturePtr uiGetTexture(void* context, const ResourceLocation& location, bo
 bool hasTexture(const mce::TexturePtr& texture) {
     return static_cast<bool>(texture.clientTexture);
 }
+//HUD_OPACITY
+void setHudOpacity(void* context, float opacity) {
+    if (!context) return;
+    void* screenContext = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(context) + bedrocktools::sdk::offsets::ShulkerPreview::MinecraftUIRenderContextScreenContext);
+    if (!screenContext) return;
+    auto* constantBuffers = *reinterpret_cast<std::byte**>(reinterpret_cast<std::byte*>(screenContext) + 0x20);
+    if (!constantBuffers) return;
+    auto* shaderConstantBuffer = *reinterpret_cast<std::byte**>(constantBuffers + 0x150);
+    if (!shaderConstantBuffer) return;
+    auto* opacityPtr = *reinterpret_cast<float**>(shaderConstantBuffer + 0x30);
+    if (!opacityPtr) return;
+    if (*opacityPtr != opacity) {
+        *opacityPtr = opacity;
+        *reinterpret_cast<std::uint8_t*>(shaderConstantBuffer + 0x29) = 1;
+    }
+}
 
 CachedUiTextures& getTextures(void* context) {
     static CachedUiTextures textures;
@@ -591,6 +621,25 @@ void drawIcons(void* context, int cacheIndex, float originX, float originY) {
         return;
     }
     void* localPlayer = getClientLocalPlayer(client);
+    static const HashedString flushMaterial("ui_flush");
+    /*
+    ~Kashifro
+    First pass set the HUD_OPACITY to some high value pref > 80 anythin below is semi transparent, now this alone does make the 
+    missing tex visible but when you are to dye the item, the dye bleeds into those pixels asw inorder to fix that i just put the 10th arg
+    of the render func to 20, but again the opacity would have weird artifacts for glass blocks and such so run this for items the need the fix only
+    */
+    if (itemStackBaseGetRawNameId) {
+        setHudOpacity(context, 90.0f);
+        forEachSlot(originX, originY, [&](int slot, float x, float y) {
+            ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
+            if (!stack || !Tex2(stack)) return;
+            unsigned int aux = localPlayer ? getItemAnimationFrame(getStackItem(stack), localPlayer, stack) : 0;
+            itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, aux, 0, 0, x + ItemInset, y + ItemInset, 1.0f, 20.0f, 1.0f);
+        });
+        uiFlushImages(context, {1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, flushMaterial);
+        setHudOpacity(context, 1.0f);
+    }
+
     forEachSlot(originX, originY, [&](int slot, float x, float y) {
         ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
         if (!stack) return;
@@ -615,8 +664,7 @@ void drawIcons(void* context, int cacheIndex, float originX, float originY) {
         if (cache.bundleWeight >= 0) drawBundleFullnessBar(context, x, y, cache.bundleWeight);
     });
     destroyBaseActorRenderContext(baseActorRenderContext);
-    static const HashedString material("ui_flush");
-    uiFlushImages(context, {1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, material);
+    uiFlushImages(context, {1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, flushMaterial);
 }
 
 void renderPreview(void* context, float x, float y, int cacheIndex, char colorCode) {
@@ -801,6 +849,7 @@ void ShulkerPreviewModule::onInit() {
     nbtTreeFind = reinterpret_cast<NbtTreeFindFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::NbtTreeFind));
     itemStackBaseLoadItem = reinterpret_cast<ItemStackBaseLoadItemFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseLoadItem));
     itemStackBaseGetDamageValue = reinterpret_cast<ItemStackBaseGetDamageValueFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetDamageValue));
+    itemStackBaseGetRawNameId = reinterpret_cast<ItemStackBaseGetRawNameIdFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetRawNameId));
     baseActorRenderContextCtor = reinterpret_cast<BaseActorRenderContextCtorFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BaseActorRenderContextCtor));
     itemRendererRenderGuiItemNew = reinterpret_cast<ItemRendererRenderGuiItemNewFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemRendererRenderGuiItemNew));
     containerGetItemStack = reinterpret_cast<ContainerGetItemStackFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ContainerScreenControllerGetItemStack));

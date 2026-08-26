@@ -95,6 +95,7 @@ enum class SignatureId : std::uint16_t {
     NbtTreeFind,
     ItemStackBaseLoadItem,
     ItemStackBaseGetDamageValue,
+    ItemStackBaseGetRawNameId,
     BaseActorRenderContextCtor,
     ItemRendererRenderGuiItemNew,
     ControlOptionEditorTick,
