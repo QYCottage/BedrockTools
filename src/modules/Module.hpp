@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <utility>
 
 class Module {
@@ -24,6 +25,9 @@ public:
     virtual void onDisable()  {}
     virtual void onFrame()    {}
     virtual bool onMouseEvent(int button, bool isDown) { return false; }
+    virtual bool onMenuConfigChanged(std::string_view key, std::string_view value) { return false; }
+    virtual bool showInLegacyMenu(std::string_view key) const { return true; }
+    virtual void onMenuRegistered() {}
     
     virtual void onKeybindEvent(const std::string& key, bool isDown) {
         if (key == "keybind" && isDown) {

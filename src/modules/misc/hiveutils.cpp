@@ -1,10 +1,13 @@
 #include "hiveutils.hpp"
+#include "hivemaps.hpp"
 #include "core/GameHooks.hpp"
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <pl/Platform.hpp>
+#include <pl/ModMenuConfig.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
@@ -14,6 +17,7 @@
 #include <new>
 #include <optional>
 #include <regex>
+#include <set>
 #include <string_view>
 #include <vector>
 
@@ -117,9 +121,16 @@ std::vector<std::string> mapsForGame(std::string_view rules, std::string_view ga
     };
     auto exact = findKey(wanted);
     if (!exact.empty()) return exact;
-    if (wanted.find('-') == std::string::npos) {
-        for (const char* suffix : {"-solos", "-duos", "-squads"}) {
+    const std::size_t dash = wanted.find('-');
+    if (dash == std::string::npos) {
+        for (const char* suffix : {"-solos", "-solo", "-regular", "-duos", "-squads"}) {
             auto fallback = findKey(wanted + suffix);
+            if (!fallback.empty()) return fallback;
+        }
+    } else {
+        const std::string suffix = wanted.substr(dash + 1);
+        if (suffix == "solos" || suffix == "solo" || suffix == "regular") {
+            auto fallback = findKey(wanted.substr(0, dash));
             if (!fallback.empty()) return fallback;
         }
     }
@@ -294,7 +305,7 @@ void handleAnnounceVote(const std::string& message) {
 void handleMapAvoider(const std::string& message) {
     HiveUtilsModule* mod = HiveUtilsModule::instance;
     if (!mod || !mod->mapAvoider || sCurrentGame.empty()) return;
-    const auto avoided = mapsForGame(mod->mapAvoiderRules, sCurrentGame);
+    const auto avoided = mapsForGame(mod->mapAvoidRulesSnapshot(), sCurrentGame);
     if (avoided.empty()) return;
     std::string clean = trim(stripColorCodes(message));
     const std::string cleanLower = lower(clean);
@@ -359,7 +370,7 @@ void handleCustomServerTitle(const std::string& text) {
 std::optional<int> preferredMapIndex(const std::vector<std::string>& maps) {
     HiveUtilsModule* mod = HiveUtilsModule::instance;
     if (!mod) return std::nullopt;
-    const auto prefs = mapsForGame(mod->autoMapVoteRules, sCurrentGame);
+    const auto prefs = mapsForGame(mod->mapVoteRulesSnapshot(), sCurrentGame);
     if (prefs.empty()) return std::nullopt;
     std::vector<std::string> normalized;
     normalized.reserve(maps.size());
@@ -460,6 +471,222 @@ void changeDimensionDetour(void* player, void* packet) {
     if (sChangeDimensionOriginal) sChangeDimensionOriginal(player, packet);
 }
 
+
+struct HiveGameOption {
+    std::string_view id;
+    std::string_view label;
+};
+
+constexpr std::array<HiveGameOption, 13> kHiveMapGames{{
+    {"bed", "BedWars"},
+    {"sky", "SkyWars"},
+    {"wars", "Treasure Wars"},
+    {"sg", "Survival Games"},
+    {"dr", "DeathRun"},
+    {"hide", "Hide and Seek"},
+    {"murder", "Murder Mystery"},
+    {"ctf", "Capture The Flag"},
+    {"drop", "Block Drop"},
+    {"ground", "Ground Wars"},
+    {"build", "Build Battle"},
+    {"bridge", "The Bridge"},
+    {"grav", "Gravity"},
+}};
+
+std::string upper(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return value;
+}
+
+std::string normalizeVariant(std::string value) {
+    value = upper(trim(std::move(value)));
+    if (value.empty() || value == "SOLOS" || value == "SOLO") return "REGULAR";
+    return value;
+}
+
+std::string mapRuleKey(std::string_view game, std::string_view variant) {
+    std::string base = upper(bedrocktools::hive::apiGameId(game));
+    std::string normalized = normalizeVariant(std::string(variant));
+    if (normalized == "REGULAR") return base;
+    return base + "-" + normalized;
+}
+
+std::string variantLabel(std::string_view variant) {
+    std::string value = normalizeVariant(std::string(variant));
+    if (value == "REGULAR") return "Regular";
+    std::string result = lower(value);
+    bool capitalize = true;
+    for (char& c : result) {
+        if (c == '_' || c == '-') {
+            c = ' ';
+            capitalize = true;
+        } else if (capitalize) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            capitalize = false;
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> jsonStringList(const nlohmann::json& object, std::string_view key) {
+    std::vector<std::string> result;
+    if (!object.is_object()) return result;
+    auto it = object.find(std::string(key));
+    if (it == object.end() || !it->is_array()) return result;
+    std::set<std::string> seen;
+    for (const auto& value : *it) {
+        if (!value.is_string()) continue;
+        std::string name = trim(value.get<std::string>());
+        if (name.empty()) continue;
+        std::string normalized = lower(name);
+        if (seen.insert(normalized).second) result.push_back(std::move(name));
+    }
+    return result;
+}
+
+void setJsonStringList(nlohmann::json& object, std::string_view key, const std::vector<std::string>& values) {
+    if (!object.is_object()) object = nlohmann::json::object();
+    nlohmann::json list = nlohmann::json::array();
+    std::set<std::string> seen;
+    for (const auto& raw : values) {
+        std::string value = trim(raw);
+        if (value.empty()) continue;
+        std::string normalized = lower(value);
+        if (seen.insert(normalized).second) list.push_back(std::move(value));
+    }
+    object[std::string(key)] = std::move(list);
+}
+
+std::string canonicalMapRuleKey(std::string key) {
+    key = upper(trim(std::move(key)));
+    if (key.empty() || key == "*") return key;
+    const std::size_t dash = key.find('-');
+    if (dash == std::string::npos) return key;
+    const std::string suffix = key.substr(dash + 1);
+    if (suffix == "SOLOS" || suffix == "SOLO" || suffix == "REGULAR") key.resize(dash);
+    return key;
+}
+
+nlohmann::json parseLegacyMapRules(std::string_view rules) {
+    nlohmann::json result = nlohmann::json::object();
+    for (const auto& entry : split(rules, ';')) {
+        const std::size_t equals = entry.find('=');
+        if (equals == std::string::npos) continue;
+        std::string key = canonicalMapRuleKey(entry.substr(0, equals));
+        if (key.empty()) continue;
+        std::vector<std::string> values = split(std::string_view(entry).substr(equals + 1), '|');
+        if (values.empty()) continue;
+        auto merged = jsonStringList(result, key);
+        merged.insert(merged.end(), values.begin(), values.end());
+        setJsonStringList(result, key, merged);
+    }
+    return result;
+}
+
+std::string serializeMapRules(const nlohmann::json& preferences) {
+    if (!preferences.is_object()) return {};
+    std::vector<std::string> keys;
+    keys.reserve(preferences.size());
+    for (auto it = preferences.begin(); it != preferences.end(); ++it) keys.push_back(it.key());
+    std::sort(keys.begin(), keys.end());
+    std::string result;
+    for (const auto& key : keys) {
+        auto values = jsonStringList(preferences, key);
+        if (values.empty()) continue;
+        if (!result.empty()) result.push_back(';');
+        result += key;
+        result.push_back('=');
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i) result.push_back('|');
+            result += values[i];
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> parseJsonStringArray(std::string_view value) {
+    std::vector<std::string> result;
+    try {
+        auto parsed = nlohmann::json::parse(value);
+        if (!parsed.is_array()) return result;
+        std::set<std::string> seen;
+        for (const auto& item : parsed) {
+            if (!item.is_string()) continue;
+            std::string text = trim(item.get<std::string>());
+            if (text.empty()) continue;
+            std::string normalized = lower(text);
+            if (seen.insert(normalized).second) result.push_back(std::move(text));
+        }
+    } catch (...) {
+    }
+    return result;
+}
+
+std::string jsonArrayString(const std::vector<std::string>& values) {
+    return nlohmann::json(values).dump();
+}
+
+bool menuTruthy(std::string_view value) {
+    std::string normalized = lower(trim(std::string(value)));
+    return normalized == "true" || normalized == "1" || normalized == "on" || normalized == "yes";
+}
+
+std::string mapStatusText(const bedrocktools::hive::MapSnapshot& snapshot) {
+    if (snapshot.loading) return snapshot.maps.empty() ? "Loading maps from Hive..." : "Refreshing maps from Hive...";
+    if (!snapshot.error.empty()) {
+        if (!snapshot.maps.empty()) return snapshot.error + ". Showing cached maps.";
+        return snapshot.error;
+    }
+    if (snapshot.maps.empty()) return "No map data loaded yet.";
+    if (snapshot.stale) return "Showing cached map data. Refresh to check for updates.";
+    return "Loaded " + std::to_string(snapshot.maps.size()) + " maps from Hive.";
+}
+
+std::vector<pl::modmenu::ConfigOptionV2> gameOptions() {
+    std::vector<pl::modmenu::ConfigOptionV2> result;
+    result.reserve(kHiveMapGames.size());
+    for (const auto& game : kHiveMapGames) result.push_back({std::string(game.id), std::string(game.label)});
+    return result;
+}
+
+std::vector<pl::modmenu::ConfigOptionV2> variantOptions(std::string_view game, std::string_view selected) {
+    std::vector<std::string> variants = bedrocktools::hive::variantsForGame(game);
+    const std::string wanted = normalizeVariant(std::string(selected));
+    if (variants.empty()) variants.push_back(wanted);
+    bool found = false;
+    for (auto& variant : variants) {
+        variant = normalizeVariant(std::move(variant));
+        if (variant == wanted) found = true;
+    }
+    if (!found) variants.push_back(wanted);
+    std::sort(variants.begin(), variants.end());
+    variants.erase(std::unique(variants.begin(), variants.end()), variants.end());
+    std::vector<pl::modmenu::ConfigOptionV2> result;
+    result.reserve(variants.size());
+    for (const auto& variant : variants) result.push_back({variant, variantLabel(variant)});
+    return result;
+}
+
+std::vector<pl::modmenu::ConfigOptionV2> mapOptions(
+    const std::vector<bedrocktools::hive::MapInfo>& available,
+    const std::vector<std::string>& selected) {
+    std::vector<pl::modmenu::ConfigOptionV2> result;
+    std::set<std::string> present;
+    for (const auto& map : available) {
+        std::string key = lower(map.name);
+        if (!present.insert(key).second) continue;
+        std::string detail;
+        if (!map.season.empty() && upper(map.season) != "NO_SEASON") detail = variantLabel(map.season);
+        result.push_back({map.name, map.name, detail});
+    }
+    for (const auto& saved : selected) {
+        if (present.insert(lower(saved)).second) result.push_back({saved, saved + " (saved)", "Currently unavailable from the Hive map list"});
+    }
+    return result;
+}
+
 void installModalHook() {
     ensurePacketFunctions();
     if (!sCreatePacket) return;
@@ -477,7 +704,7 @@ void installModalHook() {
 }
 
 HiveUtilsModule::HiveUtilsModule()
-    : Module("Hive Utils", "Hive utilities with requeue, role skipping, chat cleanup, invites, CS copy, map voting and map avoidance. Map rules: GAME=Map A|Map B;BED-DUOS=Map C.") {
+    : Module("Hive Utils", "Hive utilities for requeueing, role skipping, chat cleanup, invites, custom servers, map voting and map avoidance.") {
     instance = this;
     showInMenu = true;
 }
@@ -506,6 +733,544 @@ void HiveUtilsModule::onKeybindEvent(const std::string& key, bool isDown) {
         return;
     }
     Module::onKeybindEvent(key, isDown);
+}
+
+bool HiveUtilsModule::onMenuConfigChanged(std::string_view key, std::string_view value) {
+    bool republish = false;
+    bool refreshVote = false;
+    bool refreshAvoid = false;
+    bool forceRefresh = false;
+    {
+        std::lock_guard lock(mMapConfigMutex);
+        if (key == "uiMapVoteGame") {
+            uiMapVoteGame = bedrocktools::hive::apiGameId(value);
+            if (uiMapVoteGame.empty()) uiMapVoteGame = "bed";
+            uiMapVoteVariant = "REGULAR";
+            republish = true;
+            refreshVote = true;
+        } else if (key == "uiMapVoteVariant") {
+            uiMapVoteVariant = normalizeVariant(std::string(value));
+            republish = true;
+        } else if (key == "uiMapAvoidGame") {
+            uiMapAvoidGame = bedrocktools::hive::apiGameId(value);
+            if (uiMapAvoidGame.empty()) uiMapAvoidGame = "bed";
+            uiMapAvoidVariant = "REGULAR";
+            republish = true;
+            refreshAvoid = true;
+        } else if (key == "uiMapAvoidVariant") {
+            uiMapAvoidVariant = normalizeVariant(std::string(value));
+            republish = true;
+        } else if (key == "mapVoteSelection") {
+            const std::string ruleKey = mapRuleKey(uiMapVoteGame, uiMapVoteVariant);
+            setJsonStringList(mapVotePreferences, ruleKey, parseJsonStringArray(value));
+            autoMapVoteRules = serializeMapRules(mapVotePreferences);
+            republish = true;
+        } else if (key == "mapAvoidSelection") {
+            const std::string ruleKey = mapRuleKey(uiMapAvoidGame, uiMapAvoidVariant);
+            setJsonStringList(mapAvoidPreferences, ruleKey, parseJsonStringArray(value));
+            mapAvoiderRules = serializeMapRules(mapAvoidPreferences);
+            republish = true;
+        } else if (key == "refreshMapVoteMaps") {
+            refreshVote = menuTruthy(value);
+            forceRefresh = refreshVote;
+        } else if (key == "refreshMapAvoidMaps") {
+            refreshAvoid = menuTruthy(value);
+            forceRefresh = refreshAvoid;
+        } else if (key == "clearHiveMapCache") {
+            if (menuTruthy(value)) {
+                bedrocktools::hive::clearMapCache();
+                refreshVote = true;
+                refreshAvoid = true;
+                forceRefresh = true;
+                republish = true;
+            }
+        } else if (key == "autoMapVoteRules") {
+            autoMapVoteRules = std::string(value);
+            mapVotePreferences = parseLegacyMapRules(autoMapVoteRules);
+            republish = true;
+        } else if (key == "mapAvoiderRules") {
+            mapAvoiderRules = std::string(value);
+            mapAvoidPreferences = parseLegacyMapRules(mapAvoiderRules);
+            republish = true;
+        } else {
+            return false;
+        }
+    }
+    if (republish && mMenuRegistered.load()) publishMenuSchema();
+    if (refreshVote) refreshMapData(true, forceRefresh);
+    if (refreshAvoid) refreshMapData(false, forceRefresh);
+    return true;
+}
+
+bool HiveUtilsModule::showInLegacyMenu(std::string_view key) const {
+    return key != "uiMapVoteGame"
+        && key != "uiMapVoteVariant"
+        && key != "uiMapAvoidGame"
+        && key != "uiMapAvoidVariant";
+}
+
+void HiveUtilsModule::onMenuRegistered() {
+    mMenuRegistered.store(true);
+    publishMenuSchema();
+    refreshMapData(true, false);
+    refreshMapData(false, false);
+}
+
+std::string HiveUtilsModule::mapVoteRulesSnapshot() const {
+    std::lock_guard lock(mMapConfigMutex);
+    return autoMapVoteRules;
+}
+
+std::string HiveUtilsModule::mapAvoidRulesSnapshot() const {
+    std::lock_guard lock(mMapConfigMutex);
+    return mapAvoiderRules;
+}
+
+void HiveUtilsModule::refreshMapData(bool vote, bool force) {
+    std::string game;
+    {
+        std::lock_guard lock(mMapConfigMutex);
+        game = vote ? uiMapVoteGame : uiMapAvoidGame;
+    }
+    HiveUtilsModule* expected = this;
+    bedrocktools::hive::refreshMapsAsync(game, force, [expected]() {
+        HiveUtilsModule* current = HiveUtilsModule::instance;
+        if (current == expected && current && current->mMenuRegistered.load()) current->publishMenuSchema();
+    });
+    if (mMenuRegistered.load()) publishMenuSchema();
+}
+
+void HiveUtilsModule::publishMenuSchema() {
+    if (!mMenuRegistered.load()) return;
+
+    std::string voteGame;
+    std::string voteVariant;
+    std::string avoidGame;
+    std::string avoidVariant;
+    std::string voteRules;
+    std::string avoidRules;
+    nlohmann::json votePreferences;
+    nlohmann::json avoidPreferences;
+    {
+        std::lock_guard lock(mMapConfigMutex);
+        voteGame = uiMapVoteGame;
+        voteVariant = normalizeVariant(uiMapVoteVariant);
+        avoidGame = uiMapAvoidGame;
+        avoidVariant = normalizeVariant(uiMapAvoidVariant);
+        voteRules = autoMapVoteRules;
+        avoidRules = mapAvoiderRules;
+        votePreferences = mapVotePreferences;
+        avoidPreferences = mapAvoidPreferences;
+    }
+
+    const std::string voteKey = mapRuleKey(voteGame, voteVariant);
+    const std::string avoidKey = mapRuleKey(avoidGame, avoidVariant);
+    const auto selectedVoteMaps = jsonStringList(votePreferences, voteKey);
+    const auto selectedAvoidMaps = jsonStringList(avoidPreferences, avoidKey);
+    const auto voteSnapshot = bedrocktools::hive::mapSnapshot(voteGame);
+    const auto avoidSnapshot = bedrocktools::hive::mapSnapshot(avoidGame);
+    const auto voteMaps = bedrocktools::hive::mapsForVariant(voteGame, voteVariant);
+    const auto avoidMaps = bedrocktools::hive::mapsForVariant(avoidGame, avoidVariant);
+
+    using namespace pl::modmenu;
+    ConfigSchemaBuilder schema;
+    schema.defaultCategory("requeue")
+        .category("requeue", "Requeue", "Automatic requeue behavior and shortcut")
+        .category("roles", "Roles", "Skip games when you receive selected Hive roles")
+        .category("maps", "Maps", "Automatic map voting and map avoidance")
+        .category("chat", "Chat", "Choose which Hive messages to hide")
+        .category("social", "Social", "Automatic friend and party actions")
+        .category("custom", "Custom Server", "Custom server code convenience options")
+        .category("advanced", "Advanced", "Compatibility, raw rules and map cache tools");
+
+    auto add = [&](ConfigNodeV2 node) {
+        schema.node(std::move(node));
+    };
+    auto visible = [](std::string key) {
+        return std::vector<ConfigConditionV2>{{std::move(key), ConfigConditionOpV2::Truthy, {}}};
+    };
+    auto section = [&](std::string id, std::string category, std::string title, std::string description = {}) {
+        ConfigNodeV2 node;
+        node.id = std::move(id);
+        node.category = std::move(category);
+        node.title = std::move(title);
+        node.description = std::move(description);
+        node.type = ConfigControlTypeV2::Section;
+        node.collapsible = true;
+        add(std::move(node));
+    };
+    auto toggle = [&](std::string key, std::string category, std::string sectionId, std::string title, std::string description = {}) {
+        ConfigNodeV2 node;
+        node.id = key;
+        node.key = std::move(key);
+        node.category = std::move(category);
+        node.section = std::move(sectionId);
+        node.title = std::move(title);
+        node.description = std::move(description);
+        node.type = ConfigControlTypeV2::Toggle;
+        add(std::move(node));
+    };
+
+    section("requeue_behavior", "requeue", "Automatic Requeue");
+    toggle("autoRequeue", "requeue", "requeue_behavior", "Auto Requeue", "Automatically find another match when a configured requeue condition is met.");
+    {
+        ConfigNodeV2 node;
+        node.id = "requeue_conditions";
+        node.category = "requeue";
+        node.section = "requeue_behavior";
+        node.title = "Requeue Conditions";
+        node.description = "Choose the match events that should trigger an automatic requeue.";
+        node.type = ConfigControlTypeV2::ToggleGroup;
+        node.choiceStyle = ConfigChoiceStyleV2::Chips;
+        node.options = {
+            {"solo", "Solo death / finish", {}, "autoRequeueSoloMode"},
+            {"team", "Team eliminated", {}, "autoRequeueTeamElimination"},
+            {"gameover", "Game over", {}, "autoRequeueGameOver"},
+        };
+        node.visibleWhen = visible("autoRequeue");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "useHub";
+        node.key = "useHub";
+        node.category = "requeue";
+        node.section = "requeue_behavior";
+        node.title = "Return To Hub";
+        node.description = "Use /hub instead of /q when a requeue condition is triggered.";
+        node.type = ConfigControlTypeV2::Toggle;
+        node.visibleWhen = visible("autoRequeue");
+        add(std::move(node));
+    }
+    section("requeue_shortcut", "requeue", "Shortcut");
+    {
+        ConfigNodeV2 node;
+        node.id = "requeueKeybind";
+        node.key = "requeueKeybind";
+        node.category = "requeue";
+        node.section = "requeue_shortcut";
+        node.title = "Requeue Keybind";
+        node.description = "Immediately requeue the current Hive game.";
+        node.type = ConfigControlTypeV2::Keybind;
+        add(std::move(node));
+    }
+
+    section("murder_roles", "roles", "Murder Mystery");
+    {
+        ConfigNodeV2 node;
+        node.id = "murder_roles_group";
+        node.category = "roles";
+        node.section = "murder_roles";
+        node.title = "Requeue Roles";
+        node.description = "Requeue when Hive assigns any selected role.";
+        node.type = ConfigControlTypeV2::ToggleGroup;
+        node.choiceStyle = ConfigChoiceStyleV2::Chips;
+        node.options = {
+            {"murderer", "Murderer", {}, "roleMurderer"},
+            {"sheriff", "Sheriff", {}, "roleSheriff"},
+            {"innocent", "Innocent", {}, "roleInnocent"},
+        };
+        add(std::move(node));
+    }
+    section("hide_roles", "roles", "Hide and Seek");
+    {
+        ConfigNodeV2 node;
+        node.id = "hide_roles_group";
+        node.category = "roles";
+        node.section = "hide_roles";
+        node.title = "Requeue Roles";
+        node.type = ConfigControlTypeV2::ToggleGroup;
+        node.choiceStyle = ConfigChoiceStyleV2::Chips;
+        node.options = {
+            {"hider", "Hider", {}, "roleHider"},
+            {"seeker", "Seeker", {}, "roleSeeker"},
+        };
+        add(std::move(node));
+    }
+    section("deathrun_roles", "roles", "DeathRun");
+    {
+        ConfigNodeV2 node;
+        node.id = "deathrun_roles_group";
+        node.category = "roles";
+        node.section = "deathrun_roles";
+        node.title = "Requeue Roles";
+        node.type = ConfigControlTypeV2::ToggleGroup;
+        node.choiceStyle = ConfigChoiceStyleV2::Chips;
+        node.options = {
+            {"death", "Death", {}, "roleDeath"},
+            {"runner", "Runner", {}, "roleRunner"},
+        };
+        add(std::move(node));
+    }
+    toggle("deathCountEnabled", "roles", "deathrun_roles", "Death Limit", "Requeue after dying the configured number of times in DeathRun.");
+    {
+        ConfigNodeV2 node;
+        node.id = "deathCountLimit";
+        node.key = "deathCountLimit";
+        node.category = "roles";
+        node.section = "deathrun_roles";
+        node.title = "Deaths Before Requeue";
+        node.type = ConfigControlTypeV2::SliderInt;
+        node.minValue = "1";
+        node.maxValue = "100";
+        node.step = "1";
+        node.unit = " deaths";
+        node.visibleWhen = visible("deathCountEnabled");
+        add(std::move(node));
+    }
+
+    section("map_vote", "maps", "Auto Map Vote", "Select maps visually. Preferred maps are tried from top to bottom.");
+    toggle("autoMapVote", "maps", "map_vote", "Auto Map Vote", "Automatically vote for the highest-priority preferred map available in Hive's vote form.");
+    {
+        ConfigNodeV2 node;
+        node.id = "uiMapVoteGame";
+        node.key = "uiMapVoteGame";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = "Game";
+        node.description = "Choose which game's map preferences to edit.";
+        node.type = ConfigControlTypeV2::Choice;
+        node.choiceStyle = ConfigChoiceStyleV2::Dropdown;
+        node.options = gameOptions();
+        node.currentValue = voteGame;
+        node.visibleWhen = visible("autoMapVote");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "uiMapVoteVariant";
+        node.key = "uiMapVoteVariant";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = "Variant";
+        node.type = ConfigControlTypeV2::Choice;
+        node.choiceStyle = ConfigChoiceStyleV2::Segmented;
+        node.options = variantOptions(voteGame, voteVariant);
+        node.currentValue = voteVariant;
+        node.visibleWhen = visible("autoMapVote");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "map_vote_status";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = "Hive Map Data";
+        node.description = mapStatusText(voteSnapshot);
+        node.type = ConfigControlTypeV2::Info;
+        node.visibleWhen = visible("autoMapVote");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "refreshMapVoteMaps";
+        node.key = "refreshMapVoteMaps";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = voteSnapshot.loading ? "Refreshing Maps" : "Refresh Maps";
+        node.description = "Fetch the latest enabled map list from the Hive API.";
+        node.type = ConfigControlTypeV2::Button;
+        node.actionValue = "true";
+        node.disabled = voteSnapshot.loading;
+        node.visibleWhen = visible("autoMapVote");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "mapVoteSelection";
+        node.key = "mapVoteSelection";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = "Preferred Maps";
+        node.description = "Long-press and drag selected maps to change voting priority. Tap an available map to add it.";
+        node.type = ConfigControlTypeV2::OrderedList;
+        node.searchable = true;
+        node.allowReorder = true;
+        node.options = mapOptions(voteMaps, selectedVoteMaps);
+        node.currentValue = jsonArrayString(selectedVoteMaps);
+        node.visibleWhen = visible("autoMapVote");
+        add(std::move(node));
+    }
+    toggle("announceVote", "maps", "map_vote", "Announce Vote", "Send a chat message after voting for a map.");
+    {
+        ConfigNodeV2 node;
+        node.id = "announceVoteMessage";
+        node.key = "announceVoteMessage";
+        node.category = "maps";
+        node.section = "map_vote";
+        node.title = "Announcement Message";
+        node.description = "Use {map} where the selected map name should appear.";
+        node.type = ConfigControlTypeV2::Text;
+        node.placeholder = "@here vote for {map}!";
+        node.maxLength = 128;
+        node.visibleWhen = visible("announceVote");
+        add(std::move(node));
+    }
+
+    section("map_avoid", "maps", "Map Avoider", "Choose maps that should trigger a new queue when they win the vote.");
+    toggle("mapAvoider", "maps", "map_avoid", "Map Avoider", "Automatically find a different match when a configured map wins.");
+    {
+        ConfigNodeV2 node;
+        node.id = "uiMapAvoidGame";
+        node.key = "uiMapAvoidGame";
+        node.category = "maps";
+        node.section = "map_avoid";
+        node.title = "Game";
+        node.type = ConfigControlTypeV2::Choice;
+        node.choiceStyle = ConfigChoiceStyleV2::Dropdown;
+        node.options = gameOptions();
+        node.currentValue = avoidGame;
+        node.visibleWhen = visible("mapAvoider");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "uiMapAvoidVariant";
+        node.key = "uiMapAvoidVariant";
+        node.category = "maps";
+        node.section = "map_avoid";
+        node.title = "Variant";
+        node.type = ConfigControlTypeV2::Choice;
+        node.choiceStyle = ConfigChoiceStyleV2::Segmented;
+        node.options = variantOptions(avoidGame, avoidVariant);
+        node.currentValue = avoidVariant;
+        node.visibleWhen = visible("mapAvoider");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "map_avoid_status";
+        node.category = "maps";
+        node.section = "map_avoid";
+        node.title = "Hive Map Data";
+        node.description = mapStatusText(avoidSnapshot);
+        node.type = ConfigControlTypeV2::Info;
+        node.visibleWhen = visible("mapAvoider");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "refreshMapAvoidMaps";
+        node.key = "refreshMapAvoidMaps";
+        node.category = "maps";
+        node.section = "map_avoid";
+        node.title = avoidSnapshot.loading ? "Refreshing Maps" : "Refresh Maps";
+        node.description = "Fetch the latest enabled map list from the Hive API.";
+        node.type = ConfigControlTypeV2::Button;
+        node.actionValue = "true";
+        node.disabled = avoidSnapshot.loading;
+        node.visibleWhen = visible("mapAvoider");
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "mapAvoidSelection";
+        node.key = "mapAvoidSelection";
+        node.category = "maps";
+        node.section = "map_avoid";
+        node.title = "Avoided Maps";
+        node.description = "Select every map you want Hive Utils to avoid for this game and variant.";
+        node.type = ConfigControlTypeV2::MultiChoice;
+        node.choiceStyle = ConfigChoiceStyleV2::Checklist;
+        node.searchable = true;
+        node.options = mapOptions(avoidMaps, selectedAvoidMaps);
+        node.currentValue = jsonArrayString(selectedAvoidMaps);
+        node.visibleWhen = visible("mapAvoider");
+        add(std::move(node));
+    }
+
+    section("chat_filters", "chat", "Messages To Hide");
+    {
+        ConfigNodeV2 node;
+        node.id = "chat_filter_group";
+        node.category = "chat";
+        node.section = "chat_filters";
+        node.title = "Chat Filters";
+        node.description = "Select the Hive messages you do not want to see.";
+        node.type = ConfigControlTypeV2::ToggleGroup;
+        node.choiceStyle = ConfigChoiceStyleV2::Checklist;
+        node.options = {
+            {"promo", "Promo / info", {}, "hidePromoMessages"},
+            {"unlocks", "Unused Locker unlocks", {}, "hideUnusedUnlocks"},
+            {"joined", "Player joined", {}, "hidePlayerJoined"},
+            {"unranked", "Unranked player chat", {}, "hideUnrankedPlayerMessages"},
+            {"hiveplus", "Hive+ chat", {}, "hideHivePlusMessages"},
+            {"noteaming", "No teaming warning", {}, "hideNoTeaming"},
+        };
+        add(std::move(node));
+    }
+
+    section("social_accept", "social", "Auto Accept");
+    toggle("autoAcceptFriend", "social", "social_accept", "Friend Requests", "Automatically accept incoming Hive friend requests.");
+    toggle("autoAcceptParty", "social", "social_accept", "Party Invites", "Automatically accept incoming Hive party invites.");
+
+    section("custom_code", "custom", "Join Code");
+    toggle("copyCustomServerCode", "custom", "custom_code", "Copy Join Code", "Automatically copy a custom server join code when Hive displays it.");
+    {
+        ConfigNodeV2 node;
+        node.id = "copyCustomServerCodeIncludeCommand";
+        node.key = "copyCustomServerCodeIncludeCommand";
+        node.category = "custom";
+        node.section = "custom_code";
+        node.title = "Include /cs Command";
+        node.description = "Copy /cs CODE instead of only the join code.";
+        node.type = ConfigControlTypeV2::Toggle;
+        node.visibleWhen = visible("copyCustomServerCode");
+        add(std::move(node));
+    }
+
+    section("advanced_rules", "advanced", "Raw Map Rules", "These fields are only for compatibility or manual recovery. Normal map setup should use the Maps category.");
+    {
+        ConfigNodeV2 node;
+        node.id = "autoMapVoteRules";
+        node.key = "autoMapVoteRules";
+        node.category = "advanced";
+        node.section = "advanced_rules";
+        node.title = "Auto Vote Rules";
+        node.description = "Legacy GAME=Map A|Map B format.";
+        node.type = ConfigControlTypeV2::MultilineText;
+        node.currentValue = voteRules;
+        node.advanced = true;
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "mapAvoiderRules";
+        node.key = "mapAvoiderRules";
+        node.category = "advanced";
+        node.section = "advanced_rules";
+        node.title = "Map Avoider Rules";
+        node.description = "Legacy GAME=Map A|Map B format.";
+        node.type = ConfigControlTypeV2::MultilineText;
+        node.currentValue = avoidRules;
+        node.advanced = true;
+        add(std::move(node));
+    }
+    section("advanced_cache", "advanced", "Map Cache");
+    {
+        ConfigNodeV2 node;
+        node.id = "cache_status";
+        node.category = "advanced";
+        node.section = "advanced_cache";
+        node.title = "Current Cache";
+        node.description = "Vote: " + mapStatusText(voteSnapshot) + " Avoider: " + mapStatusText(avoidSnapshot);
+        node.type = ConfigControlTypeV2::Info;
+        add(std::move(node));
+    }
+    {
+        ConfigNodeV2 node;
+        node.id = "clearHiveMapCache";
+        node.key = "clearHiveMapCache";
+        node.category = "advanced";
+        node.section = "advanced_cache";
+        node.title = "Clear And Refresh Map Cache";
+        node.description = "Discard cached Hive map metadata and fetch the selected games again.";
+        node.type = ConfigControlTypeV2::Button;
+        node.actionValue = "true";
+        add(std::move(node));
+    }
+
+    pl::modmenu::setConfigSchemaJson(moduleId, schema.toJson());
 }
 
 void HiveUtilsModule::loadConfig(const nlohmann::json& j) {
@@ -538,16 +1303,48 @@ void HiveUtilsModule::loadConfig(const nlohmann::json& j) {
     readBool("autoAcceptFriend", autoAcceptFriend);
     readBool("autoAcceptParty", autoAcceptParty);
     readBool("autoMapVote", autoMapVote);
-    readString("autoMapVoteRules", autoMapVoteRules);
     readBool("announceVote", announceVote);
     readString("announceVoteMessage", announceVoteMessage);
     readBool("mapAvoider", mapAvoider);
-    readString("mapAvoiderRules", mapAvoiderRules);
     readInt("requeueKeybind", requeueKeybind);
-    if (j.contains("soloMode")) autoRequeueSoloMode = j["soloMode"].get<bool>();
-    if (j.contains("teamElimination")) autoRequeueTeamElimination = j["teamElimination"].get<bool>();
-    if (j.contains("gameOver")) autoRequeueGameOver = j["gameOver"].get<bool>();
+    std::string loadedVoteRules = autoMapVoteRules;
+    std::string loadedAvoidRules = mapAvoiderRules;
+    std::string loadedVoteGame = uiMapVoteGame;
+    std::string loadedVoteVariant = uiMapVoteVariant;
+    std::string loadedAvoidGame = uiMapAvoidGame;
+    std::string loadedAvoidVariant = uiMapAvoidVariant;
+    readString("autoMapVoteRules", loadedVoteRules);
+    readString("mapAvoiderRules", loadedAvoidRules);
+    readString("uiMapVoteGame", loadedVoteGame);
+    readString("uiMapVoteVariant", loadedVoteVariant);
+    readString("uiMapAvoidGame", loadedAvoidGame);
+    readString("uiMapAvoidVariant", loadedAvoidVariant);
+    if (j.contains("soloMode") && j["soloMode"].is_boolean()) autoRequeueSoloMode = j["soloMode"].get<bool>();
+    if (j.contains("teamElimination") && j["teamElimination"].is_boolean()) autoRequeueTeamElimination = j["teamElimination"].get<bool>();
+    if (j.contains("gameOver") && j["gameOver"].is_boolean()) autoRequeueGameOver = j["gameOver"].get<bool>();
     deathCountLimit = std::max(1, deathCountLimit);
+    loadedVoteGame = bedrocktools::hive::apiGameId(loadedVoteGame);
+    loadedAvoidGame = bedrocktools::hive::apiGameId(loadedAvoidGame);
+    if (loadedVoteGame.empty()) loadedVoteGame = "bed";
+    if (loadedAvoidGame.empty()) loadedAvoidGame = "bed";
+    loadedVoteVariant = normalizeVariant(std::move(loadedVoteVariant));
+    loadedAvoidVariant = normalizeVariant(std::move(loadedAvoidVariant));
+    {
+        std::lock_guard lock(mMapConfigMutex);
+        uiMapVoteGame = std::move(loadedVoteGame);
+        uiMapVoteVariant = std::move(loadedVoteVariant);
+        uiMapAvoidGame = std::move(loadedAvoidGame);
+        uiMapAvoidVariant = std::move(loadedAvoidVariant);
+        autoMapVoteRules = std::move(loadedVoteRules);
+        mapAvoiderRules = std::move(loadedAvoidRules);
+        if (j.contains("mapVotePreferences") && j["mapVotePreferences"].is_object()) mapVotePreferences = j["mapVotePreferences"];
+        else mapVotePreferences = parseLegacyMapRules(autoMapVoteRules);
+        if (j.contains("mapAvoidPreferences") && j["mapAvoidPreferences"].is_object()) mapAvoidPreferences = j["mapAvoidPreferences"];
+        else mapAvoidPreferences = parseLegacyMapRules(mapAvoiderRules);
+        autoMapVoteRules = serializeMapRules(mapVotePreferences);
+        mapAvoiderRules = serializeMapRules(mapAvoidPreferences);
+    }
+    if (mMenuRegistered.load()) publishMenuSchema();
 }
 
 void HiveUtilsModule::saveConfig(nlohmann::json& j) {
@@ -577,10 +1374,20 @@ void HiveUtilsModule::saveConfig(nlohmann::json& j) {
     j["autoAcceptFriend"] = autoAcceptFriend;
     j["autoAcceptParty"] = autoAcceptParty;
     j["autoMapVote"] = autoMapVote;
-    j["autoMapVoteRules"] = autoMapVoteRules;
     j["announceVote"] = announceVote;
     j["announceVoteMessage"] = announceVoteMessage;
     j["mapAvoider"] = mapAvoider;
-    j["mapAvoiderRules"] = mapAvoiderRules;
     j["requeueKeybind"] = requeueKeybind;
+    std::lock_guard lock(mMapConfigMutex);
+    autoMapVoteRules = serializeMapRules(mapVotePreferences);
+    mapAvoiderRules = serializeMapRules(mapAvoidPreferences);
+    j["autoMapVoteRules"] = autoMapVoteRules;
+    j["mapAvoiderRules"] = mapAvoiderRules;
+    j["uiMapVoteGame"] = uiMapVoteGame;
+    j["uiMapVoteVariant"] = uiMapVoteVariant;
+    j["uiMapAvoidGame"] = uiMapAvoidGame;
+    j["uiMapAvoidVariant"] = uiMapAvoidVariant;
+    j["mapVotePreferences"] = mapVotePreferences;
+    j["mapAvoidPreferences"] = mapAvoidPreferences;
 }
+

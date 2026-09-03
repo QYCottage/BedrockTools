@@ -26,35 +26,41 @@ static void onModuleKeybind(std::string_view module_id, std::string_view key, bo
 static void onModuleConfigChanged(std::string_view module_id, std::string_view key, std::string_view value) {
     auto* mod = ModuleRegistry::get().find(module_id);
     if (!mod) return;
+    if (mod->onMenuConfigChanged(key, value)) {
+        bedrocktools::config::ConfigManager::get().save();
+        return;
+    }
 
     nlohmann::json j;
     mod->saveConfig(j);
 
     std::string safeValue(value);
     std::string safeKey(key);
-    if (!safeValue.empty()) {
-        try {
-            if (j.contains(safeKey)) {
-                if (j[safeKey].is_boolean()) {
-                    if (safeValue == "true") j[safeKey] = true;
-                    else if (safeValue == "false") j[safeKey] = false;
-                } else if (j[safeKey].is_number_integer()) {
+    try {
+        if (j.contains(safeKey)) {
+            if (j[safeKey].is_boolean()) {
+                if (safeValue == "true") j[safeKey] = true;
+                else if (safeValue == "false") j[safeKey] = false;
+            } else if (j[safeKey].is_number_integer()) {
+                if (!safeValue.empty()) {
                     char* end;
                     int val = std::strtol(safeValue.c_str(), &end, 10);
                     if (end != safeValue.c_str()) j[safeKey] = val;
-                } else if (j[safeKey].is_number_float()) {
+                }
+            } else if (j[safeKey].is_number_float()) {
+                if (!safeValue.empty()) {
                     char* end;
                     float val = std::strtof(safeValue.c_str(), &end);
                     if (end != safeValue.c_str()) j[safeKey] = val;
-                } else {
-                    j[safeKey] = safeValue;
                 }
             } else {
                 j[safeKey] = safeValue;
             }
-        } catch (...) {
+        } else {
             j[safeKey] = safeValue;
         }
+    } catch (...) {
+        j[safeKey] = safeValue;
     }
     mod->loadConfig(j);
     bedrocktools::config::ConfigManager::get().save();
@@ -103,7 +109,7 @@ void registerModulesWithLauncher() {
             std::transform(keyLower.begin(), keyLower.end(), keyLower.begin(), ::tolower);
             const bool isHudPosition = keyLower.rfind("hud", 0) == 0 &&
                 (keyLower.ends_with("posx") || keyLower.ends_with("posy"));
-            if (isBase || isHudPosition) continue;
+            if (isBase || isHudPosition || !mod->showInLegacyMenu(k)) continue;
 
             std::string displayName;
             std::string sourceKey = k;
@@ -236,6 +242,6 @@ void registerModulesWithLauncher() {
             builder.config(entry.key, entry.displayName, entry.type, entry.default_value, entry.min_value, entry.max_value, entry.depends_on);
         }
 
-        (void)builder.registerModule();
+        if (builder.registerModule()) mod->onMenuRegistered();
     }
 }

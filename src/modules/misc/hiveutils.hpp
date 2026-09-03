@@ -3,6 +3,8 @@
 #include "../Module.hpp"
 #include <cstdint>
 #include <string>
+#include <mutex>
+#include <atomic>
 
 class HiveUtilsModule : public Module {
 public:
@@ -12,6 +14,9 @@ public:
     void onInit() override;
     void onEnable() override;
     void onKeybindEvent(const std::string& key, bool isDown) override;
+    bool onMenuConfigChanged(std::string_view key, std::string_view value) override;
+    bool showInLegacyMenu(std::string_view key) const override;
+    void onMenuRegistered() override;
     void loadConfig(const nlohmann::json& j) override;
     void saveConfig(nlohmann::json& j) override;
 
@@ -46,6 +51,21 @@ public:
     bool mapAvoider = false;
     std::string mapAvoiderRules;
     int requeueKeybind = 0;
+    std::string uiMapVoteGame = "bed";
+    std::string uiMapVoteVariant = "REGULAR";
+    std::string uiMapAvoidGame = "bed";
+    std::string uiMapAvoidVariant = "REGULAR";
+    nlohmann::json mapVotePreferences = nlohmann::json::object();
+    nlohmann::json mapAvoidPreferences = nlohmann::json::object();
+
+    void publishMenuSchema();
+    void refreshMapData(bool vote, bool force);
+    std::string mapVoteRulesSnapshot() const;
+    std::string mapAvoidRulesSnapshot() const;
 
     static HiveUtilsModule* instance;
+
+private:
+    mutable std::mutex mMapConfigMutex;
+    std::atomic_bool mMenuRegistered{false};
 };
