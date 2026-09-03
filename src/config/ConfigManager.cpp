@@ -2,6 +2,7 @@
 #include "modules/ModuleRegistry.hpp"
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 
 namespace bedrocktools::config {
 
@@ -44,7 +45,11 @@ void ConfigManager::load() {
         if (j.contains("Modules")) {
             auto& modulesObj = j["Modules"];
             for (auto* mod : ModuleRegistry::get().modules()) {
-                if (modulesObj.contains(mod->name)) mod->loadConfig(modulesObj[mod->name]);
+                if (modulesObj.contains(mod->name)) {
+                    mod->loadConfig(modulesObj[mod->name]);
+                } else if (std::string_view(mod->name) == "Hive Utils" && modulesObj.contains("AutoReQ")) {
+                    mod->loadConfig(modulesObj["AutoReQ"]);
+                }
             }
         }
     } catch (...) {

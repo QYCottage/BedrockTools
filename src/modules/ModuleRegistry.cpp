@@ -37,7 +37,7 @@
 #include "visual/connectedglass.hpp"
 #include "player/skinstealer.hpp"
 #include "player/autogg.hpp"
-#include "player/autoreq.hpp"
+#include "misc/hiveutils.hpp"
 #include "visual/swingmodifier.hpp"
 
 ModuleRegistry& ModuleRegistry::get() {
@@ -115,7 +115,7 @@ void registerAllModules() {
     registry.emplace<BreadcrumbsModule>();
     registry.emplace<SkinStealerModule>();
     registry.emplace<AutoGG>();
-    registry.emplace<AutoReQ>();
+    registry.emplace<HiveUtilsModule>();
     registry.emplace<FPSUnlockerModule>();
     registry.emplace<LightOverlayModule>();
     registry.emplace<ShulkerPreviewModule>();
