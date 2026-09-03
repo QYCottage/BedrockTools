@@ -67,5 +67,6 @@ public:
 
 private:
     mutable std::mutex mMapConfigMutex;
+    std::mutex mMenuSchemaMutex;
     std::atomic_bool mMenuRegistered{false};
 };

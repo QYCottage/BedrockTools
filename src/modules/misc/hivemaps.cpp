@@ -50,9 +50,102 @@ std::filesystem::path cachePath() {
     return configPath.parent_path() / "hive_maps_cache.json";
 }
 
+// Offline fallback
+void seedBundledMapsLocked() {
+    auto &entry = gCache["bed"];
+    if (!entry.maps.empty()) return;
+    entry.updatedAt = 0;
+    entry.maps = {
+        {"Ablaze", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_ablaze.jpg"},
+        {"Amulet", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_amulet.jpg"},
+        {"Atlantis", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_atlantis.jpg"},
+        {"Belfry", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_belfry.jpg"},
+        {"Citadel", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_citadel.jpg"},
+        {"Cityscape", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_cityscape.jpg"},
+        {"Eggs", "SPRING", "DUOS", "https://cdn.playhive.com/maps/bed_duo_eggs.spring.jpg"},
+        {"Enigma", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_enigma.jpg"},
+        {"Fairy Garden", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_fairygarden_revamp.jpg"},
+        {"Fairytale Forest", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_fairytaleforest.jpg"},
+        {"Farmhouse", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_farmhouse.jpg"},
+        {"Gates", "SUMMER", "DUOS", "https://cdn.playhive.com/maps/bed_duo_gates.summer.jpg"},
+        {"Gates", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_gates.jpg"},
+        {"Mithriller", "HALLOWEEN", "DUOS", "https://cdn.playhive.com/maps/bed_duo_mithril.halloween.jpg"},
+        {"Mithril", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_mithril.jpg"},
+        {"North Pole", "WINTERFEST", "DUOS", "https://cdn.playhive.com/maps/bed_duo_northpole.winterfest.jpg"},
+        {"Oasis", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_oasis.jpg"},
+        {"Orangewood", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_orangewood.jpg"},
+        {"Present Factory", "WINTERFEST", "DUOS", "https://cdn.playhive.com/maps/bed_duo_presentfactory.winterfest.jpg"},
+        {"Resurrected", "HALLOWEEN", "DUOS", "https://cdn.playhive.com/maps/bed_duo_resurrected.halloween.jpg"},
+        {"Stranded", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_stranded.jpg"},
+        {"Vanaheim", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_vanaheim.jpg"},
+        {"Vineyard", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_vineyard.jpg"},
+        {"Whirlwood", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_whirlwood.jpg"},
+        {"Wicked Woods", "NO_SEASON", "DUOS", "https://cdn.playhive.com/maps/bed_duo_wickedwoods.jpg"},
+        {"Manor", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_ltm_manor.jpg"},
+        {"Greenstead", "NO_SEASON", "MEGA", "https://cdn.playhive.com/maps/bed_mega_greenstead.jpg"},
+        {"Kingdom", "SPRING", "MEGA", "https://cdn.playhive.com/maps/bed_mega_kingdom.spring.jpg"},
+        {"Kingdom", "WINTERFEST", "MEGA", "https://cdn.playhive.com/maps/bed_mega_kingdom.winterfest.jpg"},
+        {"Kingdom", "NO_SEASON", "MEGA", "https://cdn.playhive.com/maps/bed_mega_kingdom.jpg"},
+        {"Opulent", "NO_SEASON", "MEGA", "https://cdn.playhive.com/maps/bed_mega_opulent.jpg"},
+        {"Plaza", "NO_SEASON", "MEGA", "https://cdn.playhive.com/maps/bed_mega_plaza.jpg"},
+        {"Titan", "NO_SEASON", "MEGA", "https://cdn.playhive.com/maps/bed_mega_titan.jpg"},
+        {"Aero", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_aero.jpg"},
+        {"Arcane", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_arcane.jpg"},
+        {"Beehive", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_beehive.jpg"},
+        {"Brutaxis", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_brutaxis.jpg"},
+        {"Castle", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_castle.jpg"},
+        {"Enchantment", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_enchantment.jpg"},
+        {"Facility", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_facility.jpg"},
+        {"Festive", "WINTERFEST", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_festive.winterfest.jpg"},
+        {"Haunted", "HALLOWEEN", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_haunted.halloween.jpg"},
+        {"Igloo", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_igloo.jpg"},
+        {"Library", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_library.jpg"},
+        {"Lighthouse", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_lighthouse.jpg"},
+        {"Mushroom", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_mushroom.jpg"},
+        {"Trick or Treat", "HALLOWEEN", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_neighborhood.halloween.jpg"},
+        {"Neighborhood", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_neighborhood.jpg"},
+        {"Oceanic", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_oceanic.jpg"},
+        {"Sandstorm", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_sandstorm.jpg"},
+        {"Sprout", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_sprout.jpg"},
+        {"Svartalfheim", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_svartalfheim.jpg"},
+        {"Sway Bells", "WINTERFEST", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_sway.winterfest.jpg"},
+        {"Sway", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_sway.jpg"},
+        {"Tree Stump", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_treestump.jpg"},
+        {"Turris", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_turris.jpg"},
+        {"Warped", "NO_SEASON", "REGULAR", "https://cdn.playhive.com/maps/bed_solo_warped.jpg"},
+        {"Spring", "SPRING", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_autumn.spring.jpg"},
+        {"Summer", "SUMMER", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_autumn.summer.jpg"},
+        {"Winter", "WINTERFEST", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_autumn.winterfest.jpg"},
+        {"Autumn", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_autumn.jpg"},
+        {"Cobalt", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_cobalt.jpg"},
+        {"Coven", "HALLOWEEN", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_coven.halloween.jpg"},
+        {"Cyberspace", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_cyberspace.jpg"},
+        {"Gingerbread", "WINTERFEST", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_gingerbread.winterfest.jpg"},
+        {"Grove", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_grove.jpg"},
+        {"Hanging Gardens", "SPRING", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_hanginggardens.spring.jpg"},
+        {"Hanging Gardens", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_hanginggardens.jpg"},
+        {"Jotunheim", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_jotunheim.jpg"},
+        {"Lumora", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_lumora.jpg"},
+        {"O2", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_o2.jpg"},
+        {"Pirates", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_pirates.jpg"},
+        {"Prisma", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_prisma.jpg"},
+        {"Quantum", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_quantum.jpg"},
+        {"Rome", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_rome.jpg"},
+        {"Ruins", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_ruins.jpg"},
+        {"Serrano", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_serrano.jpg"},
+        {"Soul's End", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_soulsend.jpg"},
+        {"Summer Coast", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_summercoast.jpg"},
+        {"Temple", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_temple.jpg"},
+        {"Monster Labs", "HALLOWEEN", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_teslalabs.halloween.jpg"},
+        {"Tesla Labs", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_teslalabs.jpg"},
+        {"Tropical", "NO_SEASON", "SQUADS", "https://cdn.playhive.com/maps/bed_squad_tropical.jpg"},
+    };
+}
+
 void loadCacheLocked() {
     if (gLoaded) return;
     gLoaded = true;
+    seedBundledMapsLocked();
     try {
         std::lock_guard fileLock(gFileMutex);
         std::ifstream input(cachePath(), std::ios::binary);
@@ -81,6 +174,7 @@ void loadCacheLocked() {
             if (entry.httpStatus == 404 && entry.error.empty()) {
                 entry.error = "Hive does not expose a selectable map list for this game";
             }
+            if (entry.maps.empty() && game == "bed") entry.maps = gCache[game].maps;
             gCache[game] = std::move(entry);
         }
     } catch (...) {
@@ -280,6 +374,7 @@ void clearMapCache() {
     {
         std::lock_guard lock(gMutex);
         gCache.clear();
+        seedBundledMapsLocked();
         gLoaded = true;
     }
     std::lock_guard fileLock(gFileMutex);

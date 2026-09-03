@@ -841,6 +841,7 @@ void HiveUtilsModule::refreshMapData(bool vote, bool force) {
 }
 
 void HiveUtilsModule::publishMenuSchema() {
+    std::lock_guard schemaLock(mMenuSchemaMutex);
     if (!mMenuRegistered.load()) return;
 
     std::string voteGame;
