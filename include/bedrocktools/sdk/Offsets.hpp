@@ -7,3 +7,4 @@
 #include <bedrocktools/sdk/offsets/Skin.hpp>
 #include <bedrocktools/sdk/offsets/UI.hpp>
 
+#include <bedrocktools/sdk/offsets/Inventory.hpp>

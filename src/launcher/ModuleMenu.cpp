@@ -99,7 +99,11 @@ void registerModulesWithLauncher() {
             for (const char* bk : baseKeys) {
                 if (k == bk) { isBase = true; break; }
             }
-            if (isBase) continue;
+            std::string keyLower = k;
+            std::transform(keyLower.begin(), keyLower.end(), keyLower.begin(), ::tolower);
+            const bool isHudPosition = keyLower.rfind("hud", 0) == 0 &&
+                (keyLower.ends_with("posx") || keyLower.ends_with("posy"));
+            if (isBase || isHudPosition) continue;
 
             std::string displayName;
             std::string sourceKey = k;
