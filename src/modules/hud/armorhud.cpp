@@ -7,6 +7,7 @@
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/input/MoveInput.hpp>
 #include <pl/memory/Vtable.hpp>
+#include <pl/ModMenuConfig.hpp>
 
 #include <algorithm>
 #include <array>
@@ -315,6 +316,129 @@ void ArmorHudModule::onInit() {
             reinterpret_cast<void*>(hudCameraRendererDetour),
             reinterpret_cast<void**>(&hudCameraRendererOriginal));
     }
+}
+
+void ArmorHudModule::onMenuRegistered() {
+    using namespace pl::modmenu;
+    ConfigSchemaBuilder schema;
+    schema.defaultCategory("equipment")
+        .category("equipment", "Equipment", "Choose visible items and their sizes")
+        .category("durability", "Durability", "Choose which items show durability and what it contains")
+        .category("text", "Text", "Position and style of durability labels")
+        .category("editor", "HUD Editor", "Placement and snapping while editing the HUD");
+
+    auto node = [](std::string key, std::string title, std::string category, ConfigControlTypeV2 type) {
+        ConfigNodeV2 value;
+        value.id = key;
+        value.key = std::move(key);
+        value.title = std::move(title);
+        value.category = std::move(category);
+        value.type = type;
+        return value;
+    };
+    auto section = [&](const char* id, const char* title, const char* category) {
+        auto value = node(id, title, category, ConfigControlTypeV2::Section);
+        value.key.clear();
+        schema.node(std::move(value));
+    };
+    auto slider = [&](const char* key, std::string title, const char* category,
+                      const char* sectionId, const char* min, const char* max,
+                      const char* enabledKey = nullptr) {
+        auto value = node(key, std::move(title), category, ConfigControlTypeV2::SliderFloat);
+        value.section = sectionId;
+        value.minValue = min;
+        value.maxValue = max;
+        value.step = "1";
+        value.unit = " px";
+        if (enabledKey) value.visibleWhen = {{enabledKey, ConfigConditionOpV2::Truthy, {}}};
+        schema.node(std::move(value));
+    };
+
+    struct SlotSetting { const char* key; const char* title; };
+    static constexpr SlotSetting slots[] = {
+        {"m_helmet", "Helmet"}, {"m_chestplate", "Chestplate"},
+        {"m_leggings", "Leggings"}, {"m_boots", "Boots"},
+        {"m_offhand", "Offhand"}, {"m_mainhand", "Main Hand"}
+    };
+    section("visible_items", "Visible Items", "equipment");
+    auto equipment = node("equipment_slots", "Show Items", "equipment", ConfigControlTypeV2::ToggleGroup);
+    equipment.key.clear();
+    equipment.section = "visible_items";
+    equipment.choiceStyle = ConfigChoiceStyleV2::Chips;
+    for (const auto& slot : slots) equipment.options.push_back({slot.key, slot.title, {}, slot.key});
+    schema.node(std::move(equipment));
+
+    section("item_sizes", "Item Sizes", "equipment");
+    for (const auto& slot : slots) {
+        const std::string key = std::string(slot.key) + "Size";
+        slider(key.c_str(), std::string(slot.title) + " Size", "equipment", "item_sizes", "8", "100", slot.key);
+    }
+    section("activation", "Shortcut", "equipment");
+    auto keybind = node("keybind", "Toggle Keybind", "equipment", ConfigControlTypeV2::Keybind);
+    keybind.section = "activation";
+    schema.node(std::move(keybind));
+
+    section("durability_items", "Item Durability", "durability");
+    auto durability = node("durability_slots", "Show Durability For", "durability", ConfigControlTypeV2::ToggleGroup);
+    durability.key.clear();
+    durability.section = "durability_items";
+    durability.description = "Labels appear for enabled items that have durability.";
+    durability.choiceStyle = ConfigChoiceStyleV2::Chips;
+    for (const auto& slot : slots) {
+        const std::string key = std::string(slot.key) + "Durability";
+        durability.options.push_back({key, slot.title, {}, key});
+    }
+    schema.node(std::move(durability));
+
+    section("durability_contents", "Label Contents", "durability");
+    auto contents = node("durability_fields", "Display Values", "durability", ConfigControlTypeV2::ToggleGroup);
+    contents.key.clear();
+    contents.section = "durability_contents";
+    contents.description = "Remaining and maximum combine as remaining / maximum. Percentage shows durability remaining.";
+    contents.choiceStyle = ConfigChoiceStyleV2::Checklist;
+    contents.options = {
+        {"damage", "Damage Taken", {}, "m_showDamage"},
+        {"remaining", "Remaining Durability", {}, "m_showRemaining"},
+        {"maximum", "Maximum Durability", {}, "m_showMaxDurability"},
+        {"percentage", "Percentage Remaining", {}, "m_showPercentage"}
+    };
+    schema.node(std::move(contents));
+
+    section("text_layout", "Label Placement", "text");
+    auto position = node("m_durabilityTextPosition", "Text Position", "text", ConfigControlTypeV2::Choice);
+    position.section = "text_layout";
+    position.choiceStyle = ConfigChoiceStyleV2::Segmented;
+    position.options = {{"0", "Right"}, {"1", "Left"}, {"2", "Below"}};
+    position.defaultValue = "0";
+    schema.node(std::move(position));
+    slider("m_durabilityTextGap", "Distance From Item", "text", "text_layout", "0", "100");
+    section("text_style", "Label Appearance", "text");
+    slider("m_durabilityTextSize", "Text Size", "text", "text_style", "6", "100");
+    auto color = node("m_textColor", "Text Color", "text", ConfigControlTypeV2::Color);
+    color.section = "text_style";
+    color.defaultValue = "#FFFFFF";
+    schema.node(std::move(color));
+
+    auto help = node("editor_help", "Move Items In The HUD Editor", "editor", ConfigControlTypeV2::Info);
+    help.key.clear();
+    help.description = "Open the HUD Editor to drag each item separately. Existing positions are preserved.";
+    schema.node(std::move(help));
+    section("snapping", "Snapping", "editor");
+    auto snapping = node("snap_targets", "Snap To", "editor", ConfigControlTypeV2::ToggleGroup);
+    snapping.key.clear();
+    snapping.section = "snapping";
+    snapping.choiceStyle = ConfigChoiceStyleV2::Chips;
+    snapping.options = {
+        {"grid", "Grid", {}, "m_snapToGrid"},
+        {"items", "Other Items", {}, "m_snapToElements"},
+        {"center", "Screen Center", {}, "m_snapToScreenCenter"}
+    };
+    schema.node(std::move(snapping));
+    slider("m_gridSize", "Grid Size", "editor", "snapping", "1", "100", "m_snapToGrid");
+    slider("m_gridGap", "Gap Between Items", "editor", "snapping", "0", "100", "m_snapToElements");
+    slider("m_snapThreshold", "Snap Distance", "editor", "snapping", "1", "100");
+
+    pl::modmenu::setConfigSchemaJson(moduleId, schema.toJson());
 }
 
 void ArmorHudModule::onDisable() {
