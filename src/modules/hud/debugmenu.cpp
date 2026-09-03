@@ -245,27 +245,42 @@ void DebugMenuModule::onInit() {
 void DebugMenuModule::onEnable() {
     m_firstTick = true;
     m_frameTimeMs = 0.0f;
+    m_fps = -1;
+    m_frameCount = 0;
     m_hasFrameTime = false;
 }
 
 void DebugMenuModule::onDisable() {
     m_firstTick = true;
     m_frameTimeMs = 0.0f;
+    m_fps = -1;
+    m_frameCount = 0;
     m_hasFrameTime = false;
+}
+
+void DebugMenuModule::updateFrameTiming(std::chrono::steady_clock::time_point now) {
+    if (!m_hasFrameTime || now - m_lastFrameTime >= std::chrono::seconds(2)) {
+        m_sampleStart = now;
+        m_frameCount = 0;
+        m_fps = -1;
+        m_frameTimeMs = 0.0f;
+    } else {
+        ++m_frameCount;
+        const double elapsed = std::chrono::duration<double>(now - m_sampleStart).count();
+        if (elapsed >= 1.0) {
+            m_fps = static_cast<int>(std::lround(m_frameCount / elapsed));
+            m_frameTimeMs = static_cast<float>(elapsed * 1000.0 / m_frameCount);
+            m_sampleStart = now;
+            m_frameCount = 0;
+        }
+    }
+    m_lastFrameTime = now;
+    m_hasFrameTime = true;
 }
 
 void DebugMenuModule::onFrame() {
     if (!enabled) return;
-
-    auto frameNow = std::chrono::steady_clock::now();
-    if (m_hasFrameTime) {
-        float frameMs = std::chrono::duration<float, std::milli>(frameNow - m_lastFrameTime).count();
-        if (frameMs > 0.0f && frameMs < 1000.0f) {
-            m_frameTimeMs = m_frameTimeMs <= 0.0f ? frameMs : (m_frameTimeMs * 0.85f) + (frameMs * 0.15f);
-        }
-    }
-    m_lastFrameTime = frameNow;
-    m_hasFrameTime = true;
+    updateFrameTiming(std::chrono::steady_clock::now());
 
     std::vector<PLModMenu_DrawCommand> cmds;
     std::list<std::string> stringStore;
@@ -499,8 +514,15 @@ void DebugMenuModule::onFrame() {
         addRight(buf);
         addRight("Display: {DISPLAY_SIZE}");
         addRight("Active Renderer: OpenGL ES");
-        snprintf(buf, sizeof(buf), "Frame Time: %.2f ms", m_frameTimeMs);
-        addRight(buf);
+        if (m_fps >= 0) {
+            snprintf(buf, sizeof(buf), "FPS: %d", m_fps);
+            addRight(buf);
+            snprintf(buf, sizeof(buf), "Frame Time: %.2f ms", m_frameTimeMs);
+            addRight(buf);
+        } else {
+            addRight("FPS: --");
+            addRight("Frame Time: -- ms");
+        }
         addRight("");
 
         time_t t = time(nullptr);

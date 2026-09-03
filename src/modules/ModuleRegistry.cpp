@@ -7,6 +7,7 @@
 #include "visual/tnttimer.hpp"
 #include "visual/nofog.hpp"
 #include "hud/pingcounter.hpp"
+#include "hud/worldtime.hpp"
 #include "hud/reachcounter.hpp"
 #include "hud/breakindicator.hpp"
 #include "hud/playercoords.hpp"
@@ -95,6 +96,7 @@ void registerAllModules() {
     registry.emplace<CompassModule>();
     registry.emplace<ArmorHudModule>();
     registry.emplace<TimeChangerModule>();
+    registry.emplace<WorldTimeModule>();
     registry.emplace<AutoSprintModule>();
     registry.emplace<WeatherChangerModule>();
     registry.emplace<NickModule>();
