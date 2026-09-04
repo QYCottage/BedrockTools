@@ -2,7 +2,7 @@
 #include "modules/ModuleRegistry.hpp"
 #include "modules/player/timechanger.hpp"
 #include <bedrocktools/events/EventBus.hpp>
-#include <bedrocktools/sdk/client/ClientInstance.hpp>
+#include <bedrocktools/sdk/world/Actor.hpp>
 #include <algorithm>
 #include <cstdio>
 
@@ -43,9 +43,9 @@ WorldTimeModule::~WorldTimeModule() {
 void WorldTimeModule::onInit() {
     if (m_subscription != 0) return;
     m_timeChanger = static_cast<TimeChangerModule*>(ModuleRegistry::get().find("bedrocktools.Time Changer"));
-    m_subscription = bedrocktools::events::bus().subscribe<bedrocktools::events::ClientInstanceUpdateEvent>(
+    m_subscription = bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [this](auto& event) {
-            auto* player = event.clientInstance ? event.clientInstance->localPlayer() : nullptr;
+            auto* player = event.player;
             auto* level = player ? player->level() : nullptr;
             if (!level || !m_timeChanger) {
                 m_dayTicks.store(-1, std::memory_order_relaxed);
