@@ -10,6 +10,7 @@
 #include "hud/worldtime.hpp"
 #include "hud/totemcounter.hpp"
 #include "hud/arrowcounter.hpp"
+#include "hud/potcounter.hpp"
 #include "player/quickloot.hpp"
 #include "hud/reachcounter.hpp"
 #include "hud/breakindicator.hpp"
@@ -105,6 +106,7 @@ void registerAllModules() {
     registry.emplace<WorldTimeModule>();
     registry.emplace<TotemCounterModule>();
     registry.emplace<ArrowCounterModule>();
+    registry.emplace<PotCounterModule>();
     registry.emplace<QuickLootModule>();
     registry.emplace<AutoSprintModule>();
     registry.emplace<WeatherChangerModule>();
