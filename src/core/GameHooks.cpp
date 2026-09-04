@@ -33,6 +33,7 @@ using UseItemOnFn = InteractionResultValue(*)(void*, void*, const void*, std::ui
 using InteractFn = bool(*)(void*, void*, const void*);
 using AttackFn = bool(*)(void*, void*, bool, const void*);
 using ClientInstanceUpdateFn = void*(*)(void*, bool);
+using ContainerSlotSelectedFn = std::uint32_t(*)(void*, const std::string&, int);
 using ScreenFn = void*(*)(void*, void*, void*, void*, void*, void*, void*, void*);
 using EglSwapBuffersFn = EGLBoolean(*)(EGLDisplay, EGLSurface);
 
@@ -53,6 +54,7 @@ InteractFn gameModeInteractOriginal = nullptr;
 InteractFn survivalModeInteractOriginal = nullptr;
 AttackFn gameModeAttackOriginal = nullptr;
 ClientInstanceUpdateFn clientUpdateOriginal = nullptr;
+ContainerSlotSelectedFn containerSlotSelectedOriginal = nullptr;
 ScreenFn containerOpenOriginal = nullptr;
 ScreenFn containerCloseOriginal = nullptr;
 ScreenFn chatOpenOriginal = nullptr;
@@ -245,6 +247,16 @@ void* clientUpdateDetour(void* clientInstance, bool value) {
     return result;
 }
 
+std::uint32_t containerSlotSelectedDetour(void* controller, const std::string& collectionName, int index) {
+    ContainerSlotSelectedEvent event{controller, collectionName, index};
+    bus().publish(event);
+    const auto result = !event.cancelled() && containerSlotSelectedOriginal
+        ? containerSlotSelectedOriginal(controller, collectionName, index) : 0;
+    event.afterSelection = true;
+    bus().publish(event);
+    return result;
+}
+
 void* containerOpenDetour(void* a0, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7) {
     ScreenStateEvent event{ScreenKind::Container, ScreenPhase::Opened, a0};
     bus().publish(event);
@@ -317,6 +329,7 @@ bool install() {
     hookSignature(SignatureId::ContainerScreenControllerDtor, reinterpret_cast<void*>(containerCloseDetour), &containerCloseOriginal);
     hookSignature(SignatureId::ChatScreenOpen, reinterpret_cast<void*>(chatOpenDetour), &chatOpenOriginal);
     hookSignature(SignatureId::ChatScreenDtor, reinterpret_cast<void*>(chatCloseDetour), &chatCloseOriginal);
+    hookSignature(SignatureId::ContainerScreenControllerOnContainerSlotSelected, reinterpret_cast<void*>(containerSlotSelectedDetour), &containerSlotSelectedOriginal);
     hookEgl();
     installed = tickOriginal != nullptr && clientUpdateOriginal != nullptr;
     return installed;

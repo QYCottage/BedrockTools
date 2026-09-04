@@ -8,6 +8,9 @@
 #include "visual/nofog.hpp"
 #include "hud/pingcounter.hpp"
 #include "hud/worldtime.hpp"
+#include "hud/totemcounter.hpp"
+#include "hud/arrowcounter.hpp"
+#include "player/quickloot.hpp"
 #include "hud/reachcounter.hpp"
 #include "hud/breakindicator.hpp"
 #include "hud/playercoords.hpp"
@@ -97,6 +100,9 @@ void registerAllModules() {
     registry.emplace<ArmorHudModule>();
     registry.emplace<TimeChangerModule>();
     registry.emplace<WorldTimeModule>();
+    registry.emplace<TotemCounterModule>();
+    registry.emplace<ArrowCounterModule>();
+    registry.emplace<QuickLootModule>();
     registry.emplace<AutoSprintModule>();
     registry.emplace<WeatherChangerModule>();
     registry.emplace<NickModule>();

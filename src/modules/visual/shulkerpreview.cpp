@@ -191,7 +191,6 @@ using BaseActorRenderContextCtorFn = void (*)(void*, void*, void*, void*);
 using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(void*, void*, void*, unsigned int, unsigned char, std::uint64_t, float, float, float, float, float);
 using DrawTextFn = void (*)(void*, Font&, const RectangleArea&, const std::string&, const mce::Color&, TextAlignment, float, const TextMeasureData&, const CaretMeasureData&);
 using RenderHoverBoxFn = void (*)(void*, void*, void*, void*, float);
-using ContainerSlotSelectedFn = std::uint32_t (*)(void*, const std::string&, int);
 using ContainerGetItemStackFn = ItemStackBase* (*)(void*, const std::string&, int);
 using ScreenViewRenderFn = void (*)(void*, void*, void*, void*, void*, void*, void*, void*);
 
@@ -201,7 +200,6 @@ ItemStackBaseGetDamageValueFn itemStackBaseGetDamageValue = nullptr;
 ItemStackBaseGetRawNameIdFn itemStackBaseGetRawNameId = nullptr;
 BaseActorRenderContextCtorFn baseActorRenderContextCtor = nullptr;
 ItemRendererRenderGuiItemNewFn itemRendererRenderGuiItemNew = nullptr;
-ContainerSlotSelectedFn containerSlotSelectedOriginal = nullptr;
 ContainerGetItemStackFn containerGetItemStack = nullptr;
 ScreenViewRenderFn screenViewRenderOriginal = nullptr;
 DrawTextFn drawTextOriginal = nullptr;
@@ -769,22 +767,22 @@ bool loadSelectedShulker(ItemStackBase* stack) {
     return true;
 }
 
-std::uint32_t containerSlotSelectedHook(void* self, const std::string& collectionName, int index) {
-    std::uint32_t result = containerSlotSelectedOriginal ? containerSlotSelectedOriginal(self, collectionName, index) : 0;
-    if (!moduleInstance || !moduleInstance->enabled || !containerGetItemStack) {
+void handleContainerSlotSelected(const bedrocktools::events::ContainerSlotSelectedEvent& event) {
+    if (!event.afterSelection) return;
+    if (event.cancelled() || !moduleInstance || !moduleInstance->enabled || !containerGetItemStack ||
+        !event.controller || event.index < 0 || event.collectionName.empty()) {
         clearSelection();
-        return result;
+        return;
     }
-    ItemStackBase* stack = containerGetItemStack(self, collectionName, index);
+    ItemStackBase* stack = containerGetItemStack(event.controller, event.collectionName, event.index);
     if (!loadSelectedShulker(stack)) {
         clearSelection();
-        return result;
+        return;
     }
-    selectedController = self;
-    selectedCollection = collectionName;
-    selectedIndex = index;
+    selectedController = event.controller;
+    selectedCollection = event.collectionName;
+    selectedIndex = event.index;
     selectedAnchorValid = false;
-    return result;
 }
 
 bool selectedSlotStillContainsShulker() {
@@ -853,10 +851,9 @@ void ShulkerPreviewModule::onInit() {
     baseActorRenderContextCtor = reinterpret_cast<BaseActorRenderContextCtorFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BaseActorRenderContextCtor));
     itemRendererRenderGuiItemNew = reinterpret_cast<ItemRendererRenderGuiItemNewFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemRendererRenderGuiItemNew));
     containerGetItemStack = reinterpret_cast<ContainerGetItemStackFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ContainerScreenControllerGetItemStack));
-    uintptr_t selectedAddress = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ContainerScreenControllerOnContainerSlotSelected);
-    if (selectedAddress) {
-        bedrocktools::hooks::install(reinterpret_cast<void*>(selectedAddress), reinterpret_cast<void*>(containerSlotSelectedHook), reinterpret_cast<void**>(&containerSlotSelectedOriginal));
-    }
+    bedrocktools::events::bus().subscribe<bedrocktools::events::ContainerSlotSelectedEvent>(
+        [](auto& event) { handleContainerSlotSelected(event); }
+    );
     uintptr_t screenRenderAddress = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ScreenViewRender);
     if (screenRenderAddress) {
         bedrocktools::hooks::install(reinterpret_cast<void*>(screenRenderAddress), reinterpret_cast<void*>(screenViewRenderHook), reinterpret_cast<void**>(&screenViewRenderOriginal));
