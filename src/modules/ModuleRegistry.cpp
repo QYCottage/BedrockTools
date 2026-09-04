@@ -36,6 +36,7 @@
 #include "visual/chunkborder.hpp"
 #include "visual/hitbox.hpp"
 #include "visual/zoom.hpp"
+#include "visual/cinematiccamera.hpp"
 #include "visual/breadcrumbs.hpp"
 #include "visual/lightoverlay.hpp"
 #include "visual/shulkerpreview.hpp"
@@ -122,6 +123,7 @@ void registerAllModules() {
     registry.emplace<ChunkBorderModule>();
     registry.emplace<HitboxModule>();
     registry.emplace<ZoomModule>();
+    registry.emplace<CinematicCameraModule>();
     registry.emplace<BreadcrumbsModule>();
     registry.emplace<SkinStealerModule>();
     registry.emplace<AutoGG>();
