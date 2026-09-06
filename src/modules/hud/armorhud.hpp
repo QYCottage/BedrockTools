@@ -39,6 +39,7 @@ private:
 
     struct ConfigSnapshot {
         std::array<SlotConfig, 6> slots;
+        bool hotbarBackground;
         bool showDamage;
         bool showRemaining;
         bool showMaxDurability;
@@ -96,6 +97,7 @@ private:
     float hudMainhandPosY = 440.0f;
     float m_mainhandSize = 48.0f;
 
+    bool m_hotbarBackground = true;
     bool m_showDamage = true;
     bool m_showRemaining = true;
     bool m_showMaxDurability = true;

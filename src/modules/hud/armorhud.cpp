@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,11 @@ constexpr std::size_t FillingContainerItemsOffset = bedrocktools::sdk::offsets::
 constexpr std::size_t ItemStackSize = bedrocktools::sdk::offsets::Inventory::ItemStackSize;
 constexpr std::size_t MaxContainerSlots = 64;
 constexpr float VanillaItemSize = 16.0f;
+constexpr float HotbarCellWidth = 20.0f;
+constexpr float HotbarCellHeight = 22.0f;
+constexpr float HotbarItemInsetX = 2.0f;
+constexpr float HotbarItemInsetY = 3.0f;
+constexpr const char* HotbarTexturePath = "textures/ui/hotbar_1";
 constexpr const char* MinecraftLibrary = "libminecraftpe.so";
 
 struct RectangleArea {
@@ -41,11 +47,62 @@ struct RectangleArea {
     float y1;
 };
 
+struct UiVec2 {
+    float x;
+    float y;
+};
+
 struct Color {
     float r;
     float g;
     float b;
     float a;
+};
+
+struct ClientTexture {
+    std::byte storage[24]{};
+};
+
+struct BedrockTextureData {
+    ClientTexture clientTexture;
+};
+
+enum class ResourceFileSystem : int {
+    UserPackage = 0
+};
+
+class ResourceLocation {
+public:
+    ResourceFileSystem fileSystem;
+    std::string path;
+    std::uint64_t pathHash;
+    std::uint64_t fullHash;
+
+    explicit ResourceLocation(std::string_view value)
+        : fileSystem(ResourceFileSystem::UserPackage),
+          path(value),
+          pathHash(computeHash(path)),
+          fullHash(pathHash ^ static_cast<std::uint64_t>(fileSystem)) {}
+
+private:
+    static std::uint64_t computeHash(std::string_view value) {
+        constexpr std::uint64_t offset = 1469598103934665603ULL;
+        constexpr std::uint64_t prime = 1099511628211ULL;
+        std::uint64_t hash = offset;
+        for (unsigned char ch : value) hash = static_cast<std::uint64_t>(ch) ^ (prime * hash);
+        return hash;
+    }
+};
+
+class TexturePtr {
+public:
+    std::shared_ptr<const BedrockTextureData> clientTexture;
+    std::shared_ptr<ResourceLocation> resourceLocation;
+
+    const ClientTexture& getClientTexture() const {
+        static const ClientTexture empty{};
+        return clientTexture ? clientTexture->clientTexture : empty;
+    }
 };
 
 class HashedString {
@@ -162,6 +219,23 @@ RectangleArea getFullClippingRectangle(void* context) {
     if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle]) return result;
     using Fn = RectangleArea (*)(void*);
     return reinterpret_cast<Fn>(vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle])(context);
+}
+
+TexturePtr getTexture(void* context, const ResourceLocation& location) {
+    void** vtable = getVtable(context);
+    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetTexture]) return {};
+    using Fn = TexturePtr (*)(void*, const ResourceLocation&, bool);
+    return reinterpret_cast<Fn>(vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetTexture])(context, location, false);
+}
+
+void drawImage(void* context, const ClientTexture& texture, const UiVec2& position, const UiVec2& size) {
+    void** vtable = getVtable(context);
+    if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextDrawImage]) return;
+    using Fn = void (*)(void*, const ClientTexture&, const UiVec2&, const UiVec2&, const UiVec2&, const UiVec2&, bool);
+    static constexpr UiVec2 uv{0.0f, 0.0f};
+    static constexpr UiVec2 uvSize{1.0f, 1.0f};
+    reinterpret_cast<Fn>(vtable[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextDrawImage])(
+        context, texture, position, size, uv, uvSize, false);
 }
 
 void flushImages(void* context) {
@@ -373,6 +447,11 @@ void ArmorHudModule::onMenuRegistered() {
         const std::string key = std::string(slot.key) + "Size";
         slider(key.c_str(), std::string(slot.title) + " Size", "equipment", "item_sizes", "8", "100", slot.key);
     }
+    section("appearance", "Appearance", "equipment");
+    auto hotbarBackground = node("m_hotbarBackground", "Hotbar Background", "equipment", ConfigControlTypeV2::Toggle);
+    hotbarBackground.section = "appearance";
+    hotbarBackground.defaultValue = "true";
+    schema.node(std::move(hotbarBackground));
     section("activation", "Shortcut", "equipment");
     auto keybind = node("keybind", "Toggle Keybind", "equipment", ConfigControlTypeV2::Keybind);
     keybind.section = "activation";
@@ -458,6 +537,7 @@ ArmorHudModule::ConfigSnapshot ArmorHudModule::snapshotConfig() const {
             SlotConfig{m_offhand, m_offhandDurability, hudOffhandPosX, hudOffhandPosY, m_offhandSize},
             SlotConfig{m_mainhand, m_mainhandDurability, hudMainhandPosX, hudMainhandPosY, m_mainhandSize}
         },
+        m_hotbarBackground,
         m_showDamage,
         m_showRemaining,
         m_showMaxDurability,
@@ -496,8 +576,10 @@ void ArmorHudModule::submitEditorElements(const ConfigSnapshot& config) {
         element.positionKeyY = HudYKeys[i];
         element.x = slot.x;
         element.y = slot.y;
-        element.width = std::max(1.0f, slot.size);
-        element.height = std::max(1.0f, slot.size);
+        const float widthScale = config.hotbarBackground ? HotbarCellWidth / VanillaItemSize : 1.0f;
+        const float heightScale = config.hotbarBackground ? HotbarCellHeight / VanillaItemSize : 1.0f;
+        element.width = std::max(1.0f, slot.size * widthScale);
+        element.height = std::max(1.0f, slot.size * heightScale);
         element.gridSize = config.gridSize;
         element.snapThreshold = config.snapThreshold;
         element.gridGap = config.gridGap;
@@ -539,6 +621,37 @@ void ArmorHudModule::renderNative(void* context, void* client) {
     const float uiWidth = full.x1 - full.x0;
     const float uiHeight = full.y1 - full.y0;
     bool renderedAny = false;
+
+    if (config.hotbarBackground && canRender) {
+        TexturePtr hotbarTexture = getTexture(context, ResourceLocation(HotbarTexturePath));
+        if (hotbarTexture.clientTexture) {
+            bool renderedBackground = false;
+            for (std::size_t i = 0; i < SlotCount; ++i) {
+                const SlotConfig& slot = config.slots[i];
+                if (!slot.enabled || slot.size <= 0.0f || !getStackItem(stacks[i])) continue;
+
+                const float x = full.x0 + slot.x * uiWidth / surface.width;
+                const float y = full.y0 + slot.y * uiHeight / surface.height;
+                const float width = slot.size * uiWidth / surface.width;
+                const float height = slot.size * uiHeight / surface.height;
+                const float iconSize = std::max(1.0f, std::min(width, height));
+                const float backgroundWidth = iconSize * HotbarCellWidth / VanillaItemSize;
+                const float backgroundHeight = iconSize * HotbarCellHeight / VanillaItemSize;
+                const float backgroundX = x - iconSize * HotbarItemInsetX / VanillaItemSize;
+                const float backgroundY = y - iconSize * HotbarItemInsetY / VanillaItemSize;
+                if (!std::isfinite(backgroundX) || !std::isfinite(backgroundY) ||
+                    !std::isfinite(backgroundWidth) || !std::isfinite(backgroundHeight)) continue;
+
+                drawImage(
+                    context,
+                    hotbarTexture.getClientTexture(),
+                    {backgroundX, backgroundY},
+                    {backgroundWidth, backgroundHeight});
+                renderedBackground = true;
+            }
+            if (renderedBackground) flushImages(context);
+        }
+    }
 
     if (itemRenderer && canRender && itemStackBaseGetRawNameId) {
         bool renderedTexturePass = false;
@@ -658,17 +771,21 @@ void ArmorHudModule::onFrame() {
 
         pl::modmenu::DrawCommand durability;
         durability.type = pl::modmenu::DrawCommandType::Text;
-        const float verticalCenterBaseline = slot.y + slot.size * 0.5f + config.durabilityTextSize * 0.35f;
+        const float backgroundLeft = config.hotbarBackground ? slot.x - slot.size * HotbarItemInsetX / VanillaItemSize : slot.x;
+        const float backgroundTop = config.hotbarBackground ? slot.y - slot.size * HotbarItemInsetY / VanillaItemSize : slot.y;
+        const float backgroundWidth = config.hotbarBackground ? slot.size * HotbarCellWidth / VanillaItemSize : slot.size;
+        const float backgroundHeight = config.hotbarBackground ? slot.size * HotbarCellHeight / VanillaItemSize : slot.size;
+        const float verticalCenterBaseline = backgroundTop + backgroundHeight * 0.5f + config.durabilityTextSize * 0.35f;
         if (config.durabilityTextPosition == 1) {
-            durability.x = slot.x - config.durabilityTextGap;
+            durability.x = backgroundLeft - config.durabilityTextGap;
             durability.y = verticalCenterBaseline;
             durability.w = -1.0f;
         } else if (config.durabilityTextPosition == 2) {
-            durability.x = slot.x + slot.size * 0.5f;
-            durability.y = slot.y + slot.size + config.durabilityTextGap + config.durabilityTextSize;
+            durability.x = backgroundLeft + backgroundWidth * 0.5f;
+            durability.y = backgroundTop + backgroundHeight + config.durabilityTextGap + config.durabilityTextSize;
             durability.w = -2.0f;
         } else {
-            durability.x = slot.x + slot.size + config.durabilityTextGap;
+            durability.x = backgroundLeft + backgroundWidth + config.durabilityTextGap;
             durability.y = verticalCenterBaseline;
             durability.w = 0.0f;
         }
@@ -721,6 +838,7 @@ void ArmorHudModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("hudMainhandPosY")) hudMainhandPosY = std::clamp(j["hudMainhandPosY"].get<float>(), 0.0f, 4000.0f);
     if (j.contains("m_mainhandSize")) m_mainhandSize = std::clamp(j["m_mainhandSize"].get<float>(), 8.0f, 100.0f);
 
+    if (j.contains("m_hotbarBackground")) m_hotbarBackground = j["m_hotbarBackground"].get<bool>();
     if (j.contains("m_showDamage")) m_showDamage = j["m_showDamage"].get<bool>();
     if (j.contains("m_showRemaining")) m_showRemaining = j["m_showRemaining"].get<bool>();
     if (j.contains("m_showMaxDurability")) m_showMaxDurability = j["m_showMaxDurability"].get<bool>();
@@ -785,6 +903,7 @@ void ArmorHudModule::saveConfig(nlohmann::json& j) {
     j["hudMainhandPosY"] = hudMainhandPosY;
     j["m_mainhandSize"] = m_mainhandSize;
 
+    j["m_hotbarBackground"] = m_hotbarBackground;
     j["m_showDamage"] = m_showDamage;
     j["m_showRemaining"] = m_showRemaining;
     j["m_showMaxDurability"] = m_showMaxDurability;
