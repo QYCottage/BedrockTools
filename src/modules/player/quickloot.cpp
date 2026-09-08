@@ -5,7 +5,7 @@
 #include <limits>
 
 QuickLootModule::QuickLootModule()
-    : Module("Quick Loot", "Moves a tapped item stack instantly between a container and your inventory.") {}
+    : Module("Quick Loot", "Moves tapped item stacks from a container into your inventory.") {}
 
 void QuickLootModule::onInit() {
     m_handleAutoPlace = reinterpret_cast<HandleAutoPlaceFn>(
@@ -15,7 +15,7 @@ void QuickLootModule::onInit() {
     bedrocktools::events::bus().subscribe<bedrocktools::events::ContainerSlotSelectedEvent>(
         [this](auto& event) {
             if (event.afterSelection || !enabled || !m_handleAutoPlace || m_transferring || !event.controller ||
-                event.index < 0 || event.collectionName.empty()) return;
+                event.index < 0 || event.collectionName != "container_items") return;
             m_transferring = true;
             struct TransferGuard {
                 bool& active;
