@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "bedrocktools",
+  "version": "1.4.9",
+  "minecraft_versions": [
+    "1.26.45.1"
+  ],
+  "info": {
+    "name": "BedrockTools",
+    "author": "MrPokeG",
+    "description": "A collection of utility, HUD, player, and visual modules for Minecraft Bedrock.",
+    "homepage_url": "https://github.com/QYCottage/BedrockTools",
+    "icon": "assets/bedrocktools.png",
+    "tags": [
+      "Utility",
+      "HUD",
+      "Visual"
+    ]
+  },
+  "release_assets": {
+    "include": [
+      "*.levipack",
+      "*.so"
+    ],
+    "labels": {
+      "BedrockTools.levipack": "LeviPack",
+      "libBedrockTools.so": "Native library"
+    }
+  }
+}
