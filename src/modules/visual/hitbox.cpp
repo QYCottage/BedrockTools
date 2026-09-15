@@ -15,7 +15,6 @@ typedef void (*Tessellator_color_t)(void* tessellator, float r, float g, float b
 typedef void (*Tessellator_vertex_t)(void* tessellator, float x, float y, float z);
 typedef void (*MeshHelpers_renderMeshImmediately_t)(void* screenContext, void* tessellator, void* material, char* pad);
 
-typedef void* (*HitResult_getEntity_t)(void* hitResult);
 typedef bool (*Actor_isPlayer_t)(void* actor);
 typedef bool (*Actor_isInvisible_t)(void* actor);
 struct DistanceSortedActor {
@@ -122,7 +121,6 @@ static Tessellator_color_t                s_tessColor = nullptr;
 static Tessellator_vertex_t               s_tessVertex = nullptr;
 static MeshHelpers_renderMeshImmediately_t s_renderMesh = nullptr;
 
-static HitResult_getEntity_t              s_hitResultGetEntity = nullptr;
 static Actor_isPlayer_t                   s_actorIsPlayer = nullptr;
 static Actor_isInvisible_t                s_actorIsInvisible = nullptr;
 static Actor_fetchNearbyActorsSorted_t    s_actorFetchNearby = nullptr;
@@ -134,6 +132,7 @@ static void (*_renderLevel_orig)(void* _this, void* screenContext, void* a3);
 
 static bedrocktools::sdk::Vec3 g_playerPos = {0.f, 0.f, 0.f};
 static void* g_localPlayerPtr = nullptr;
+static constexpr int kMobActorType = 0x100;
 
 struct AABB {
     bedrocktools::sdk::Vec3 min;
@@ -168,19 +167,23 @@ static void ensureMaterials() {
     if (!s_matSelection) s_matSelection = getMaterial("selection_box");
 }
 
-static AABB getActorAABB(void* actor) {
-    AABB aabb = {{0,0,0},{0,0,0}};
+static bool getActorAABB(void* actor, AABB& aabb) {
+    if (!actor) return false;
+
     uintptr_t actorAddr = (uintptr_t)actor;
-
     uintptr_t builtInPtr = *(uintptr_t*)(actorAddr + bedrocktools::sdk::offsets::Actor::mStateVectorComponent);
-    if (builtInPtr) {
-        uintptr_t aabbComponentPtr = *(uintptr_t*)(actorAddr + bedrocktools::sdk::offsets::Actor::mStateVectorComponent + bedrocktools::sdk::offsets::BuiltInActorComponents::mAABBShapeComponent);
-        if (aabbComponentPtr) {
-            aabb = *(AABB*)(aabbComponentPtr + bedrocktools::sdk::offsets::AABBShapeComponent::mAABB);
-        }
-    }
+    if (!builtInPtr) return false;
 
-    return aabb;
+    uintptr_t aabbComponentPtr = *(uintptr_t*)(actorAddr + bedrocktools::sdk::offsets::Actor::mStateVectorComponent + bedrocktools::sdk::offsets::BuiltInActorComponents::mAABBShapeComponent);
+    if (!aabbComponentPtr) return false;
+
+    AABB value = *(AABB*)(aabbComponentPtr + bedrocktools::sdk::offsets::AABBShapeComponent::mAABB);
+    if (!std::isfinite(value.min.x) || !std::isfinite(value.min.y) || !std::isfinite(value.min.z) ||
+        !std::isfinite(value.max.x) || !std::isfinite(value.max.y) || !std::isfinite(value.max.z)) return false;
+    if (value.max.x <= value.min.x || value.max.y <= value.min.y || value.max.z <= value.min.z) return false;
+
+    aabb = value;
+    return true;
 }
 
 static bedrocktools::sdk::Vec2 getActorRotation(void* actor) {
@@ -284,18 +287,6 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         drawLines(lines, color);
     };
 
-    void* selectedEntity = nullptr;
-    uintptr_t levelPtr = *(uintptr_t*)((uintptr_t)g_localPlayerPtr + bedrocktools::sdk::offsets::Actor::mLevel);
-    if (levelPtr && s_hitResultGetEntity) {
-        uintptr_t hitResultWrapper = levelPtr + bedrocktools::sdk::offsets::Level::mHitResultWrapper;
-        void* hitResult = (void*)(hitResultWrapper + bedrocktools::sdk::offsets::HitResultWrapper::mHitResult);
-
-        int hitType = *(int*)((uintptr_t)hitResult + bedrocktools::sdk::offsets::HitResult::mType);
-        if (hitType == 1) {
-            selectedEntity = s_hitResultGetEntity(hitResult);
-        }
-    }
-
     bedrocktools::sdk::Vec3 localPos = g_playerPos;
     float dx = camX - localPos.x;
     float dy = camY - (localPos.y + 1.62f);
@@ -303,9 +294,8 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     bool isThirdPerson = (dx*dx + dy*dy + dz*dz) > 0.05f;
 
     auto renderActor = [&](void* ent) {
-        AABB aabb = getActorAABB(ent);
-        if (aabb.min.x == 0.f && aabb.min.y == 0.f && aabb.min.z == 0.f &&
-            aabb.max.x == 0.f && aabb.max.y == 0.f && aabb.max.z == 0.f) return;
+        AABB aabb;
+        if (!getActorAABB(ent, aabb)) return;
 
         drawBox(aabb, g_hitboxMod->hitboxColor);
 
@@ -358,7 +348,7 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
 
     if (s_actorFetchNearby) {
         bedrocktools::sdk::Vec3 extent = {30.0f, 30.0f, 30.0f};
-        ActorVec actors = s_actorFetchNearby(g_localPlayerPtr, &extent, 1);
+        ActorVec actors = s_actorFetchNearby(g_localPlayerPtr, &extent, kMobActorType);
 
         if (actors.begin && actors.end) {
             for (DistanceSortedActor* it = actors.begin; it < actors.end; ++it) {
@@ -436,9 +426,6 @@ void HitboxModule::onInit() {
             s_renderMaterialGroup = groupAddr + bedrocktools::sdk::offsets::MaterialGroup::mRenderMaterialGroupOffset;
         }
     }
-
-    uintptr_t hrge = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::HitResultGetEntity);
-    if (hrge) s_hitResultGetEntity = (HitResult_getEntity_t)hrge;
 
     uintptr_t aip = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ActorIsPlayer);
     if (aip) s_actorIsPlayer = (Actor_isPlayer_t)aip;

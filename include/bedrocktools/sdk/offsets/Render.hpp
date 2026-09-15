@@ -54,8 +54,8 @@ inline constexpr std::size_t mExtractNameTagsPatchOffset = 0x1A0;
 }
 
 namespace ItemInHandRenderer {
-inline constexpr std::size_t mRenderFirstPersonTransformPatchOffset1 = 0x194C;
-inline constexpr std::size_t mRenderFirstPersonTransformPatchOffset2 = 0x1950;
+inline constexpr std::size_t mRenderFirstPersonTransformPatchOffset1 = 0x1940;
+inline constexpr std::size_t mRenderFirstPersonTransformPatchOffset2 = 0x1944;
 }
 
 namespace BlockTessellator {
@@ -69,8 +69,8 @@ inline constexpr std::size_t mCurrentShapeBB = 0x5F0;
 }
 
 namespace Tessellator {
-inline constexpr std::size_t mTextureU = 0x17C;
-inline constexpr std::size_t mTextureV = 0x180;
+inline constexpr std::size_t mTextureU = 0x18C;
+inline constexpr std::size_t mTextureV = 0x190;
 }
 
 namespace Block {
