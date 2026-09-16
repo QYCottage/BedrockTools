@@ -131,7 +131,7 @@ private:
 
 using HudCameraRendererFn = void (*)(void*, void*, void*, void*, int);
 using BaseActorRenderContextCtorFn = void (*)(void*, void*, void*, void*);
-using ItemStackBaseGetDamageValueFn = int (*)(void*);
+using ItemStackBaseGetDamageValueFn = short (*)(void*);
 using ItemStackBaseGetRawNameIdFn = std::string (*)(void*);
 using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(
     void*, void*, void*, unsigned int, unsigned char, std::uint64_t,
@@ -311,7 +311,7 @@ void* containerStack(void* container, std::size_t slot) {
 
 int getStackDamage(void* stack) {
     if (!stack || !itemStackBaseGetDamageValue) return 0;
-    return std::max(0, itemStackBaseGetDamageValue(stack));
+    return std::max(0, static_cast<int>(itemStackBaseGetDamageValue(stack)));
 }
 
 ActorEquipmentComponent* getEquipment(void* player) {
