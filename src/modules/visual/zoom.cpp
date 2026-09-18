@@ -1,4 +1,5 @@
 #include "zoom.hpp"
+#include "viewmodel.hpp"
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Memory.hpp>
@@ -14,10 +15,16 @@ static float _getFov_zoom_hook(void* _this, float a, int enableVariableFOV) {
     float originalFov = 0.0f;
     if (_getFov_orig)
         originalFov = _getFov_orig(_this, a, enableVariableFOV);
-    
+
+    if (auto* viewModel = GetViewModelModule();
+        viewModel && viewModel->enabled && originalFov >= 69.5f && originalFov <= 70.5f) {
+        return viewModel->getItemFov();
+    }
+
     if (!g_zoomMod) return originalFov;
 
-    if (originalFov == 70.0f || originalFov == 60.0f) {
+    if ((originalFov >= 69.5f && originalFov <= 70.5f) ||
+        (originalFov >= 59.5f && originalFov <= 60.5f)) {
         return originalFov;
     }
 
@@ -56,7 +63,7 @@ static void _applyTurnDelta_hook(void* _this, Vec2* rotationDelta) {
         float strength = g_zoomMod->m_lowSensStrength;
         float multiplier = 1.0f - (1.0f - zoomRatio) * strength;
         multiplier = std::max(0.01f, std::min(1.0f, multiplier));
-        
+
         Vec2 modifiedDelta = { rotationDelta->x * multiplier, rotationDelta->y * multiplier };
         if (_applyTurnDelta_orig)
             _applyTurnDelta_orig(_this, &modifiedDelta);
@@ -73,15 +80,15 @@ static bool _getHideItemInHand_hook(void* _this) {
     bool hide = false;
     if (_getHideItemInHand_orig)
         hide = _getHideItemInHand_orig(_this);
-    
+
     if (g_zoomMod && g_zoomMod->isZoomActive() && g_zoomMod->m_hideHand) {
         return true;
     }
-    
+
     return hide;
 }
 
-ZoomModule::ZoomModule() 
+ZoomModule::ZoomModule()
     : Module("Zoom", "Smoothly zooms your camera like OptiFine.") {
     this->keybind = 0;
     g_zoomMod = this;
@@ -99,7 +106,7 @@ void ZoomModule::onInit() {
             m_fovHooked = true;
         }
     }
-    
+
     if (!m_turnDeltaHooked) {
         uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LocalPlayerApplyTurnDelta);
         if (addr != 0) {
@@ -107,7 +114,7 @@ void ZoomModule::onInit() {
             m_turnDeltaHooked = true;
         }
     }
-    
+
     if (!m_hideHandHooked) {
         uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BaseOptionRegistryGetHideItemInHand);
         if (addr != 0) {
@@ -115,7 +122,7 @@ void ZoomModule::onInit() {
             m_hideHandHooked = true;
         }
     }
-    
+
     updateZoomButton();
 }
 
@@ -153,7 +160,7 @@ void ZoomModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("m_lowSensStrength")) m_lowSensStrength = j["m_lowSensStrength"].get<float>();
     if (j.contains("m_hideHand")) m_hideHand = j["m_hideHand"].get<bool>();
     if (j.contains("m_overlayToggle")) m_overlayToggle = j["m_overlayToggle"].get<bool>();
-    
+
     updateZoomButton();
 }
 

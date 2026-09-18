@@ -2,6 +2,18 @@
 
 #include "../Module.hpp"
 
+struct ViewModelHandTransform {
+    float positionX = 0.0f;
+    float positionY = 0.0f;
+    float positionZ = 0.0f;
+    float rotationX = 0.0f;
+    float rotationY = 0.0f;
+    float rotationZ = 0.0f;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    float scaleZ = 1.0f;
+};
+
 class ViewModelModule : public Module {
 public:
     ViewModelModule();
@@ -14,18 +26,25 @@ public:
     void saveConfig(nlohmann::json& j) override;
 
     float getItemFov() const;
-    bool  isThirdPerson() const;
 
-    float m_posX = 0.0f, m_posY = 0.0f, m_posZ = 0.0f;
-    float m_rotX = 0.0f, m_rotY = 0.0f, m_rotZ = 0.0f;
-    float m_scaleX = 1.0f, m_scaleY = 1.0f, m_scaleZ = 1.0f;
-    float m_pivotX = 0.0f, m_pivotY = 0.0f, m_pivotZ = 0.0f;
+    ViewModelHandTransform m_mainHand;
+    ViewModelHandTransform m_offHand;
     float m_itemFov = 70.0f;
-    bool  m_applyThirdPerson = false;
-    bool  m_thirdPerson = false;
+    bool m_swapHands = false;
+    bool m_applyThirdPerson = false;
 
 private:
+    void installHooks();
+    void removeHooks();
+    bool m_hooksInstalled = false;
+    bool m_renderFirstPersonHooked = false;
+    bool m_renderHandHooked = false;
+    bool m_actorRenderDispatcherHooked = false;
     bool m_renderItemHooked = false;
-    bool m_fovHooked = false;
-    bool m_perspectiveHooked = false;
+    bool m_jsonTransformHooked = false;
+    bool m_defaultTransformHooked = false;
+    bool m_renderOffhandItemHooked = false;
+    bool m_renderObjectHooked = false;
 };
+
+ViewModelModule* GetViewModelModule();

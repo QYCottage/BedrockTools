@@ -9,11 +9,35 @@ inline constexpr std::size_t mReservedAreas = 0x120;
 inline constexpr std::size_t ReservedAreaEntrySize = 0x30;
 }
 
+namespace GuiData {
+inline constexpr std::size_t mGuiMessages = 0x138;
+inline constexpr std::size_t mGuiMessagesEnd = 0x140;
+}
+
 namespace GuiMessage {
+inline constexpr std::size_t Size = 0xD8;
 inline constexpr std::size_t Type = 0x0;
+inline constexpr std::size_t Message = 0x8;
 inline constexpr std::size_t FullString = 0x70;
 inline constexpr std::size_t FilteredFullString = 0x88;
 inline constexpr std::size_t FilteredFullStringPresent = 0xA0;
+}
+
+namespace MapPreview {
+inline constexpr std::size_t ItemStackBaseUserData = 0x10;
+inline constexpr std::size_t CompoundTagTreeRoot = 0x8;
+inline constexpr std::size_t CompoundTagTreeEnd = 0x10;
+inline constexpr std::size_t NbtNodeNumericValue = 0x40;
+inline constexpr std::size_t NbtNodeType = 0x60;
+inline constexpr std::size_t HoverRendererCursorX = 0x40;
+inline constexpr std::size_t HoverRendererCursorY = 0x44;
+inline constexpr std::size_t MapItemSavedDataPixels = 0x30;
+inline constexpr std::size_t MinecraftUIRenderContextScreenContext = 0x10;
+inline constexpr std::size_t RenderMeshDataSize = 0x58;
+}
+
+namespace MinecraftUIRenderContext {
+inline constexpr std::size_t mClient = 0x8;
 }
 
 namespace ShulkerPreview {

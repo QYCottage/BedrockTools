@@ -30,6 +30,9 @@
 #include "hud/speeddisplay.hpp"
 #include "hud/debugmenu.hpp"
 #include "visual/viewmodel.hpp"
+#include "visual/mappreview.hpp"
+#include "visual/coloredlights.hpp"
+#include "hud/chatheads.hpp"
 #include "hud/keystrokes.hpp"
 #include "visual/thirdpersonnametag.hpp"
 #include "hud/tablist.hpp"
@@ -118,6 +121,9 @@ void registerAllModules() {
     registry.emplace<SpeedDisplayModule>();
     registry.emplace<DebugMenuModule>();
     registry.emplace<ViewModelModule>();
+    registry.emplace<MapPreviewModule>();
+    registry.emplace<ChatHeadsModule>();
+    registry.emplace<ColoredLightsModule>();
     registry.emplace<SwingModifierModule>();
     registry.emplace<KeystrokesModule>();
     registry.emplace<ThirdPersonNametagModule>();

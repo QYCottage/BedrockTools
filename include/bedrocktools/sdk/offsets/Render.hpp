@@ -71,10 +71,13 @@ inline constexpr std::size_t mCurrentShapeBB = 0x5F0;
 namespace Tessellator {
 inline constexpr std::size_t mTextureU = 0x18C;
 inline constexpr std::size_t mTextureV = 0x190;
+inline constexpr std::size_t mNextColor = 0x1B0;
+inline constexpr std::size_t mNextColorSet = 0x1B4;
 }
 
 namespace Block {
 inline constexpr std::size_t mBlockType = 0x68;
+inline constexpr std::size_t mLightEmission = 0xA4;
 }
 
 namespace BlockType {

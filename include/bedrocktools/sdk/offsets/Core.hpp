@@ -24,10 +24,12 @@ inline constexpr std::size_t ClientInstanceGetLocalPlayer = 32;
 inline constexpr std::size_t PlayerGetCarriedItem = 78;
 inline constexpr std::size_t ItemGetMaxDamage = 37;
 inline constexpr std::size_t ItemGetAnimationFrameFor = 120;
+inline constexpr std::size_t ClientInstanceGetGuiScale = 212;
 }
 
 namespace ClientInstance {
-inline constexpr std::size_t mLevelRenderer = 0x190;
+inline constexpr std::size_t mGuiData = 0x628;
+inline constexpr std::size_t mLevelRenderer = 0x1A0;
 }
 
 }
