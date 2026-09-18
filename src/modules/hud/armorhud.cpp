@@ -131,7 +131,12 @@ private:
 
 using HudCameraRendererFn = void (*)(void*, void*, void*, void*, int);
 using BaseActorRenderContextCtorFn = void (*)(void*, void*, void*, void*);
-using ItemStackBaseGetDamageValueFn = short (*)(void*);
+struct NbtTreeKey {
+    const char* data;
+    std::size_t len;
+};
+
+using NbtTreeFindFn = void* (*)(void*, const NbtTreeKey*);
 using ItemStackBaseGetRawNameIdFn = std::string (*)(void*);
 using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(
     void*, void*, void*, unsigned int, unsigned char, std::uint64_t,
@@ -139,7 +144,7 @@ using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(
 
 HudCameraRendererFn hudCameraRendererOriginal = nullptr;
 BaseActorRenderContextCtorFn baseActorRenderContextCtor = nullptr;
-ItemStackBaseGetDamageValueFn itemStackBaseGetDamageValue = nullptr;
+NbtTreeFindFn nbtTreeFind = nullptr;
 ItemStackBaseGetRawNameIdFn itemStackBaseGetRawNameId = nullptr;
 ItemRendererRenderGuiItemNewFn itemRendererRenderGuiItemNew = nullptr;
 ArmorHudModule* moduleInstance = nullptr;
@@ -310,8 +315,28 @@ void* containerStack(void* container, std::size_t slot) {
 }
 
 int getStackDamage(void* stack) {
-    if (!stack || !itemStackBaseGetDamageValue) return 0;
-    return std::max(0, static_cast<int>(itemStackBaseGetDamageValue(stack)));
+    if (!stack || !nbtTreeFind) return 0;
+
+    auto* stackBytes = reinterpret_cast<std::byte*>(stack);
+    void* compound = *reinterpret_cast<void**>(
+        stackBytes + bedrocktools::sdk::offsets::ShulkerPreview::ItemStackBaseUserData);
+    if (!compound) return 0;
+
+    NbtTreeKey key{"Damage", 6};
+    auto* compoundBytes = reinterpret_cast<std::byte*>(compound);
+    void* treeRoot = compoundBytes + bedrocktools::sdk::offsets::ShulkerPreview::CompoundTagTreeRoot;
+    void* treeEnd = compoundBytes + bedrocktools::sdk::offsets::ShulkerPreview::CompoundTagTreeEnd;
+    void* node = nbtTreeFind(treeRoot, &key);
+    if (!node || node == treeEnd) return 0;
+
+    auto* nodeBytes = reinterpret_cast<std::byte*>(node);
+    const auto type = *reinterpret_cast<const std::uint32_t*>(
+        nodeBytes + bedrocktools::sdk::offsets::ShulkerPreview::NbtNodeType);
+    if (type != 3) return 0;
+
+    const auto damage = *reinterpret_cast<const std::int32_t*>(
+        nodeBytes + bedrocktools::sdk::offsets::ShulkerPreview::NbtNodeNumericValue);
+    return std::max(0, static_cast<int>(damage));
 }
 
 ActorEquipmentComponent* getEquipment(void* player) {
@@ -373,8 +398,8 @@ ArmorHudModule::~ArmorHudModule() {
 void ArmorHudModule::onInit() {
     baseActorRenderContextCtor = reinterpret_cast<BaseActorRenderContextCtorFn>(
         bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BaseActorRenderContextCtor));
-    itemStackBaseGetDamageValue = reinterpret_cast<ItemStackBaseGetDamageValueFn>(
-        bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetDamageValue));
+    nbtTreeFind = reinterpret_cast<NbtTreeFindFn>(
+        bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::NbtTreeFind));
     itemStackBaseGetRawNameId = reinterpret_cast<ItemStackBaseGetRawNameIdFn>(
         bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetRawNameId));
     itemRendererRenderGuiItemNew = reinterpret_cast<ItemRendererRenderGuiItemNewFn>(
