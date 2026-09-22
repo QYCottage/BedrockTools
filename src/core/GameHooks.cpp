@@ -26,11 +26,11 @@ using VersionStringFn = std::string(*)(void*);
 using NormalTickFn = void(*)(void*);
 using StartDestroyBlockFn = bool(*)(void*, const void*, std::uint8_t, bool*);
 using StopDestroyBlockFn = void(*)(void*, const void*);
-using StartBuildBlockFn = void(*)(void*, const void*, std::uint8_t);
-using UseItemFn = bool(*)(void*, void*);
-using UseItemAsAttackFn = bool(*)(void*, void*, const void*);
-using UseItemOnFn = InteractionResultValue(*)(void*, void*, const void*, std::uint8_t, const void*, const void*, bool);
-using InteractFn = bool(*)(void*, void*, const void*);
+using StartBuildBlockFn = void(*)(void*, const void*, std::uint8_t, std::uint32_t);
+using UseItemFn = bool(*)(void*, void*, std::uint32_t);
+using UseItemAsAttackFn = bool(*)(void*, void*, const void*, std::uint32_t);
+using UseItemOnFn = InteractionResultValue(*)(void*, void*, const void*, std::uint8_t, const void*, std::uint32_t, const void*, bool);
+using InteractFn = bool(*)(void*, void*, const void*, std::uint32_t);
 using AttackFn = bool(*)(void*, void*, bool, const void*);
 using ClientInstanceUpdateFn = void*(*)(void*, bool);
 using ContainerSlotSelectedFn = std::uint32_t(*)(void*, const std::string&, int);
@@ -160,70 +160,70 @@ void gameModeStopDestroyBlockDetour(void* gameMode, const void* position) {
     bus().publish(event);
 }
 
-void gameModeStartBuildBlockDetour(void* gameMode, const void* position, std::uint8_t face) {
+void gameModeStartBuildBlockDetour(void* gameMode, const void* position, std::uint8_t face, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::GameMode, gameMode};
-    if (gameModeStartBuildBlockOriginal) gameModeStartBuildBlockOriginal(gameMode, position, face);
+    if (gameModeStartBuildBlockOriginal) gameModeStartBuildBlockOriginal(gameMode, position, face, interactionMode);
     scope.publish(GameModeAction::StartBuildBlock);
 }
 
-void survivalModeStartBuildBlockDetour(void* gameMode, const void* position, std::uint8_t face) {
+void survivalModeStartBuildBlockDetour(void* gameMode, const void* position, std::uint8_t face, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::SurvivalMode, gameMode};
-    if (survivalModeStartBuildBlockOriginal) survivalModeStartBuildBlockOriginal(gameMode, position, face);
+    if (survivalModeStartBuildBlockOriginal) survivalModeStartBuildBlockOriginal(gameMode, position, face, interactionMode);
     scope.publish(GameModeAction::StartBuildBlock);
 }
 
-bool gameModeUseItemDetour(void* gameMode, void* item) {
+bool gameModeUseItemDetour(void* gameMode, void* item, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::GameMode, gameMode};
-    const bool result = gameModeUseItemOriginal ? gameModeUseItemOriginal(gameMode, item) : false;
+    const bool result = gameModeUseItemOriginal ? gameModeUseItemOriginal(gameMode, item, interactionMode) : false;
     scope.publish(GameModeAction::UseItem, true, result);
     return result;
 }
 
-bool survivalModeUseItemDetour(void* gameMode, void* item) {
+bool survivalModeUseItemDetour(void* gameMode, void* item, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::SurvivalMode, gameMode};
-    const bool result = survivalModeUseItemOriginal ? survivalModeUseItemOriginal(gameMode, item) : false;
+    const bool result = survivalModeUseItemOriginal ? survivalModeUseItemOriginal(gameMode, item, interactionMode) : false;
     scope.publish(GameModeAction::UseItem, true, result);
     return result;
 }
 
-bool gameModeUseItemAsAttackDetour(void* gameMode, void* item, const void* direction) {
+bool gameModeUseItemAsAttackDetour(void* gameMode, void* item, const void* direction, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::GameMode, gameMode};
-    const bool result = gameModeUseItemAsAttackOriginal ? gameModeUseItemAsAttackOriginal(gameMode, item, direction) : false;
+    const bool result = gameModeUseItemAsAttackOriginal ? gameModeUseItemAsAttackOriginal(gameMode, item, direction, interactionMode) : false;
     if (result) scope.publish(GameModeAction::UseItemAsAttack);
     return result;
 }
 
-bool survivalModeUseItemAsAttackDetour(void* gameMode, void* item, const void* direction) {
+bool survivalModeUseItemAsAttackDetour(void* gameMode, void* item, const void* direction, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::SurvivalMode, gameMode};
-    const bool result = survivalModeUseItemAsAttackOriginal ? survivalModeUseItemAsAttackOriginal(gameMode, item, direction) : false;
+    const bool result = survivalModeUseItemAsAttackOriginal ? survivalModeUseItemAsAttackOriginal(gameMode, item, direction, interactionMode) : false;
     if (result) scope.publish(GameModeAction::UseItemAsAttack);
     return result;
 }
 
-InteractionResultValue gameModeUseItemOnDetour(void* gameMode, void* item, const void* position, std::uint8_t face, const void* hit, const void* block, bool firstEvent) {
+InteractionResultValue gameModeUseItemOnDetour(void* gameMode, void* item, const void* position, std::uint8_t face, const void* hit, std::uint32_t interactionMode, const void* block, bool firstEvent) {
     GameModeActionScope scope{GameModeType::GameMode, gameMode};
-    const auto result = gameModeUseItemOnOriginal ? gameModeUseItemOnOriginal(gameMode, item, position, face, hit, block, firstEvent) : InteractionResultValue{};
+    const auto result = gameModeUseItemOnOriginal ? gameModeUseItemOnOriginal(gameMode, item, position, face, hit, interactionMode, block, firstEvent) : InteractionResultValue{};
     if (firstEvent && (interactionSucceeded(result) || (interactionSwings(result) && itemStackHasItem(item)))) scope.publish(GameModeAction::UseItemOn);
     return result;
 }
 
-InteractionResultValue survivalModeUseItemOnDetour(void* gameMode, void* item, const void* position, std::uint8_t face, const void* hit, const void* block, bool firstEvent) {
+InteractionResultValue survivalModeUseItemOnDetour(void* gameMode, void* item, const void* position, std::uint8_t face, const void* hit, std::uint32_t interactionMode, const void* block, bool firstEvent) {
     GameModeActionScope scope{GameModeType::SurvivalMode, gameMode};
-    const auto result = survivalModeUseItemOnOriginal ? survivalModeUseItemOnOriginal(gameMode, item, position, face, hit, block, firstEvent) : InteractionResultValue{};
+    const auto result = survivalModeUseItemOnOriginal ? survivalModeUseItemOnOriginal(gameMode, item, position, face, hit, interactionMode, block, firstEvent) : InteractionResultValue{};
     if (firstEvent && (interactionSucceeded(result) || (interactionSwings(result) && itemStackHasItem(item)))) scope.publish(GameModeAction::UseItemOn);
     return result;
 }
 
-bool gameModeInteractDetour(void* gameMode, void* target, const void* location) {
+bool gameModeInteractDetour(void* gameMode, void* target, const void* location, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::GameMode, gameMode};
-    const bool result = gameModeInteractOriginal ? gameModeInteractOriginal(gameMode, target, location) : false;
+    const bool result = gameModeInteractOriginal ? gameModeInteractOriginal(gameMode, target, location, interactionMode) : false;
     if (result) scope.publish(GameModeAction::Interact);
     return result;
 }
 
-bool survivalModeInteractDetour(void* gameMode, void* target, const void* location) {
+bool survivalModeInteractDetour(void* gameMode, void* target, const void* location, std::uint32_t interactionMode) {
     GameModeActionScope scope{GameModeType::SurvivalMode, gameMode};
-    const bool result = survivalModeInteractOriginal ? survivalModeInteractOriginal(gameMode, target, location) : false;
+    const bool result = survivalModeInteractOriginal ? survivalModeInteractOriginal(gameMode, target, location, interactionMode) : false;
     if (result) scope.publish(GameModeAction::Interact);
     return result;
 }
