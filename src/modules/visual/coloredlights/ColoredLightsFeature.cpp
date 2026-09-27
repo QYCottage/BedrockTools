@@ -1,4 +1,5 @@
 #include "ColoredLightsFeature.hpp"
+#include "../connectedglass.hpp"
 
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
@@ -133,6 +134,7 @@ BlockSourceIsSolidBlockingBlockFn g_isSolidBlockingBlock = nullptr;
 SetAllDirtyFn g_setAllDirty = nullptr;
 
 std::atomic_bool g_enabled{false};
+std::atomic_bool g_connectedGlassActive{false};
 std::atomic_int g_rebuildDelayUpdates{-1};
 std::atomic_int g_cacheBypassUpdates{0};
 std::atomic<float> g_colorStrength{0.85f};
@@ -521,6 +523,7 @@ void colorObjectDetour(void* tessellator, const ColorRaw* color) {
 
 void vertexDetour(void* tessellator, float x, float y, float z) {
     if (!g_vertexOriginal) return;
+    ConnectedGlassAdjustTessellatorVertex(tessellator, x, z);
     if (!g_tintContext.active || g_tintContext.tessellator != tessellator) {
         g_vertexOriginal(tessellator, x, y, z);
         return;
@@ -559,7 +562,8 @@ private:
 };
 
 bool useNewTessellationDetour(const void* block, bool onlyNew) {
-    if (g_enabled.load(std::memory_order_relaxed) && g_insideTerrainBuild && !onlyNew) {
+    if ((g_enabled.load(std::memory_order_relaxed) || g_connectedGlassActive.load(std::memory_order_relaxed))
+        && g_insideTerrainBuild && !onlyNew) {
         return false;
     }
     return g_useNewTessellationOriginal
@@ -576,7 +580,8 @@ void renderChunkBuilderBuildDetour(
     const void* lightingCapabilities
 ) {
     if (!g_renderChunkBuilderBuildOriginal) return;
-    if (!g_enabled.load(std::memory_order_relaxed) || forExport) {
+    if ((!g_enabled.load(std::memory_order_relaxed)
+         && !g_connectedGlassActive.load(std::memory_order_relaxed)) || forExport) {
         g_renderChunkBuilderBuildOriginal(
             builder,
             geometry,
@@ -690,26 +695,32 @@ void handleClientUpdate(void* clientInstance) {
 }
 
 void removeHooks() {
-    bedrocktools::hooks::remove(g_renderChunkBuilderBuildHook);
-    g_renderChunkBuilderBuildHook = nullptr;
+    if (!g_connectedGlassActive.load(std::memory_order_acquire)) {
+        bedrocktools::hooks::remove(g_renderChunkBuilderBuildHook);
+        g_renderChunkBuilderBuildHook = nullptr;
+        g_renderChunkBuilderBuildOriginal = nullptr;
+    }
     bedrocktools::hooks::remove(g_brightnessHook);
     g_brightnessHook = nullptr;
     bedrocktools::hooks::remove(g_colorObjectHook);
     g_colorObjectHook = nullptr;
-    bedrocktools::hooks::remove(g_vertexHook);
-    g_vertexHook = nullptr;
+    if (!g_connectedGlassActive.load(std::memory_order_acquire)) {
+        bedrocktools::hooks::remove(g_vertexHook);
+        g_vertexHook = nullptr;
+        g_vertexOriginal = nullptr;
+    }
     bedrocktools::hooks::remove(g_colorHook);
     g_colorHook = nullptr;
     bedrocktools::hooks::remove(g_tessellateBlockHook);
     g_tessellateBlockHook = nullptr;
-    bedrocktools::hooks::remove(g_useNewTessellationHook);
-    g_useNewTessellationHook = nullptr;
+    if (!g_connectedGlassActive.load(std::memory_order_acquire)) {
+        bedrocktools::hooks::remove(g_useNewTessellationHook);
+        g_useNewTessellationHook = nullptr;
+        g_useNewTessellationOriginal = nullptr;
+    }
     g_tessellateBlockOriginal = nullptr;
     g_colorOriginal = nullptr;
     g_colorObjectOriginal = nullptr;
-    g_vertexOriginal = nullptr;
-    g_useNewTessellationOriginal = nullptr;
-    g_renderChunkBuilderBuildOriginal = nullptr;
     g_brightnessOriginal = nullptr;
 }
 
@@ -810,6 +821,29 @@ bool installHooks() {
         && g_renderChunkBuilderBuildHook;
     if (!installed) removeHooks();
     return installed;
+}
+
+bool setConnectedGlassActive(bool active) {
+    if (active) {
+        if (!g_useNewTessellationHook) {
+            g_useNewTessellationHook = installHook(
+                bedrocktools::memory::SignatureId::BlockTessellatorPipelineUseNewTessellation,
+                reinterpret_cast<void*>(useNewTessellationDetour), &g_useNewTessellationOriginal);
+        }
+        if (!g_renderChunkBuilderBuildHook) {
+            g_renderChunkBuilderBuildHook = installHook(
+                bedrocktools::memory::SignatureId::RenderChunkBuilderBuild,
+                reinterpret_cast<void*>(renderChunkBuilderBuildDetour), &g_renderChunkBuilderBuildOriginal);
+        }
+        if (!g_vertexHook) {
+            g_vertexHook = installHook(
+                bedrocktools::memory::SignatureId::TessellatorVertex,
+                reinterpret_cast<void*>(vertexDetour), &g_vertexOriginal);
+        }
+        if (!g_useNewTessellationHook || !g_renderChunkBuilderBuildHook || !g_vertexHook) return false;
+    }
+    g_connectedGlassActive.store(active, std::memory_order_release);
+    return true;
 }
 
 bool install(const Settings& settings, bool active) {

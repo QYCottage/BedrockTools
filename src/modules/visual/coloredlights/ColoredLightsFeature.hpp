@@ -21,6 +21,7 @@ bool install(const Settings& settings, bool active);
 void setActive(bool active);
 void updateSettings(const Settings& settings);
 void onClientInstanceUpdate(void* clientInstance);
+bool setConnectedGlassActive(bool active);
 void shutdown();
 
 }

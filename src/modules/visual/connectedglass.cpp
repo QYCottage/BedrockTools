@@ -1,4 +1,5 @@
 #include "connectedglass.hpp"
+#include "coloredlights/ColoredLightsFeature.hpp"
 
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/sdk/Memory.hpp>
@@ -61,8 +62,6 @@ struct PaneRenderContext {
 using FaceFn = void (*)(void*, void*, const void*, const Vec3Raw*, const void*);
 using PaneTessFn = bool (*)(void*, void*, const void*, const BlockPosRaw*, int32_t);
 using BgGetTextureFn = const void* (*)(void*, const BlockPosRaw*, size_t, uint32_t);
-using TessVertexFn = void (*)(void*, float, float, float);
-using BoUpdateRenderFaceFn = uint64_t (*)(void*, const void*, const BlockPosRaw*, const void*, uint8_t);
 using BlockSourceGetBlockFn = const void* (*)(void*, const BlockPosRaw*, int32_t);
 using BlockSourceIsSolidBlockingBlockFn = bool (*)(void*, const BlockPosRaw*);
 using TextureUVCopyCtorFn = void* (*)(void*, const void*);
@@ -93,13 +92,9 @@ FaceHook g_faceHooks[6] = {};
 
 bedrocktools::hooks::Handle g_paneTessHook = nullptr;
 bedrocktools::hooks::Handle g_bgGetTextureHook = nullptr;
-bedrocktools::hooks::Handle g_tessVertexHook = nullptr;
-bedrocktools::hooks::Handle g_boUpdateRenderFaceHook = nullptr;
 
 PaneTessFn g_paneTessOriginal = nullptr;
 BgGetTextureFn g_bgGetTextureOriginal = nullptr;
-TessVertexFn g_tessVertexOriginal = nullptr;
-BoUpdateRenderFaceFn g_boUpdateRenderFaceOriginal = nullptr;
 
 BlockSourceGetBlockFn g_getBlock = nullptr;
 BlockSourceIsSolidBlockingBlockFn g_isSolidBlockingBlock = nullptr;
@@ -453,8 +448,7 @@ const void* bgGetTextureDetour(void* bgThis, const BlockPosRaw* pos, size_t face
     return result;
 }
 
-void tessVertexDetour(void* tess, float x, [[maybe_unused]] float y, float z) {
-    if (!g_tessVertexOriginal) return;
+void adjustTessellatorVertex(void* tess, float x, float z) {
     if (g_paneRc.active && g_paneRc.haveSource && g_paneRc.tess == tess) {
         float& u = field<float>(tess, bedrocktools::sdk::offsets::Tessellator::mTextureU);
         float& v = field<float>(tess, bedrocktools::sdk::offsets::Tessellator::mTextureV);
@@ -469,30 +463,6 @@ void tessVertexDetour(void* tess, float x, [[maybe_unused]] float y, float z) {
             v = remapCroppedUv(v, src.v0, src.v1, g_paneRc.vertical.v0, g_paneRc.vertical.v1);
         }
     }
-    g_tessVertexOriginal(tess, x, y, z);
-}
-
-uint64_t boUpdateRenderFaceDetour(
-    void* self, const void* block, const BlockPosRaw* pos, const void* aabb, uint8_t face
-) {
-    if (!g_boUpdateRenderFaceOriginal) return 0;
-    const uint64_t result = g_boUpdateRenderFaceOriginal(self, block, pos, aabb, face);
-    if (!g_enabled.load(std::memory_order_relaxed) || !g_paneRc.active || !pos) return result;
-    if (face != static_cast<uint8_t>(GlassFace::Up) && face != static_cast<uint8_t>(GlassFace::Down)) return result;
-
-    const GlassInfo current = classifyGlass(block);
-    if (!current.valid() || current.shape != GlassShape::Pane
-        || !g_connectGlassPanes.load(std::memory_order_relaxed)) {
-        return result;
-    }
-    const bool connected = (face == static_cast<uint8_t>(GlassFace::Up))
-        ? g_paneRc.vertical.v0
-        : g_paneRc.vertical.v1;
-    if (!connected) return result;
-
-    const uint64_t bit = 1ULL << face;
-    field<uint64_t>(self, 0) |= bit;
-    return result | bit;
 }
 
 template <typename Fn>
@@ -530,6 +500,10 @@ bool rebuildRenderChunks(void* clientInstance) {
 
 }
 
+void ConnectedGlassAdjustTessellatorVertex(void* tessellator, float x, float z) {
+    if (g_enabled.load(std::memory_order_relaxed)) adjustTessellatorVertex(tessellator, x, z);
+}
+
 void ConnectedGlassHandleClientInstanceUpdate(void* clientInstance) {
     if (!g_rebuildPending.load(std::memory_order_acquire)) return;
     if (rebuildRenderChunks(clientInstance)) {
@@ -546,6 +520,7 @@ ConnectedGlassModule::ConnectedGlassModule()
 
 ConnectedGlassModule::~ConnectedGlassModule() {
     g_enabled.store(false, std::memory_order_relaxed);
+    bedrocktools::feature::coloredlights::setConnectedGlassActive(false);
 }
 
 void ConnectedGlassModule::applySettings() {
@@ -594,20 +569,10 @@ void ConnectedGlassModule::installHooks() {
             bedrocktools::memory::SignatureId::BlockGraphicsGetTexture,
             reinterpret_cast<void*>(bgGetTextureDetour), &g_bgGetTextureOriginal);
     }
-    if (!g_tessVertexHook) {
-        g_tessVertexHook = installHook(
-            bedrocktools::memory::SignatureId::TessellatorVertex,
-            reinterpret_cast<void*>(tessVertexDetour), &g_tessVertexOriginal);
-    }
-    if (!g_boUpdateRenderFaceHook) {
-        g_boUpdateRenderFaceHook = installHook(
-            bedrocktools::memory::SignatureId::BlockOccluderUpdateRenderFace,
-            reinterpret_cast<void*>(boUpdateRenderFaceDetour), &g_boUpdateRenderFaceOriginal);
-    }
 
     m_hooked = g_getBlock && g_isSolidBlockingBlock && g_textureCopyCtor && g_textureDtor && g_setAllDirty;
     for (const auto& h : g_faceHooks) m_hooked = m_hooked && h.handle;
-    m_hooked = m_hooked && g_paneTessHook && g_bgGetTextureHook && g_tessVertexHook && g_boUpdateRenderFaceHook;
+    m_hooked = m_hooked && g_paneTessHook && g_bgGetTextureHook;
 }
 
 void ConnectedGlassModule::onInit() {
@@ -621,12 +586,14 @@ void ConnectedGlassModule::onInit() {
 void ConnectedGlassModule::onEnable() {
     applySettings();
     if (!m_hooked) installHooks();
-    g_enabled.store(m_hooked, std::memory_order_release);
-    if (m_hooked) g_rebuildPending.store(true, std::memory_order_release);
+    const bool active = m_hooked && bedrocktools::feature::coloredlights::setConnectedGlassActive(true);
+    g_enabled.store(active, std::memory_order_release);
+    if (active) g_rebuildPending.store(true, std::memory_order_release);
 }
 
 void ConnectedGlassModule::onDisable() {
     g_enabled.store(false, std::memory_order_release);
+    bedrocktools::feature::coloredlights::setConnectedGlassActive(false);
     if (m_hooked) g_rebuildPending.store(true, std::memory_order_release);
 }
 

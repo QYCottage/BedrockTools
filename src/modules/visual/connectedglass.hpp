@@ -34,3 +34,4 @@ private:
 };
 
 void ConnectedGlassHandleClientInstanceUpdate(void* clientInstance);
+void ConnectedGlassAdjustTessellatorVertex(void* tessellator, float x, float z);
