@@ -131,4 +131,8 @@ namespace RenderChunkCoordinator {
 inline constexpr std::size_t MaxNodes = 64;
 }
 
+namespace CameraComponent {
+inline constexpr std::size_t mOrientation = 0x28;
+}
+
 }

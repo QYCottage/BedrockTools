@@ -1,5 +1,6 @@
 #include "ModuleMenu.hpp"
 #include "modules/ModuleRegistry.hpp"
+#include "core/Runtime.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
 #include <algorithm>
@@ -17,7 +18,7 @@ static void onModuleToggle(std::string_view module_id, bool enabled) {
 }
 
 static void onModuleKeybind(std::string_view module_id, std::string_view key, bool isDown) {
-    if (ModuleRegistry::get().keybindBlocked()) return;
+    if (isDown && ModuleRegistry::get().keybindBlocked()) return;
     auto* mod = ModuleRegistry::get().find(module_id);
     if (!mod) return;
     mod->onKeybindEvent(std::string(key), isDown);
@@ -74,6 +75,7 @@ void registerModulesWithLauncher() {
 
         pl::modmenu::ModuleBuilder builder(mod->moduleId, mod->name);
         builder.description(mod->description)
+                .modId(bedrocktools::core::Runtime::get().modId())
                 .defaultEnabled(mod->masterEnabled)
                 .hideInHudEditor(mod->hideInHudEditor)
                 .onToggle(onModuleToggle)
@@ -254,6 +256,10 @@ void registerModulesWithLauncher() {
             builder.config(entry.key, entry.displayName, entry.type, entry.default_value, entry.min_value, entry.max_value, entry.depends_on);
         }
 
-        if (builder.registerModule()) mod->onMenuRegistered();
+        if (builder.registerModule()) {
+            mod->onMenuRegistered();
+        } else {
+            pl::log::Logger::getOrCreate("BedrockTools").error("Module registration failed: {}", mod->moduleId);
+        }
     }
 }

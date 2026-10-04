@@ -147,6 +147,9 @@ enum class SignatureId : std::uint16_t {
     ItemInHandRendererTransformWorldMatrixFromJson,
     ItemInHandRendererApplyDefaultItemTransforms,
     ItemInHandRenderOffhandItem,
+    UpdatePlayerFromCamera,
+    ActorGetHeadRotation,
+    ActorSetHeadRotation,
     Count
 };
 
