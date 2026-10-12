@@ -12,6 +12,7 @@
 #include "hud/arrowcounter.hpp"
 #include "hud/potcounter.hpp"
 #include "player/quickloot.hpp"
+#include "player/aimassist.hpp"
 #include "hud/reachcounter.hpp"
 #include "hud/breakindicator.hpp"
 #include "hud/playercoords.hpp"
@@ -109,6 +110,7 @@ void registerAllModules() {
     registry.emplace<PotCounterModule>();
     registry.emplace<QuickLootModule>();
     registry.emplace<AutoSprintModule>();
+    registry.emplace<AimAssistModule>();
     registry.emplace<WeatherChangerModule>();
     registry.emplace<NickModule>();
     registry.emplace<NoDisconnectModule>();
