@@ -1,4 +1,5 @@
 #include "aimassist.hpp"
+#include "core/InventoryAccess.hpp"
 
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/events/LocalPlayerTickEvent.hpp>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 
 namespace {
@@ -72,6 +74,37 @@ bool categoryHasMobBit(void* actor) {
 }
 }
 
+void applyAimAssistTurnDelta(bedrocktools::sdk::Vec2& delta) {
+    if (g_aimAssist) g_aimAssist->applyTurnDelta(delta);
+
+bool hasWeaponInMainHand(const bedrocktools::sdk::Player* player) {
+    if (!player) return false;
+
+    auto** vtable = *reinterpret_cast<void***>(
+        const_cast<bedrocktools::sdk::Player*>(player));
+    constexpr std::size_t getCarriedItemIndex =
+        bedrocktools::sdk::offsets::VTable::PlayerGetCarriedItem;
+    if (!vtable || !vtable[getCarriedItemIndex]) return false;
+
+    using GetCarriedItemFn = const void* (*)(void*);
+    const void* stack = reinterpret_cast<GetCarriedItemFn>(
+        vtable[getCarriedItemIndex])(const_cast<bedrocktools::sdk::Player*>(player));
+    if (!stack) return false;
+
+    const auto& inventory = bedrocktools::core::InventoryAccess::get();
+    constexpr const char* weaponIdentifiers[] = {
+        "_sword", "_axe", "mace", "trident", "spear", "bow",
+        "dagger", "katana", "rapier", "scythe", "hammer",
+        "halberd", "glaive", "lance"
+    };
+    for (const char* identifier : weaponIdentifiers) {
+        if (inventory.countStack(stack, identifier) > 0) return true;
+    }
+    return false;
+}
+
+}
+
 AimAssistModule::AimAssistModule()
     : Module("Aim Assist", "Smooth target tracking for private PvP training worlds.") {
     keybind = 0;
@@ -99,37 +132,65 @@ void AimAssistModule::onInit() {
 }
 
 void AimAssistModule::onEnable() {
-    m_lastTarget = nullptr;
+    resetCameraState();
 }
 
 void AimAssistModule::onDisable() {
+    resetCameraState();
+}
+
+void AimAssistModule::clearTargetState() {
     m_lastTarget = nullptr;
+    m_pendingYawError.store(0.0f, std::memory_order_relaxed);
+    m_pendingPitchError.store(0.0f, std::memory_order_relaxed);
+    m_pendingStrength.store(0.0f, std::memory_order_relaxed);
+}
+
+void AimAssistModule::resetCameraState() {
+    clearTargetState();
+    m_cameraPitch.store(0.0f, std::memory_order_relaxed);
+    m_cameraYaw.store(0.0f, std::memory_order_relaxed);
+    m_cameraRotationInitialized.store(false, std::memory_order_release);
 }
 
 void AimAssistModule::processPlayerTick(bedrocktools::sdk::Player* player) {
     using namespace bedrocktools::sdk;
-    if (!enabled || !player || !g_fetchNearbyActors || (!m_targetPlayers && !m_targetMobs)) {
-        m_lastTarget = nullptr;
+    if (!enabled || !player || !g_fetchNearbyActors || (!m_targetPlayers && !m_targetMobs) ||
+        (m_weaponOnly && !hasWeaponInMainHand(player))) {
+        clearTargetState();
         return;
     }
 
     auto* rotationComponent = player->rotationComponent();
     auto* level = player->level();
     if (!rotationComponent || !level) {
-        m_lastTarget = nullptr;
+        clearTargetState();
         return;
     }
 
-    Vec2 currentRotation = field<Vec2>(rotationComponent, 0);
+    const Vec2 actorRotation = field<Vec2>(rotationComponent, 0);
+    if (!std::isfinite(actorRotation.x) || !std::isfinite(actorRotation.y)) {
+        clearTargetState();
+        return;
+    }
+    if (!m_cameraRotationInitialized.load(std::memory_order_acquire)) {
+        m_cameraPitch.store(std::clamp(actorRotation.x, -89.0f, 89.0f), std::memory_order_relaxed);
+        m_cameraYaw.store(wrapDegrees(actorRotation.y), std::memory_order_relaxed);
+        m_cameraRotationInitialized.store(true, std::memory_order_release);
+    }
+    Vec2 currentRotation{
+        m_cameraPitch.load(std::memory_order_relaxed),
+        m_cameraYaw.load(std::memory_order_relaxed)
+    };
     if (!std::isfinite(currentRotation.x) || !std::isfinite(currentRotation.y)) {
-        m_lastTarget = nullptr;
+        clearTargetState();
         return;
     }
 
     const AABB playerBounds = player->bounds();
     const Vec3 playerPosition = player->position();
     if (!finiteVec3(playerPosition)) {
-        m_lastTarget = nullptr;
+        clearTargetState();
         return;
     }
 
@@ -145,13 +206,13 @@ void AimAssistModule::processPlayerTick(bedrocktools::sdk::Player* player) {
     Vec3 extent{m_range, m_range, m_range};
     void* actorManager = field<void*>(level, offsets::Level::mActorManager);
     if (!actorManager) {
-        m_lastTarget = nullptr;
+        clearTargetState();
         return;
     }
 
     ActorVector actors = g_fetchNearbyActors(player, &extent, 1);
     if (!actors.begin || !actors.end || actors.end < actors.begin) {
-        m_lastTarget = nullptr;
+        clearTargetState();
         return;
     }
 
@@ -211,25 +272,48 @@ void AimAssistModule::processPlayerTick(bedrocktools::sdk::Player* player) {
     }
 
     m_lastTarget = bestTarget;
-    if (!bestTarget) return;
+    if (!bestTarget) {
+        clearTargetState();
+        return;
+    }
 
-    const float strength = std::clamp(m_strength, 0.01f, 1.0f);
-    const float yawDelta = wrapDegrees(bestRotation.y - currentRotation.y);
-    const float pitchDelta = bestRotation.x - currentRotation.x;
+    m_pendingYawError.store(wrapDegrees(bestRotation.y - currentRotation.y), std::memory_order_relaxed);
+    m_pendingPitchError.store(bestRotation.x - currentRotation.x, std::memory_order_relaxed);
+    m_pendingFov.store(maxFov, std::memory_order_relaxed);
+    m_pendingStrength.store(std::clamp(m_strength, 0.01f, 1.0f), std::memory_order_relaxed);
+}
 
-    Vec2 updatedRotation{};
-    updatedRotation.y = wrapDegrees(currentRotation.y + yawDelta * strength);
-    updatedRotation.x = std::clamp(currentRotation.x + pitchDelta * strength, -89.0f, 89.0f);
+void AimAssistModule::applyTurnDelta(bedrocktools::sdk::Vec2& delta) {
+    if (!enabled || !std::isfinite(delta.x) || !std::isfinite(delta.y)) return;
+    if (!m_cameraRotationInitialized.load(std::memory_order_acquire)) return;
 
-    // The SDK already reads this Vec2 from the actor rotation component. Write only
-    // these two floats, and only after a nearby valid training target has been selected.
-    field<Vec2>(rotationComponent, 0) = updatedRotation;
+    const float fov = std::clamp(m_pendingFov.load(std::memory_order_relaxed), 1.0f, 90.0f);
+    const float strength = std::clamp(m_pendingStrength.load(std::memory_order_relaxed), 0.0f, 0.5f);
+    const float yawError = m_pendingYawError.load(std::memory_order_relaxed);
+    const float pitchError = m_pendingPitchError.load(std::memory_order_relaxed);
+    const float inputMagnitude = std::hypot(delta.x, delta.y);
+
+    // Assist only while the player is already moving the camera; no idle auto-lock.
+    if (strength > 0.0f && std::isfinite(inputMagnitude) && inputMagnitude > 0.0001f
+        && std::isfinite(yawError) && std::isfinite(pitchError)) {
+        const float yawWeight = std::clamp(yawError / fov, -1.0f, 1.0f);
+        const float pitchWeight = std::clamp(pitchError / fov, -1.0f, 1.0f);
+        delta.y += yawWeight * inputMagnitude * strength;
+        delta.x += pitchWeight * inputMagnitude * strength;
+    }
+
+    // Track the camera-input stream locally instead of writing to the actor rotation.
+    const float pitch = m_cameraPitch.load(std::memory_order_relaxed);
+    const float yaw = m_cameraYaw.load(std::memory_order_relaxed);
+    m_cameraPitch.store(std::clamp(pitch + delta.x, -89.0f, 89.0f), std::memory_order_relaxed);
+    m_cameraYaw.store(wrapDegrees(yaw + delta.y), std::memory_order_relaxed);
 }
 
 void AimAssistModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     m_targetPlayers = j.value("m_targetPlayers", m_targetPlayers);
     m_targetMobs = j.value("m_targetMobs", m_targetMobs);
+    m_weaponOnly = j.value("m_weaponOnly", m_weaponOnly);
     m_range = std::clamp(j.value("m_range", m_range), 2.0f, 12.0f);
     m_fov = std::clamp(j.value("m_fov", m_fov), 1.0f, 90.0f);
     m_strength = std::clamp(j.value("m_strength", m_strength), 0.01f, 1.0f);
@@ -239,6 +323,7 @@ void AimAssistModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
     j["m_targetPlayers"] = m_targetPlayers;
     j["m_targetMobs"] = m_targetMobs;
+    j["m_weaponOnly"] = m_weaponOnly;
     j["m_range"] = m_range;
     j["m_fov"] = m_fov;
     j["m_strength"] = m_strength;
