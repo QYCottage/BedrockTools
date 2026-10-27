@@ -150,6 +150,8 @@ enum class SignatureId : std::uint16_t {
     UpdatePlayerFromCamera,
     ActorGetHeadRotation,
     ActorSetHeadRotation,
+    NameTagThirdPersonPatch,
+    ItemInHandFirstPersonTransformPatch,
     Count
 };
 
@@ -158,6 +160,8 @@ inline constexpr std::size_t SignatureCount = static_cast<std::size_t>(Signature
 struct SignatureDefinition {
     SignatureId id;
     std::string_view pattern;
+    std::string_view rtti{};
+    std::size_t vtableSlot = 0;
 };
 
 BEDROCKTOOLS_API bool resolveAll(std::string_view libraryName = "libminecraftpe.so");

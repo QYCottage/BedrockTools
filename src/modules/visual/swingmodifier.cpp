@@ -37,9 +37,11 @@ static int _getModifiedSwingDuration_hook(void* self) {
 void SwingModifierModule::onInit() {
     uintptr_t renderFirstPerson = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemInHandRendererRenderFirstPerson);
     if (renderFirstPerson != 0) {
-        if(!m_patchTarget){
-            m_patchTarget = (void*)(renderFirstPerson + bedrocktools::sdk::offsets::ItemInHandRenderer::mRenderFirstPersonTransformPatchOffset1);
-            m_patchTarget2 = (void*)(renderFirstPerson + bedrocktools::sdk::offsets::ItemInHandRenderer::mRenderFirstPersonTransformPatchOffset2);
+        const auto transformPatch = bedrocktools::memory::resolve(
+            bedrocktools::memory::SignatureId::ItemInHandFirstPersonTransformPatch);
+        if (!m_patchTarget && transformPatch != 0) {
+            m_patchTarget = reinterpret_cast<void*>(transformPatch);
+            m_patchTarget2 = reinterpret_cast<void*>(transformPatch + sizeof(std::uint32_t));
             memcpy(m_originalBytes, m_patchTarget, 4);
             memcpy(m_originalBytes2, m_patchTarget2, 4);
         }
@@ -58,7 +60,7 @@ void SwingModifierModule::onInit() {
 }
 
 void SwingModifierModule::applyPatch() {
-    if (m_patched || !m_patchTarget) return;
+    if (m_patched || !m_patchTarget || !m_patchTarget2) return;
     uint32_t nop = 0xD503201F; 
     bedrocktools::sdk::patchMemory(m_patchTarget, &nop, 4);
     bedrocktools::sdk::patchMemory(m_patchTarget2, &nop, 4);

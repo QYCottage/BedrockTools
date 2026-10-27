@@ -408,48 +408,17 @@ static void _applyDefaultItemTransforms_hook(
     }
 }
 
-static void (*_renderOffhandItem_orig)(void*, void*, void*, int) = nullptr;
-
-static void _renderOffhandItem_hook(void* self, void* renderContext, void* player, int itemFlags) {
-    const bool inFirstPersonFrame = g_firstPersonFrame && g_firstPersonFrame->renderContext == renderContext;
-
-    ViewModelHandFrame handFrame;
-    handFrame.renderContext = renderContext;
-    handFrame.mainHand = false;
-    captureBaseMatrix(handFrame.base, renderContext);
-
-    auto* previousHand = g_handFrame;
-    g_handFrame = &handFrame;
-
-    ViewModelRenderState state;
-    state.mainHand = false;
-    state.firstPerson = inFirstPersonFrame || ((itemFlags & kFirstPersonPass) != 0);
-    state.renderContext = renderContext;
-    if (handFrame.base.valid) {
-        state.base = handFrame.base;
-    } else {
-        prepareRenderState(state, renderContext);
-    }
-
-    auto* previousState = g_viewModelRenderState;
-    g_viewModelRenderState = &state;
-
-    if (_renderOffhandItem_orig) {
-        _renderOffhandItem_orig(self, renderContext, player, itemFlags);
-    }
-
-    if (inFirstPersonFrame && g_firstPersonFrame && g_firstPersonFrame->renderContext == renderContext) {
-        captureBaseMatrix(g_firstPersonFrame->mainBase, renderContext);
-    }
-
-    g_viewModelRenderState = previousState;
-    g_handFrame = previousHand;
-}
-
 static void (*_renderObject_orig)(void*, void*, void*, void*, int) = nullptr;
 
 static void _renderObject_hook(void* self, void* renderContext, void* renderObject, void* renderMetadata, int itemFlags) {
     auto* state = g_viewModelRenderState;
+    ViewModelRenderState offhandState;
+    if (!state && g_firstPersonFrame && g_firstPersonFrame->renderContext == renderContext) {
+        offhandState.mainHand = false;
+        offhandState.firstPerson = true;
+        prepareRenderState(offhandState, renderContext);
+        state = &offhandState;
+    }
     const bool firstPerson = state && (state->firstPerson || ((itemFlags & kFirstPersonPass) != 0));
     const bool shouldApply = g_viewModelMod && g_viewModelMod->enabled && state &&
         (firstPerson || g_viewModelMod->m_applyThirdPerson);
@@ -690,22 +659,7 @@ void ViewModelModule::installHooks() {
         }
     }
 
-    if (!m_renderOffhandItemHooked) {
-        auto address = bedrocktools::memory::resolve(
-            bedrocktools::memory::SignatureId::ItemInHandRenderOffhandItem
-        );
-        if (address) {
-            auto hook = bedrocktools::hooks::install(
-                reinterpret_cast<void*>(address),
-                reinterpret_cast<void*>(_renderOffhandItem_hook),
-                reinterpret_cast<void**>(&_renderOffhandItem_orig)
-            );
-            if (hook) g_viewModelHooks.push_back(hook);
-            m_renderOffhandItemHooked = hook != nullptr;
-        }
-    }
-
-    m_hooksInstalled = g_viewModelHooks.size() == 8;
+    m_hooksInstalled = g_viewModelHooks.size() == 7;
     if (!m_hooksInstalled) removeHooks();
 }
 
@@ -721,7 +675,6 @@ void ViewModelModule::removeHooks() {
     m_renderItemHooked = false;
     m_jsonTransformHooked = false;
     m_defaultTransformHooked = false;
-    m_renderOffhandItemHooked = false;
     m_renderObjectHooked = false;
     _renderFirstPerson_orig = nullptr;
     _renderHand_orig = nullptr;
@@ -729,7 +682,6 @@ void ViewModelModule::removeHooks() {
     _renderItem_orig = nullptr;
     _transformWorldMatrixFromJson_orig = nullptr;
     _applyDefaultItemTransforms_orig = nullptr;
-    _renderOffhandItem_orig = nullptr;
     _renderObject_orig = nullptr;
 }
 

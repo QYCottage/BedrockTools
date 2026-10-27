@@ -7,3 +7,4 @@ compile_commands.json
 *.so
 *.levipack
 *.zip
+lightdocs

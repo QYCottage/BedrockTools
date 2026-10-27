@@ -662,11 +662,6 @@ void ChatHeadsModule::capturePlayerListPacket(const void *packet) {
     return;
 
   const auto packetAddress = reinterpret_cast<std::uintptr_t>(packet);
-  const auto action = *reinterpret_cast<const std::int32_t *>(
-      packetAddress + bedrocktools::sdk::offsets::PlayerListPacket::mAction);
-  if (action != bedrocktools::sdk::offsets::PlayerListPacket::ActionAdd)
-    return;
-
   const auto begin = *reinterpret_cast<const std::uintptr_t *>(
       packetAddress +
       bedrocktools::sdk::offsets::PlayerListPacket::mEntriesBegin);
@@ -695,6 +690,10 @@ void ChatHeadsModule::capturePlayerListPacket(const void *packet) {
 
   for (std::size_t index = 0; index < count; ++index) {
     const auto entry = begin + index * stride;
+    const auto variant = *reinterpret_cast<const std::int32_t *>(
+        entry + bedrocktools::sdk::offsets::PlayerListEntry::mVariantIndex);
+    if (variant != bedrocktools::sdk::offsets::PlayerListEntry::AddVariant)
+      continue;
     const auto &name = *reinterpret_cast<const std::string *>(
         entry + bedrocktools::sdk::offsets::PlayerListEntry::mName);
     if (name.empty() || name.size() > 64)

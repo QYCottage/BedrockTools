@@ -9,7 +9,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 ## Features
 
 - Native C++20 mod built for LeviLauncher and Preloader
-- 36 configurable modules
+- 51 configurable modules
 - Public headers for Minecraft wrappers, offsets, signatures, and utilities
 - Typed event system with runtime subscriptions for other native mods
 - LeviLauncher mod-menu integration and persistent configuration
@@ -17,13 +17,13 @@ The source is public so people can study how a real LeviLauncher mod is structur
 
 ## Modules
 
-**Visual:** Fullbright, Motion Blur, Fog Color, Glint Color, TNT Timer, NoFog, View Model, Third Person Nametag, Chunk Border, Hitbox, Zoom, Breadcrumbs, FPS Unlocker, Light Overlay, ShulkerPreview, Connected Glass
+**Visual:** Breadcrumbs, Chunk Border, Cinematic Camera, Colored Lights, Connected Glass, Fog Color, FPS Unlocker, Freelook, Fullbright, Glint Color, Hitbox, Light Overlay, MapPreview, Motion Blur, NoFog, ShulkerPreview, Swing Modifier, Third Person Nametag, TNT Timer, View Model, Zoom
 
-**HUD:** Ping Counter, Reach Counter, Combo Display, Break Indicator, Player Coords, Compass, Speed Display, Debug Menu, Keystrokes, Tablist
+**HUD:** ArmorHUD, Arrow Counter, Break Indicator, Chat Heads, Combo Display, Compass, Debug Menu, Keystrokes, Ping Counter, Player Coords, Pot Counter, PotionHUD, Reach Counter, Speed Display, Tablist, Totem Counter, World Time
 
-**Player:** Time Changer, Weather Changer, Nick, Skin Stealer, AutoGG, AutoReQ
+**Player:** AutoGG, AutoSprint, Nick, Quick Loot, Skin Stealer, Time Changer, Weather Changer
 
-**Misc:** No Disconnect, Chat Timestamps, No Touch Border, CPS Limiter
+**Misc:** Chat Timestamps, CPS Limiter, ForceGlobalRP, Hive Utils, No Disconnect, No Touch Border
 
 ## System Requirements
 

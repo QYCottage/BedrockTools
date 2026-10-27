@@ -14,10 +14,10 @@ ThirdPersonNametagModule::~ThirdPersonNametagModule() {
 
 void ThirdPersonNametagModule::onInit() {
     if (m_patchTarget) return;
-    uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::Nametag);
+    uintptr_t addr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::NameTagThirdPersonPatch);
     if (addr != 0) {
         
-        m_patchTarget = (void*)(addr + bedrocktools::sdk::offsets::NameTag::mExtractNameTagsPatchOffset);
+        m_patchTarget = (void*)(addr);
         memcpy(m_originalBytes, m_patchTarget, 4);
     }
 }

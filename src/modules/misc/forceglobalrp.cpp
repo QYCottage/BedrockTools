@@ -25,7 +25,7 @@ static void ResourcePackStackPacket_handle_hook(void* _this, void* a1, void* a2,
         bedrocktools::sdk::field<bool>(pkt, bedrocktools::sdk::offsets::ResourcePackStackPacket::mResourcePackRequired) = false;
     }
     
-    if (original_ResourcePacksInfoPacket_handle) {
+    if (original_ResourcePackStackPacket_handle) {
         original_ResourcePackStackPacket_handle(_this, a1, a2, packet);
     }
 }

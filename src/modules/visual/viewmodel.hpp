@@ -43,7 +43,6 @@ private:
     bool m_renderItemHooked = false;
     bool m_jsonTransformHooked = false;
     bool m_defaultTransformHooked = false;
-    bool m_renderOffhandItemHooked = false;
     bool m_renderObjectHooked = false;
 };
 
