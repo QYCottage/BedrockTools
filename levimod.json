@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "bedrocktools",
-  "version": "1.5.8",
+  "version": "1.5.9",
   "minecraft_versions": [
     "1.26.60.X"
   ],
