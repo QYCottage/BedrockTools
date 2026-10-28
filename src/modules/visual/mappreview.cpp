@@ -1,7 +1,8 @@
 #include "mappreview.hpp"
-#include "core/GameHooks.hpp"
+#include "core/PreviewSelection.hpp"
+#include "core/UiRenderPass.hpp"
+#include "core/RenderState.hpp"
 #include "core/memory/Hooks.hpp"
-#include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <pl/memory/Vtable.hpp>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -105,20 +107,15 @@ struct MaterialPtr {
 enum class PrimitiveMode : int { QuadList = 1 };
 
 using NbtTreeFindFn = void *(*)(void *, const NbtTreeKey *);
-using ContainerGetItemStackFn = ItemStackBase *(*)(void *, const std::string &,
-                                                   int);
 using LevelGetMapSavedDataByTagFn = void *(*)(void *, const void *);
 using LevelRequestMapInfoFn = void (*)(void *, std::int64_t, bool);
 using TessellatorBeginFn = void (*)(void *, void *, int, int, int);
 using TessellatorColorFn = void (*)(void *, float, float, float, float);
 using TessellatorVertexFn = void (*)(void *, float, float, float);
 using RenderMeshImmediatelyFn = void (*)(void *, void *, void *, void *);
-using ScreenViewRenderFn = void (*)(void *, void *, void *, void *, void *, void *, void *, void *);
 using RenderHoverBoxFn = void (*)(void *, void *, void *, void *, float);
-using DrawTextCaptureFn = void (*)(void *, void *, const void *, const std::string &, const void *, std::uint8_t, float, const void *, const void *);
 
 NbtTreeFindFn nbtTreeFind = nullptr;
-ContainerGetItemStackFn containerGetItemStack = nullptr;
 LevelGetMapSavedDataByTagFn levelGetMapSavedDataByTag = nullptr;
 LevelRequestMapInfoFn levelRequestMapInfo = nullptr;
 TessellatorBeginFn tessellatorBegin = nullptr;
@@ -128,27 +125,23 @@ RenderMeshImmediatelyFn renderMeshImmediately = nullptr;
 std::uintptr_t renderMaterialGroup = 0;
 MaterialPtr uiFillMaterial;
 MapPreviewModule *moduleInstance = nullptr;
-void *selectedController = nullptr;
-std::string selectedCollection;
-int selectedIndex = -1;
+std::uint64_t selectedRevision = 0;
+bool selectedInContainer = false;
 float selectedAnchorX = 0.0f;
 float selectedAnchorY = 0.0f;
 bool selectedAnchorValid = false;
 bool hasPixels = false;
 bool mapInfoRequested = false;
 bool pendingLoad = false;
+std::chrono::steady_clock::time_point lastRefresh{};
 void *cachedLevel = nullptr;
+void *cachedDimension = nullptr;
 std::int64_t cachedMapUuid = 0;
 std::array<std::uint32_t, MapPixelCount> pixels{};
 std::vector<MapRect> cachedRects;
-ScreenViewRenderFn screenViewRenderOriginal = nullptr;
 RenderHoverBoxFn renderHoverBoxOriginal = nullptr;
-DrawTextCaptureFn drawTextOriginal = nullptr;
-void *activeUiContext = nullptr;
 bool hooksInstalled = false;
-bedrocktools::hooks::Handle screenViewRenderHandle = nullptr;
 bedrocktools::hooks::Handle renderHoverBoxHandle = nullptr;
-bedrocktools::hooks::Handle drawTextHandle = nullptr;
 constexpr const char *MinecraftLibrary = "libminecraftpe.so";
 
 void **getVtable(void *instance) {
@@ -250,15 +243,9 @@ bool getMapUuid(void *compound, std::int64_t &uuid) {
   return true;
 }
 
-bool isMapData(void *compound) {
-  std::int64_t uuid = 0;
-  return getMapUuid(compound, uuid);
-}
-
 void clearSelection() {
-  selectedController = nullptr;
-  selectedCollection.clear();
-  selectedIndex = -1;
+  selectedRevision = 0;
+  selectedInContainer = false;
   selectedAnchorX = 0.0f;
   selectedAnchorY = 0.0f;
   selectedAnchorValid = false;
@@ -266,8 +253,10 @@ void clearSelection() {
   mapInfoRequested = false;
   pendingLoad = false;
   cachedLevel = nullptr;
+  cachedDimension = nullptr;
   cachedMapUuid = 0;
   cachedRects.clear();
+  lastRefresh = {};
 }
 
 mce::Color decodeColor(std::uint32_t abgr) {
@@ -327,18 +316,6 @@ void buildMapRects() {
   }
 }
 
-void *getLocalPlayer() {
-  void *client = bedrocktools::core::gamehooks::clientInstance();
-  void **vtable = getVtable(client);
-  if (!vtable ||
-      !vtable[bedrocktools::sdk::offsets::VTable::ClientInstanceGetLocalPlayer])
-    return nullptr;
-  using Fn = void *(*)(void *);
-  return reinterpret_cast<Fn>(
-      vtable[bedrocktools::sdk::offsets::VTable::ClientInstanceGetLocalPlayer])(
-      client);
-}
-
 bool copyMapPixels(void *mapData) {
   if (!mapData)
     return false;
@@ -359,22 +336,9 @@ bool copyMapPixels(void *mapData) {
   return true;
 }
 
-bool initSelection() {
-  if (!selectedController || !containerGetItemStack || selectedIndex < 0)
-    return false;
-  ItemStackBase *stack = containerGetItemStack(
-      selectedController, selectedCollection, selectedIndex);
+bool initSelection(ItemStackBase *stack, void *level, std::int64_t mapUuid) {
   void *userData = getStackUserData(stack);
-  std::int64_t mapUuid = 0;
-  if (!getMapUuid(userData, mapUuid))
-    return false;
-  void *localPlayer = getLocalPlayer();
-  if (!localPlayer)
-    return false;
-  void *level =
-      *reinterpret_cast<void **>(reinterpret_cast<std::byte *>(localPlayer) +
-                                 bedrocktools::sdk::offsets::Actor::mLevel);
-  if (!level)
+  if (!userData || !level)
     return false;
   cachedLevel = level;
   cachedMapUuid = mapUuid;
@@ -385,20 +349,16 @@ bool initSelection() {
   if (hasPixels)
     buildMapRects();
   pendingLoad = !hasPixels;
-  if (pendingLoad && levelRequestMapInfo && !mapInfoRequested) {
+  if (levelRequestMapInfo && !mapInfoRequested) {
     levelRequestMapInfo(level, mapUuid, true);
     mapInfoRequested = true;
   }
   return true;
 }
 
-bool tryLoadPending() {
-  if (!cachedLevel || cachedMapUuid == 0 || !selectedController ||
-      !containerGetItemStack || selectedIndex < 0 ||
-      !levelGetMapSavedDataByTag)
+bool tryLoadPending(ItemStackBase *stack) {
+  if (!cachedLevel || !stack || !levelGetMapSavedDataByTag)
     return false;
-  ItemStackBase *stack = containerGetItemStack(
-      selectedController, selectedCollection, selectedIndex);
   void *userData = getStackUserData(stack);
   std::int64_t mapUuid = 0;
   if (!getMapUuid(userData, mapUuid) || mapUuid != cachedMapUuid) {
@@ -413,9 +373,10 @@ bool tryLoadPending() {
     }
     return false;
   }
+  const auto previousPixels = pixels;
   hasPixels = copyMapPixels(mapData);
   if (hasPixels) {
-    buildMapRects();
+    if (cachedRects.empty() || pixels != previousPixels) buildMapRects();
     pendingLoad = false;
   }
   return hasPixels;
@@ -449,6 +410,8 @@ void drawMap(void *context, float x, float y, float scale) {
   if (!tessellator)
     return;
 
+  bedrocktools::core::ScopedShaderColor shaderColor(screenContext);
+  if (!shaderColor) return;
   std::size_t quadCount = cachedRects.size() + 2;
   int vertexCount = static_cast<int>(quadCount * 4);
   tessellatorBegin(tessellator, nullptr,
@@ -470,23 +433,8 @@ void drawMap(void *context, float x, float y, float scale) {
              {rect.r, rect.g, rect.b, rect.a});
   }
 
-  float *colorHolder = *reinterpret_cast<float **>(
-      screenBase + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
-  std::array<float, 4> savedColor{};
-  if (colorHolder) {
-    std::copy_n(colorHolder, savedColor.size(), savedColor.begin());
-    colorHolder[0] = 1.0f;
-    colorHolder[1] = 1.0f;
-    colorHolder[2] = 1.0f;
-    colorHolder[3] = 1.0f;
-  }
-
   std::array<std::byte, bedrocktools::sdk::offsets::MapPreview::RenderMeshDataSize> renderData{};
-  renderMeshImmediately(screenContext, tessellator, &uiFillMaterial,
-                        renderData.data());
-
-  if (colorHolder)
-    std::copy(savedColor.begin(), savedColor.end(), colorHolder);
+  renderMeshImmediately(screenContext, tessellator, &uiFillMaterial, renderData.data());
 }
 
 bedrocktools::hooks::Handle hookVtable(const char *className, void **original, void *replacement, std::size_t slot) {
@@ -502,24 +450,14 @@ void renderHoverBoxHook(void *self, void *context, void *client, void *area, flo
   if (!self)
     return;
   auto *base = reinterpret_cast<std::byte *>(self);
+  if (!moduleInstance || !moduleInstance->enabled) return;
   MapPreviewHandleHoverAnchor(
       *reinterpret_cast<float *>(base + bedrocktools::sdk::offsets::MapPreview::HoverRendererCursorX),
       *reinterpret_cast<float *>(base + bedrocktools::sdk::offsets::MapPreview::HoverRendererCursorY));
 }
 
-void screenViewRenderHook(void *self, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7, void *a8) {
-  activeUiContext = nullptr;
-  if (screenViewRenderOriginal)
-    screenViewRenderOriginal(self, a2, a3, a4, a5, a6, a7, a8);
-  MapPreviewRender(activeUiContext);
-}
-
-void drawTextCaptureHook(void *self, void *font, const void *rectangle, const std::string &text,
-                         const void *color, std::uint8_t alignment, float alpha,
-                         const void *measure, const void *caret) {
-  activeUiContext = self;
-  if (drawTextOriginal)
-    drawTextOriginal(self, font, rectangle, text, color, alignment, alpha, measure, caret);
+void renderPass(void* context, void*) {
+  MapPreviewRender(context);
 }
 
 }
@@ -542,8 +480,6 @@ bool installMapPreviewHooks() {
   if (hooksInstalled) return true;
   nbtTreeFind = reinterpret_cast<NbtTreeFindFn>(bedrocktools::memory::resolve(
       bedrocktools::memory::SignatureId::NbtTreeFind));
-  containerGetItemStack = reinterpret_cast<ContainerGetItemStackFn>(
-      bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ContainerScreenControllerGetItemStack));
   levelGetMapSavedDataByTag = reinterpret_cast<LevelGetMapSavedDataByTagFn>(
       bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LevelGetMapSavedDataByTag));
   levelRequestMapInfo = reinterpret_cast<LevelRequestMapInfoFn>(bedrocktools::memory::resolve(
@@ -556,9 +492,6 @@ bool installMapPreviewHooks() {
       bedrocktools::memory::SignatureId::TessellatorVertex));
   std::uintptr_t renderMesh = bedrocktools::memory::resolve(
       bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately2);
-  if (!renderMesh)
-    renderMesh = bedrocktools::memory::resolve(
-        bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately);
   renderMeshImmediately = reinterpret_cast<RenderMeshImmediatelyFn>(renderMesh);
   std::uintptr_t materialGroupSignature = bedrocktools::memory::resolve(
       bedrocktools::memory::SignatureId::RenderMaterialGroupCommon);
@@ -569,48 +502,26 @@ bool installMapPreviewHooks() {
       renderMaterialGroup =
           groupAddress + bedrocktools::sdk::offsets::MaterialGroup::mRenderMaterialGroupOffset;
   }
-  const auto screenRenderAddress = bedrocktools::memory::resolve(
-      bedrocktools::memory::SignatureId::ScreenViewRender);
-  if (screenRenderAddress)
-    screenViewRenderHandle = bedrocktools::hooks::install(
-        reinterpret_cast<void *>(screenRenderAddress),
-        reinterpret_cast<void *>(screenViewRenderHook),
-        reinterpret_cast<void **>(&screenViewRenderOriginal));
   renderHoverBoxHandle = hookVtable(
       "17HoverTextRenderer", reinterpret_cast<void **>(&renderHoverBoxOriginal),
       reinterpret_cast<void *>(renderHoverBoxHook),
       bedrocktools::sdk::offsets::VTable::HoverTextRendererRenderHoverBox);
-  drawTextHandle = hookVtable(
-      "24MinecraftUIRenderContext", reinterpret_cast<void **>(&drawTextOriginal),
-      reinterpret_cast<void *>(drawTextCaptureHook),
-      bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextDrawText);
-  hooksInstalled = nbtTreeFind && containerGetItemStack && levelGetMapSavedDataByTag
+  bedrocktools::core::preview::initialize();
+  hooksInstalled = nbtTreeFind && levelGetMapSavedDataByTag
       && tessellatorBegin && tessellatorColor && tessellatorVertex && renderMeshImmediately
-      && renderMaterialGroup && screenViewRenderHandle && renderHoverBoxHandle && drawTextHandle;
+      && renderMaterialGroup && bedrocktools::core::uirender::subscribe(renderPass);
   if (!hooksInstalled) {
-    if (drawTextHandle) bedrocktools::hooks::remove(drawTextHandle);
     if (renderHoverBoxHandle) bedrocktools::hooks::remove(renderHoverBoxHandle);
-    if (screenViewRenderHandle) bedrocktools::hooks::remove(screenViewRenderHandle);
-    drawTextHandle = nullptr;
     renderHoverBoxHandle = nullptr;
-    screenViewRenderHandle = nullptr;
-    drawTextOriginal = nullptr;
     renderHoverBoxOriginal = nullptr;
-    screenViewRenderOriginal = nullptr;
   }
   return hooksInstalled;
 }
 
 void removeMapPreviewHooks() {
-  if (drawTextHandle) bedrocktools::hooks::remove(drawTextHandle);
   if (renderHoverBoxHandle) bedrocktools::hooks::remove(renderHoverBoxHandle);
-  if (screenViewRenderHandle) bedrocktools::hooks::remove(screenViewRenderHandle);
-  drawTextHandle = nullptr;
   renderHoverBoxHandle = nullptr;
-  screenViewRenderHandle = nullptr;
-  drawTextOriginal = nullptr;
   renderHoverBoxOriginal = nullptr;
-  screenViewRenderOriginal = nullptr;
   uiFillMaterial = {};
   renderMaterialGroup = 0;
   hooksInstalled = false;
@@ -619,17 +530,7 @@ void removeMapPreviewHooks() {
 }
 
 void MapPreviewModule::onInit() {
-  bedrocktools::events::bus().subscribe<bedrocktools::events::ScreenStateEvent>(
-      [](auto &event) {
-        if (event.screen == bedrocktools::events::ScreenKind::Container &&
-            event.phase == bedrocktools::events::ScreenPhase::Closed)
-          clearSelection();
-      });
-  bedrocktools::events::bus().subscribe<bedrocktools::events::ContainerSlotSelectedEvent>(
-      [](auto &event) {
-        if (event.afterSelection)
-          MapPreviewHandleSlotSelected(event.controller, event.collectionName, event.index);
-      });
+  bedrocktools::core::preview::initialize();
 }
 
 void MapPreviewModule::onEnable() {
@@ -661,32 +562,8 @@ void MapPreviewModule::saveConfig(nlohmann::json &j) {
   j["m_followSelectedMap"] = m_followSelectedMap;
 }
 
-void MapPreviewHandleSlotSelected(void *controller,
-                                  const std::string &collectionName,
-                                  int index) {
-  if (!moduleInstance || !moduleInstance->enabled || !controller ||
-      !containerGetItemStack) {
-    clearSelection();
-    return;
-  }
-  ItemStackBase *stack =
-      containerGetItemStack(controller, collectionName, index);
-  if (!isMapData(getStackUserData(stack))) {
-    clearSelection();
-    return;
-  }
-  selectedController = controller;
-  selectedCollection = collectionName;
-  selectedIndex = index;
-  selectedAnchorValid = false;
-  hasPixels = false;
-  mapInfoRequested = false;
-  pendingLoad = false;
-  initSelection();
-}
-
 void MapPreviewHandleHoverAnchor(float x, float y) {
-  if (!selectedController && !pendingLoad && !hasPixels)
+  if (!selectedInContainer || selectedAnchorValid || (!pendingLoad && !hasPixels))
     return;
   selectedAnchorX = x;
   selectedAnchorY = y;
@@ -696,10 +573,27 @@ void MapPreviewHandleHoverAnchor(float x, float y) {
 void MapPreviewRender(void *context) {
   if (!moduleInstance || !moduleInstance->enabled || !context)
     return;
-  if (!hasPixels && !pendingLoad)
+  const auto selection = bedrocktools::core::preview::current(context);
+  auto* stack = static_cast<ItemStackBase*>(selection.stack);
+  std::int64_t uuid = 0;
+  if (!selection.level || !stack || !getMapUuid(getStackUserData(stack), uuid)) {
+    clearSelection();
     return;
-  if (!hasPixels && pendingLoad)
-    tryLoadPending();
+  }
+  if (selection.revision != selectedRevision || selection.level != cachedLevel ||
+      selection.dimension != cachedDimension || uuid != cachedMapUuid) {
+    clearSelection();
+    selectedRevision = selection.revision;
+    selectedInContainer = selection.inContainer;
+    cachedDimension = selection.dimension;
+    initSelection(stack, selection.level, uuid);
+  }
+  if (!hasPixels && !pendingLoad) pendingLoad = true;
+  const auto now = std::chrono::steady_clock::now();
+  if (lastRefresh == std::chrono::steady_clock::time_point{} || now - lastRefresh >= std::chrono::milliseconds(250)) {
+    lastRefresh = now;
+    tryLoadPending(stack);
+  }
   if (!hasPixels)
     return;
   float scale = std::clamp(moduleInstance->m_scale, 0.1f, 5.0f);
@@ -709,6 +603,18 @@ void MapPreviewRender(void *context) {
     x = std::max(0.0f, selectedAnchorX -
                            (MapWidth * scale + FramePadding * 2.0f) * 0.5f);
     y = std::max(0.0f, selectedAnchorY + AnchorYOffset);
+  }
+  struct Clip { float x0, x1, y0, y1; };
+  void** table = getVtable(context);
+  if (table && table[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle]) {
+    auto clip = reinterpret_cast<Clip (*)(void*)>(table[
+        bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle])(context);
+    const float width = MapWidth * scale + FramePadding * 2.0f;
+    const float height = MapHeight * scale + FramePadding * 2.0f;
+    if (clip.x1 > clip.x0 && clip.y1 > clip.y0) {
+      x = std::clamp(x, clip.x0, std::max(clip.x0, clip.x1 - width));
+      y = std::clamp(y, clip.y0, std::max(clip.y0, clip.y1 - height));
+    }
   }
   drawMap(context, x, y, scale);
 }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../Module.hpp"
-#include <string>
 
 class MapPreviewModule : public Module {
 public:
@@ -20,7 +19,5 @@ public:
   void saveConfig(nlohmann::json &j) override;
 };
 
-void MapPreviewHandleSlotSelected(void *controller,
-                                  const std::string &collectionName, int index);
 void MapPreviewHandleHoverAnchor(float x, float y);
 void MapPreviewRender(void *context);

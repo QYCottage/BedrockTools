@@ -87,7 +87,7 @@ BedrockTools is made by [RadiantByte](https://github.com/RadiantByte).
 
 Special thanks to [dreamguxiang](https://github.com/dreamguxiang) for helping make this mod possible.
 
-Motion blur module based on [mcpelauncher-motion-blur](https://github.com/CrackedMatter/mcpelauncher-motion-blur) by [CrackedMatter](https://github.com/CrackedMatter).
+The motion blur uses native Android GLES integration inspired by the camera-reprojection shader in [Natural Motion Blur](https://github.com/ItsPasi/natural-motionblur-fabric/tree/1.20.6). It is a rewritten implementation.
 
 Thanks to [Kashifro](https://github.com/Kashifro) for the Shulker Preview and Tablist modules.
 

@@ -152,6 +152,9 @@ enum class SignatureId : std::uint16_t {
     ActorSetHeadRotation,
     NameTagThirdPersonPatch,
     ItemInHandFirstPersonTransformPatch,
+    ItemStackFromTag,
+    ContainerScreenControllerHandleSelectSlot,
+    ContainerScreenControllerGetSelectedSlotInfo,
     Count
 };
 

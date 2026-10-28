@@ -1,4 +1,5 @@
 #include "freelook.hpp"
+#include "motionblur.hpp"
 
 #include "core/GameHooks.hpp"
 #include "core/Runtime.hpp"
@@ -195,6 +196,7 @@ void updatePlayerDetour(void* camera, void* component, sdk::Player* player) {
         }
         restorePlayer(player);
         restoreInput(player, false);
+        MotionBlurCaptureCamera(camera, player);
         return;
     }
     if (samePlayer(player)) {
@@ -207,6 +209,7 @@ void updatePlayerDetour(void* camera, void* component, sdk::Player* player) {
         session = {};
     }
     updatePlayerOriginal(camera, component, player);
+    MotionBlurCaptureCamera(camera, player);
     if (camera && player) {
         lastCamera.player = player;
         lastCamera.level = player->level();

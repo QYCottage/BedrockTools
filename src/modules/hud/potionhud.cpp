@@ -2,6 +2,10 @@
 #include "potionhud_assets.hpp"
 
 #include "core/memory/Hooks.hpp"
+#include "core/UiRenderPass.hpp"
+#include "core/RenderState.hpp"
+#include "core/GameHooks.hpp"
+#include <bedrocktools/events/EventBus.hpp>
 #include "modules/ModuleRegistry.hpp"
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/sdk/input/MoveInput.hpp>
@@ -131,6 +135,7 @@ using HudMobEffectsRendererFn = void* (*)(void*, void*, void*, void*, int, void*
 
 HudMobEffectsRendererFn hudMobEffectsRendererOriginal = nullptr;
 PotionHudModule* moduleInstance = nullptr;
+bool renderPassReady = false;
 bedrocktools::hooks::Handle hudMobEffectsRendererHook = nullptr;
 
 void** getVtable(void* object) {
@@ -169,8 +174,8 @@ bool copyEffects(MobEffectsComponent* component, std::vector<RawEffect>& out) {
         const auto* effect = reinterpret_cast<const MobEffectInstance*>(begin + i * sizeof(MobEffectInstance));
         const auto id = static_cast<std::uint32_t>(effect->id);
         if (id == 0 || id > static_cast<std::uint32_t>(MobEffectType::BreathOfTheNautilus)) continue;
-        if (effect->duration < -1 || (effect->duration == 0 && !effect->noCounter)) continue;
-        out.push_back({id, effect->duration, std::clamp(effect->amplifier, 0, 255), effect->noCounter});
+        if (effect->duration < -1 || (effect->duration == 0)) continue;
+        out.push_back({id, effect->duration, std::clamp(effect->amplifier, 0, 255), effect->duration == -1});
     }
     return true;
 }
@@ -364,9 +369,16 @@ std::string formatDuration(int duration, bool noCounter) {
 }
 
 void* hudMobEffectsRendererDetour(void* renderer, void* context, void* client, void* owner, int pass, void* renderAabb) {
-    if (moduleInstance && moduleInstance->enabled && moduleInstance->renderNative(context, client)) return nullptr;
+    if (moduleInstance && moduleInstance->enabled && renderPassReady) return nullptr;
     if (!hudMobEffectsRendererOriginal) return nullptr;
     return hudMobEffectsRendererOriginal(renderer, context, client, owner, pass, renderAabb);
+}
+
+void renderPass(void* context, void*) {
+    if (!moduleInstance || !moduleInstance->enabled || !context) return;
+    void* client = *reinterpret_cast<void**>(static_cast<std::byte*>(context) +
+        bedrocktools::sdk::offsets::MinecraftUIRenderContext::mClient);
+    moduleInstance->renderNative(context, client);
 }
 
 }
@@ -386,6 +398,10 @@ PotionHudModule::~PotionHudModule() {
 }
 
 void PotionHudModule::onInit() {
+    renderPassReady = bedrocktools::core::uirender::subscribe(renderPass);
+    bedrocktools::events::bus().subscribe<bedrocktools::events::ClientInstanceUpdateEvent>([this](auto& event) {
+        if (!enabled || !getLocalPlayer(event.clientInstance)) clearRuntime();
+    });
     pl::modmenu::registerImage(InstantHealthImageId, potionhud_assets::InstantHealthPixels, potionhud_assets::InstantHealthWidth, potionhud_assets::InstantHealthHeight);
     pl::modmenu::registerImage(InstantDamageImageId, potionhud_assets::InstantDamagePixels, potionhud_assets::InstantDamageWidth, potionhud_assets::InstantDamageHeight);
     pl::modmenu::registerImage(SaturationImageId, potionhud_assets::SaturationPixels, potionhud_assets::SaturationWidth, potionhud_assets::SaturationHeight);
@@ -698,6 +714,11 @@ bool PotionHudModule::renderNative(void* context, void* client) {
     const float iconSurfaceX = config.hudPosX + (config.showText && config.textSide == 1 ? textWidth + gap : 0.0f);
     const float rowHeight = rowSurfaceHeight(config, surfaceScale);
     const float rowStride = rowHeight * std::max(0.25f, config.spacing);
+
+    void* screen = *reinterpret_cast<void**>(static_cast<std::byte*>(context) +
+        bedrocktools::sdk::offsets::ShulkerPreview::MinecraftUIRenderContextScreenContext);
+    bedrocktools::core::ScopedShaderColor shaderColor(screen);
+    if (!shaderColor) return fail();
 
     for (std::size_t row = 0; row < effects.size(); ++row) {
         const std::size_t source = config.bottomUp ? effects.size() - 1 - row : row;

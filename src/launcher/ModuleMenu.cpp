@@ -174,7 +174,11 @@ void registerModulesWithLauncher() {
                 float minVal = 0.0f;
                 float maxVal = 100.0f;
 
-                if (kLower.find("opacity") != std::string::npos ||
+                if (mod->name == "Motion Blur" && kLower == "intensity") {
+                    maxVal = 5.0f;
+                } else if (mod->name == "Motion Blur" && kLower == "opacity") {
+                    maxVal = 2.0f;
+                } else if (kLower.find("opacity") != std::string::npos ||
                     kLower.find("color") != std::string::npos ||
                     kLower.find("alpha") != std::string::npos) {
                     maxVal = 1.0f;

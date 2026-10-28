@@ -49,21 +49,23 @@ struct MobEffectInstance {
     std::int32_t duration;
     std::byte padding08[0x18];
     std::int32_t amplifier;
+    std::byte padding24[0x1C];
     bool displayOnScreenTextureAnimation;
+    bool skipDurationTick;
     bool ambient;
-    bool noCounter;
     bool effectVisible;
-    std::byte padding28[0x58];
+    bool displayAmplifier;
+    std::byte padding45[0x5B];
 };
 
 static_assert(offsetof(MobEffectInstance, id) == 0x0);
 static_assert(offsetof(MobEffectInstance, duration) == 0x4);
 static_assert(offsetof(MobEffectInstance, amplifier) == 0x20);
-static_assert(offsetof(MobEffectInstance, displayOnScreenTextureAnimation) == 0x24);
-static_assert(offsetof(MobEffectInstance, ambient) == 0x25);
-static_assert(offsetof(MobEffectInstance, noCounter) == 0x26);
-static_assert(offsetof(MobEffectInstance, effectVisible) == 0x27);
-static_assert(sizeof(MobEffectInstance) == 0x80);
+static_assert(offsetof(MobEffectInstance, displayOnScreenTextureAnimation) == 0x40);
+static_assert(offsetof(MobEffectInstance, ambient) == 0x42);
+static_assert(offsetof(MobEffectInstance, displayAmplifier) == 0x44);
+static_assert(offsetof(MobEffectInstance, effectVisible) == 0x43);
+static_assert(sizeof(MobEffectInstance) == 0xA0);
 
 struct MobEffectsComponent {
     MobEffectInstance* begin;

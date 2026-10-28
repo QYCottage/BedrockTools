@@ -48,7 +48,8 @@ std::mutex sRequeueMutex;
 std::string sCurrentGame;
 std::string sCurrentTeamColor;
 std::string sLastCopiedCode;
-bool sListeningForConnection = false;
+std::mutex sConnectionMutex;
+std::chrono::steady_clock::time_point sConnectionRepliesUntil{};
 int sDeathCount = 0;
 
 constexpr int kTextPacketId = 0x09;
@@ -215,7 +216,10 @@ void resetRequeueCooldown() {
 }
 
 void requestConnection() {
-    sListeningForConnection = true;
+    {
+        std::lock_guard lock(sConnectionMutex);
+        sConnectionRepliesUntil = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    }
     sendCommand("/connection");
 }
 
@@ -228,22 +232,28 @@ std::string textPacketMessage(void* packet) {
     return {};
 }
 
-bool captureConnectionMessage(const std::string& message) {
-    if (!sListeningForConnection) return false;
-    static constexpr std::string_view marker = "You are connected to server name ";
-    const std::size_t pos = message.find(marker);
-    if (pos == std::string::npos) {
-        if (message.find("You are connected") != std::string::npos || message.find(" connected to ") != std::string::npos) return true;
-        return false;
+bool captureConnectionMessage(void* packet, const std::string& message) {
+    if (!packet) return false;
+    auto* payload = static_cast<std::byte*>(packet) + sdk::offsets::Packet::Size;
+    const auto variant = *reinterpret_cast<std::uint32_t*>(payload + sdk::offsets::TextPacketPayload::mVariantIndex);
+    if (variant == 1 && !reinterpret_cast<std::string*>(payload +
+        sdk::offsets::TextPacketPayload::AuthorAndMessage::mAuthor)->empty()) return false;
+    std::lock_guard lock(sConnectionMutex);
+    if (std::chrono::steady_clock::now() >= sConnectionRepliesUntil) return false;
+    bool recognized = false;
+    for (const auto& line : split(lower(stripColorCodes(message)), '\n')) {
+        if (!line.starts_with("you are connected") && !line.starts_with("you are currently connected") &&
+            !line.starts_with("connected to server") && !line.starts_with("server ip:") &&
+            !line.starts_with("server address:")) return false;
+        recognized = true;
+        static constexpr std::string_view marker = "you are connected to server name ";
+        if (!line.starts_with(marker)) continue;
+        std::string server = trim(line.substr(marker.size()));
+        server.erase(std::remove_if(server.begin(), server.end(),
+            [](unsigned char c) { return std::isdigit(c) != 0; }), server.end());
+        sCurrentGame = isKnownHiveGame(server) ? server : std::string();
     }
-    std::string server = message.substr(pos + marker.size());
-    const std::size_t newline = server.find_first_of("\r\n");
-    if (newline != std::string::npos) server.resize(newline);
-    server = std::regex_replace(server, std::regex("\\d+"), "");
-    server = trim(server);
-    sCurrentGame = isKnownHiveGame(server) ? server : std::string();
-    sListeningForConnection = false;
-    return true;
+    return recognized;
 }
 
 bool titleShouldRequeue(const std::string& text) {
@@ -447,7 +457,10 @@ void textDetour(void* handler, void* source, void* packet) {
         return;
     }
     const std::string message = textPacketMessage(packet);
-    if (captureConnectionMessage(message)) return;
+    if (captureConnectionMessage(packet, message)) {
+        if (mod->showConnectionMessages && sTextOriginal) sTextOriginal(handler, source, packet);
+        return;
+    }
     if (message.find("Could not connect") != std::string::npos || message.find("server is full") != std::string::npos) {
         resetRequeueCooldown();
         requeue();
@@ -1201,6 +1214,10 @@ void HiveUtilsModule::publishMenuSchema() {
         add(std::move(node));
     }
 
+    section("connection_details", "chat", "Connection Details");
+    toggle("showConnectionMessages", "chat", "connection_details", "Show Connection Details",
+        "Show server name and IP replies from automatic game detection.");
+
     section("social_accept", "social", "Auto Accept");
     toggle("autoAcceptFriend", "social", "social_accept", "Friend Requests", "Automatically accept incoming Hive friend requests.");
     toggle("autoAcceptParty", "social", "social_accept", "Party Invites", "Automatically accept incoming Hive party invites.");
@@ -1301,6 +1318,7 @@ void HiveUtilsModule::loadConfig(const nlohmann::json& j) {
     readBool("hideUnrankedPlayerMessages", hideUnrankedPlayerMessages);
     readBool("hideHivePlusMessages", hideHivePlusMessages);
     readBool("hideNoTeaming", hideNoTeaming);
+    readBool("showConnectionMessages", showConnectionMessages);
     readBool("autoAcceptFriend", autoAcceptFriend);
     readBool("autoAcceptParty", autoAcceptParty);
     readBool("autoMapVote", autoMapVote);
@@ -1372,6 +1390,7 @@ void HiveUtilsModule::saveConfig(nlohmann::json& j) {
     j["hideUnrankedPlayerMessages"] = hideUnrankedPlayerMessages;
     j["hideHivePlusMessages"] = hideHivePlusMessages;
     j["hideNoTeaming"] = hideNoTeaming;
+    j["showConnectionMessages"] = showConnectionMessages;
     j["autoAcceptFriend"] = autoAcceptFriend;
     j["autoAcceptParty"] = autoAcceptParty;
     j["autoMapVote"] = autoMapVote;

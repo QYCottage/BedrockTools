@@ -2,12 +2,16 @@
 // GitHub: https://github.com/Kashifro
 
 #include "shulkerpreview.hpp"
+#include "core/PreviewSelection.hpp"
+#include "core/UiRenderPass.hpp"
+#include "core/RenderState.hpp"
+#include <bedrocktools/sdk/offsets/Inventory.hpp>
+#include <new>
 #include <pl/memory/Vtable.hpp>
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
-#include <bedrocktools/events/EventBus.hpp>
 
 #include <algorithm>
 #include <array>
@@ -165,6 +169,19 @@ enum class TextAlignment : std::uint8_t {
     Center
 };
 
+struct NativeItemStack {
+    alignas(8) std::byte data[bedrocktools::sdk::offsets::Inventory::ItemStackSize];
+
+    ~NativeItemStack() {
+        void** table = *reinterpret_cast<void***>(data);
+        if (table && table[0]) reinterpret_cast<void (*)(void*)>(table[0])(this);
+    }
+};
+
+using ItemStackFromTagFn = NativeItemStack (*)(const void*);
+ItemStackFromTagFn itemStackFromTag = nullptr;
+static_assert(sizeof(NativeItemStack) == bedrocktools::sdk::offsets::Inventory::ItemStackSize);
+
 struct ItemStackStorage {
     alignas(16) std::byte data[bedrocktools::sdk::offsets::ShulkerPreview::ItemStackStorageSize];
 };
@@ -173,6 +190,7 @@ struct ShulkerSlotCache {
     ItemStackStorage stack;
     std::uint8_t count;
     bool valid;
+    bool constructed;
     bool enchanted;
     int bundleWeight; // 0..64 for bundles, -1 = not a bundle
 };
@@ -184,33 +202,28 @@ struct CachedUiTextures {
 };
 
 using NbtTreeFindFn = void* (*)(void*, const NbtTreeKey*);
-using ItemStackBaseLoadItemFn = void (*)(void*, void*);
 using ItemStackBaseGetDamageValueFn = short (*)(ItemStackBase*);
 using ItemStackBaseGetRawNameIdFn = std::string (*)(ItemStackBase*);
 using BaseActorRenderContextCtorFn = void (*)(void*, void*, void*, void*);
 using ItemRendererRenderGuiItemNewFn = std::uint64_t (*)(void*, void*, void*, unsigned int, unsigned char, std::uint64_t, float, float, float, float, float);
 using DrawTextFn = void (*)(void*, Font&, const RectangleArea&, const std::string&, const mce::Color&, TextAlignment, float, const TextMeasureData&, const CaretMeasureData&);
 using RenderHoverBoxFn = void (*)(void*, void*, void*, void*, float);
-using ContainerGetItemStackFn = ItemStackBase* (*)(void*, const std::string&, int);
-using ScreenViewRenderFn = void (*)(void*, void*, void*, void*, void*, void*, void*, void*);
 
 NbtTreeFindFn nbtTreeFind = nullptr;
-ItemStackBaseLoadItemFn itemStackBaseLoadItem = nullptr;
 ItemStackBaseGetDamageValueFn itemStackBaseGetDamageValue = nullptr;
 ItemStackBaseGetRawNameIdFn itemStackBaseGetRawNameId = nullptr;
 BaseActorRenderContextCtorFn baseActorRenderContextCtor = nullptr;
 ItemRendererRenderGuiItemNewFn itemRendererRenderGuiItemNew = nullptr;
-ContainerGetItemStackFn containerGetItemStack = nullptr;
-ScreenViewRenderFn screenViewRenderOriginal = nullptr;
-DrawTextFn drawTextOriginal = nullptr;
 RenderHoverBoxFn renderHoverBoxOriginal = nullptr;
 ShulkerPreviewModule* moduleInstance = nullptr;
-void* activeUiContext = nullptr;
 Font* activeFont = nullptr;
-void* selectedController = nullptr;
-std::string selectedCollection;
-int selectedIndex = -1;
+void* selectedStack = nullptr;
+void* selectedLevel = nullptr;
+void* selectedDimension = nullptr;
+std::uint64_t selectedRevision = 0;
+bool selectedInContainer = false;
 int activeCacheIndex = -1;
+void* activeSourceData = nullptr;
 char activeColorCode = '0';
 bool hasShulkerData = false;
 float selectedAnchorX = 0.0f;
@@ -234,28 +247,11 @@ Item* getStackItem(ItemStackBase* stack) {
     return *reinterpret_cast<Item**>(reinterpret_cast<std::byte*>(counter) + bedrocktools::sdk::offsets::ShulkerPreview::SharedCounterPointer);
 }
 
-std::uint16_t getItemId(Item* item) {
-    if (!item) return 0;
-    return *reinterpret_cast<std::uint16_t*>(reinterpret_cast<std::byte*>(item) + bedrocktools::sdk::offsets::ShulkerPreview::ItemId);
-}
-
 short getItemMaxDamage(Item* item) {
     if (!item) return 0;
     void** vtable = *reinterpret_cast<void***>(item);
     if (!vtable || !vtable[bedrocktools::sdk::offsets::VTable::ItemGetMaxDamage]) return 0;
     return reinterpret_cast<short (*)(Item*)>(vtable[bedrocktools::sdk::offsets::VTable::ItemGetMaxDamage])(item);
-}
-
-// the effect need apply for these only
-bool Tex2(ItemStackBase* stack) {
-    if (!stack || !itemStackBaseGetRawNameId) return false;
-    const std::string name = itemStackBaseGetRawNameId(stack);
-    return name == "leather_helmet"
-        || name == "leather_chestplate"
-        || name == "leather_leggings"
-        || name == "leather_boots"
-        || name == "firework_star"
-        || name == "leather_horse_armor";
 }
 
 void* treeFindNode(void* compound, const char* key, std::size_t length) {
@@ -345,22 +341,19 @@ int readBundleWeight(void* itemTag) {
     return readIntTag(tagCompound, "bundle_weight", weight) ? weight : -1;
 }
 
-bool getShulkerColorCode(std::uint16_t id, char& code) {
-    struct Entry {
-        std::uint16_t id;
-        char code;
+bool getShulkerColorCode(ItemStackBase* stack, char& code) {
+    if (!stack || !itemStackBaseGetRawNameId) return false;
+    std::string name = itemStackBaseGetRawNameId(stack);
+    if (name.starts_with("minecraft:")) name.erase(0, 10);
+    if (name == "shulker_box" || name == "undyed_shulker_box") { code = '0'; return true; }
+    static constexpr std::pair<std::string_view, char> colors[] = {
+        {"white", '1'}, {"orange", '7'}, {"magenta", 'f'}, {"light_blue", 'c'},
+        {"yellow", '8'}, {"lime", '9'}, {"pink", 'g'}, {"gray", '3'},
+        {"light_gray", '2'}, {"silver", '2'}, {"cyan", 'b'}, {"purple", 'e'},
+        {"blue", 'd'}, {"brown", '5'}, {"green", 'a'}, {"red", '6'}, {"black", '4'}
     };
-    static constexpr Entry entries[] = {
-        {205, '0'}, {218, '1'}, {64923, '7'}, {64922, 'f'}, {64921, 'c'},
-        {64920, '8'}, {64919, '9'}, {64918, 'g'}, {64917, '3'}, {64916, '2'},
-        {64915, 'b'}, {64914, 'e'}, {64913, 'd'}, {64912, '5'}, {64911, 'a'},
-        {64910, '6'}, {64909, '4'}
-    };
-    for (const auto& entry : entries) {
-        if (entry.id == id) {
-            code = entry.code;
-            return true;
-        }
+    for (const auto& [color, value] : colors) {
+        if (name == std::string(color) + "_shulker_box") { code = value; return true; }
     }
     return false;
 }
@@ -449,29 +442,12 @@ mce::TexturePtr uiGetTexture(void* context, const ResourceLocation& location, bo
 bool hasTexture(const mce::TexturePtr& texture) {
     return static_cast<bool>(texture.clientTexture);
 }
-//HUD_OPACITY
-void setHudOpacity(void* context, float opacity) {
-    if (!context) return;
-    void* screenContext = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(context) + bedrocktools::sdk::offsets::ShulkerPreview::MinecraftUIRenderContextScreenContext);
-    if (!screenContext) return;
-    auto* constantBuffers = *reinterpret_cast<std::byte**>(reinterpret_cast<std::byte*>(screenContext) + 0x20);
-    if (!constantBuffers) return;
-    auto* shaderConstantBuffer = *reinterpret_cast<std::byte**>(constantBuffers + 0x150);
-    if (!shaderConstantBuffer) return;
-    auto* opacityPtr = *reinterpret_cast<float**>(shaderConstantBuffer + 0x30);
-    if (!opacityPtr) return;
-    if (*opacityPtr != opacity) {
-        *opacityPtr = opacity;
-        *reinterpret_cast<std::uint8_t*>(shaderConstantBuffer + 0x29) = 1;
-    }
-}
-
 CachedUiTextures& getTextures(void* context) {
     static CachedUiTextures textures;
     if (!textures.loaded) {
         textures.panel = uiGetTexture(context, ResourceLocation("textures/ui/dialog_background_opaque"), false);
         textures.slot = uiGetTexture(context, ResourceLocation("textures/ui/item_cell"), false);
-        textures.loaded = true;
+        textures.loaded = hasTexture(textures.panel) && hasTexture(textures.slot);
     }
     return textures;
 }
@@ -620,23 +596,6 @@ void drawIcons(void* context, int cacheIndex, float originX, float originY) {
     }
     void* localPlayer = getClientLocalPlayer(client);
     static const HashedString flushMaterial("ui_flush");
-    /*
-    ~Kashifro
-    First pass set the HUD_OPACITY to some high value pref > 80 anythin below is semi transparent, now this alone does make the 
-    missing tex visible but when you are to dye the item, the dye bleeds into those pixels asw inorder to fix that i just put the 10th arg
-    of the render func to 20, but again the opacity would have weird artifacts for glass blocks and such so run this for items the need the fix only
-    */
-    if (itemStackBaseGetRawNameId) {
-        setHudOpacity(context, 90.0f);
-        forEachSlot(originX, originY, [&](int slot, float x, float y) {
-            ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
-            if (!stack || !Tex2(stack)) return;
-            unsigned int aux = localPlayer ? getItemAnimationFrame(getStackItem(stack), localPlayer, stack) : 0;
-            itemRendererRenderGuiItemNew(itemRenderer, baseActorRenderContext, stack, aux, 0, 0, x + ItemInset, y + ItemInset, 1.0f, 20.0f, 1.0f);
-        });
-        uiFlushImages(context, {1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, flushMaterial);
-        setHudOpacity(context, 1.0f);
-    }
 
     forEachSlot(originX, originY, [&](int slot, float x, float y) {
         ItemStackBase* stack = getCachedStack(shulkerCache[cacheIndex][slot]);
@@ -672,6 +631,7 @@ void renderPreview(void* context, float x, float y, int cacheIndex, char colorCo
     mce::Color tint = applyTint(getShulkerTint(colorCode));
     RectangleArea panel{x, x + Columns * SlotStride + PanelPadding * 2.0f, y, y + Rows * SlotStride + PanelPadding * 2.0f};
     if (hasTexture(textures.panel)) drawNineSlice(context, textures.panel.getClientTexture(), panel);
+    else uiFillRectangle(context, panel, tint, 1.0f);
     uiFlushImages(context, tint, 1.0f, material);
     float originX = x + PanelPadding;
     float originY = y + PanelPadding;
@@ -680,6 +640,9 @@ void renderPreview(void* context, float x, float y, int cacheIndex, char colorCo
             uiDrawImage(context, textures.slot.getClientTexture(), {slotX, slotY}, {SlotDrawSize, SlotDrawSize}, {0.0f, 0.0f}, {1.0f, 1.0f}, false);
         });
     }
+    if (!hasTexture(textures.slot)) forEachSlot(originX, originY, [&](int, float sx, float sy) {
+        uiFillRectangle(context, {sx, sx + SlotDrawSize, sy, sy + SlotDrawSize}, {0.12f, 0.12f, 0.12f, 1.0f}, 1.0f);
+    });
     uiFlushImages(context, tint, 1.0f, material);
     drawIcons(context, cacheIndex, originX, originY);
     if (activeFont) {
@@ -707,13 +670,19 @@ bool hookVtable(const char* className, void** original, void* replacement, std::
     return bedrocktools::hooks::install(reinterpret_cast<void*>(target), replacement, original) != nullptr;
 }
 
+void clearCache(int cacheIndex);
+
 void clearSelection() {
-    selectedController = nullptr;
-    selectedCollection.clear();
-    selectedIndex = -1;
+    clearCache(activeCacheIndex);
+    selectedStack = nullptr;
+    selectedLevel = nullptr;
+    selectedDimension = nullptr;
+    selectedRevision = 0;
+    selectedInContainer = false;
     hasShulkerData = false;
     activeCacheIndex = -1;
     activeColorCode = '0';
+    activeSourceData = nullptr;
     selectedAnchorX = 0.0f;
     selectedAnchorY = 0.0f;
     selectedAnchorValid = false;
@@ -722,6 +691,11 @@ void clearSelection() {
 void clearCache(int cacheIndex) {
     if (cacheIndex < 0 || cacheIndex >= ShulkerCacheSize) return;
     for (int slot = 0; slot < ShulkerSlotCount; ++slot) {
+        auto& entry = shulkerCache[cacheIndex][slot];
+        if (entry.constructed) {
+            reinterpret_cast<NativeItemStack*>(entry.stack.data)->~NativeItemStack();
+            entry.constructed = false;
+        }
         shulkerCache[cacheIndex][slot].valid = false;
         shulkerCache[cacheIndex][slot].enchanted = false;
         shulkerCache[cacheIndex][slot].count = 0;
@@ -730,10 +704,10 @@ void clearCache(int cacheIndex) {
 }
 
 bool loadSelectedShulker(ItemStackBase* stack) {
-    if (!stack || !itemStackBaseLoadItem) return false;
+    if (!stack || !itemStackFromTag) return false;
     Item* item = getStackItem(stack);
     char colorCode = '0';
-    if (!item || !getShulkerColorCode(getItemId(item), colorCode)) return false;
+    if (!item || !getShulkerColorCode(stack, colorCode)) return false;
     int cacheIndex = static_cast<int>((reinterpret_cast<std::uintptr_t>(stack) >> 4) & (ShulkerCacheSize - 1));
     clearCache(cacheIndex);
     void* userData = getStackUserData(stack);
@@ -741,89 +715,88 @@ bool loadSelectedShulker(ItemStackBase* stack) {
         auto* list = reinterpret_cast<ListTagLayout*>(getListTag(userData, "Items"));
         if (!list) list = reinterpret_cast<ListTagLayout*>(getListTag(userData, "items"));
         if (list) {
-            int size = listSize(list);
+            int size = std::min(listSize(list), 256);
             for (int index = 0; index < size; ++index) {
                 void* tag = listAt(list, index);
                 if (!tag) continue;
                 int slotValue = 0;
                 if (!readIntTag(tag, "Slot", slotValue) && !readIntTag(tag, "slot", slotValue)) continue;
-                int countValue = 1;
-                if (!readIntTag(tag, "Count", countValue) && !readIntTag(tag, "count", countValue)) countValue = 1;
-                countValue = std::clamp(countValue, 0, 255);
                 if (slotValue < 0 || slotValue >= ShulkerSlotCount) continue;
                 ShulkerSlotCache& cache = shulkerCache[cacheIndex][slotValue];
-                itemStackBaseLoadItem(asStack(cache.stack), tag);
-                cache.count = static_cast<std::uint8_t>(countValue);
+                if (cache.constructed) reinterpret_cast<NativeItemStack*>(cache.stack.data)->~NativeItemStack();
+                cache.constructed = false;
+                new (cache.stack.data) NativeItemStack(itemStackFromTag(tag));
+                cache.constructed = true;
+                cache.count = *reinterpret_cast<std::uint8_t*>(cache.stack.data +
+                    bedrocktools::sdk::offsets::Inventory::ItemStackCount);
                 void* loadedUserData = getStackUserData(asStack(cache.stack));
                 cache.enchanted = hasEnchantmentData(tag) || hasEnchantmentData(loadedUserData);
                 cache.bundleWeight = readBundleWeight(tag);
-                cache.valid = true;
+                cache.valid = cache.count > 0 && getStackItem(asStack(cache.stack)) != nullptr;
             }
         }
     }
+    activeSourceData = userData;
     activeCacheIndex = cacheIndex;
     activeColorCode = colorCode;
     hasShulkerData = true;
     return true;
 }
 
-void handleContainerSlotSelected(const bedrocktools::events::ContainerSlotSelectedEvent& event) {
-    if (!event.afterSelection) return;
-    if (event.cancelled() || !moduleInstance || !moduleInstance->enabled || !containerGetItemStack ||
-        !event.controller || event.index < 0 || event.collectionName.empty()) {
-        clearSelection();
-        return;
-    }
-    ItemStackBase* stack = containerGetItemStack(event.controller, event.collectionName, event.index);
-    if (!loadSelectedShulker(stack)) {
-        clearSelection();
-        return;
-    }
-    selectedController = event.controller;
-    selectedCollection = event.collectionName;
-    selectedIndex = event.index;
-    selectedAnchorValid = false;
-}
-
-bool selectedSlotStillContainsShulker() {
-    if (!selectedController || !containerGetItemStack || selectedIndex < 0) return false;
-    ItemStackBase* stack = containerGetItemStack(selectedController, selectedCollection, selectedIndex);
-    Item* item = getStackItem(stack);
-    char colorCode = '0';
-    return item && getShulkerColorCode(getItemId(item), colorCode);
-}
-
 void renderHoverBoxHook(void* self, void* context, void* client, void* area, float value) {
     if (renderHoverBoxOriginal) renderHoverBoxOriginal(self, context, client, area, value);
-    if (!moduleInstance || !moduleInstance->enabled || !moduleInstance->m_followSelectedShulker || !selectedController || !hasShulkerData || !self) return;
+    if (!moduleInstance || !moduleInstance->enabled || !moduleInstance->m_followSelectedShulker ||
+        !selectedInContainer || selectedAnchorValid || !hasShulkerData || !self) return;
     auto* base = reinterpret_cast<std::byte*>(self);
     selectedAnchorX = *reinterpret_cast<float*>(base + bedrocktools::sdk::offsets::ShulkerPreview::HoverRendererCursorX);
     selectedAnchorY = *reinterpret_cast<float*>(base + bedrocktools::sdk::offsets::ShulkerPreview::HoverRendererCursorY);
     selectedAnchorValid = true;
 }
 
-void screenViewRenderHook(void* self, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
-    activeUiContext = nullptr;
-    activeFont = nullptr;
-    if (screenViewRenderOriginal) screenViewRenderOriginal(self, a2, a3, a4, a5, a6, a7, a8);
-    if (!moduleInstance || !moduleInstance->enabled || !selectedController || !activeUiContext || !hasShulkerData || activeCacheIndex < 0) return;
-    if (!selectedSlotStillContainsShulker()) {
+void renderPass(void* context, void* font) {
+    if (!moduleInstance || !moduleInstance->enabled || !context) return;
+    const auto selection = bedrocktools::core::preview::current(context);
+    auto* stack = static_cast<ItemStackBase*>(selection.stack);
+    char colorCode = '0';
+    if (!selection.level || !stack || !getShulkerColorCode(stack, colorCode)) {
         clearSelection();
         return;
     }
+    if (selection.revision != selectedRevision || selection.level != selectedLevel ||
+        selection.dimension != selectedDimension || stack != selectedStack ||
+        getStackUserData(stack) != activeSourceData || colorCode != activeColorCode || !hasShulkerData) {
+        clearSelection();
+        selectedStack = stack;
+        selectedLevel = selection.level;
+        selectedDimension = selection.dimension;
+        selectedRevision = selection.revision;
+        selectedInContainer = selection.inContainer;
+        if (!loadSelectedShulker(stack)) {
+            clearSelection();
+            return;
+        }
+    }
+    activeFont = static_cast<Font*>(font);
     float previewX = moduleInstance->m_positionX;
     float previewY = moduleInstance->m_positionY;
     if (moduleInstance->m_followSelectedShulker && selectedAnchorValid) {
-        previewX = std::max(0.0f, selectedAnchorX - PanelWidth * 0.5f);
-        previewY = std::max(0.0f, selectedAnchorY + SelectedAnchorYOffset);
+        previewX = selectedAnchorX - PanelWidth * 0.5f;
+        previewY = selectedAnchorY + SelectedAnchorYOffset;
     }
-    renderPreview(activeUiContext, previewX, previewY, activeCacheIndex, activeColorCode);
-}
-
-void drawTextHook(void* self, Font& font, const RectangleArea& rectangle, const std::string& text, const mce::Color& color, TextAlignment alignment, float alpha, const TextMeasureData& measure, const CaretMeasureData& caret) {
-    activeUiContext = self;
-    activeFont = &font;
-    if (drawTextOriginal) drawTextOriginal(self, font, rectangle, text, color, alignment, alpha, measure, caret);
+    void** table = getVtable(context);
+    if (table && table[bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle]) {
+        auto clip = reinterpret_cast<RectangleArea (*)(void*)>(table[
+            bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextGetFullClippingRectangle])(context);
+        if (clip.x1 > clip.x0 && clip.y1 > clip.y0) {
+            previewX = std::clamp(previewX, clip.x0, std::max(clip.x0, clip.x1 - PanelWidth));
+            previewY = std::clamp(previewY, clip.y0, std::max(clip.y0, clip.y1 - Rows * SlotStride - PanelPadding * 2.0f));
+        }
+    }
+    void* screen = *reinterpret_cast<void**>(static_cast<std::byte*>(context) +
+        bedrocktools::sdk::offsets::ShulkerPreview::MinecraftUIRenderContextScreenContext);
+    bedrocktools::core::ScopedShaderColor shaderColor(screen);
+    if (shaderColor) renderPreview(context, previewX, previewY, activeCacheIndex, activeColorCode);
+    activeFont = nullptr;
 }
 
 }
@@ -834,37 +807,26 @@ ShulkerPreviewModule::ShulkerPreviewModule()
 }
 
 ShulkerPreviewModule::~ShulkerPreviewModule() {
+    onDisable();
     if (moduleInstance == this) moduleInstance = nullptr;
 }
 
 void ShulkerPreviewModule::onInit() {
     if (m_hooksInstalled) return;
-    bedrocktools::events::bus().subscribe<bedrocktools::events::ScreenStateEvent>([](auto& event) {
-        if (event.screen == bedrocktools::events::ScreenKind::Container && event.phase == bedrocktools::events::ScreenPhase::Closed) {
-            ShulkerPreviewHandleContainerDestroyed(event.controller);
-        }
-    });
+    bedrocktools::core::preview::initialize();
     nbtTreeFind = reinterpret_cast<NbtTreeFindFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::NbtTreeFind));
-    itemStackBaseLoadItem = reinterpret_cast<ItemStackBaseLoadItemFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseLoadItem));
+    itemStackFromTag = reinterpret_cast<ItemStackFromTagFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackFromTag));
     itemStackBaseGetDamageValue = reinterpret_cast<ItemStackBaseGetDamageValueFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetDamageValue));
     itemStackBaseGetRawNameId = reinterpret_cast<ItemStackBaseGetRawNameIdFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemStackBaseGetRawNameId));
     baseActorRenderContextCtor = reinterpret_cast<BaseActorRenderContextCtorFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::BaseActorRenderContextCtor));
     itemRendererRenderGuiItemNew = reinterpret_cast<ItemRendererRenderGuiItemNewFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ItemRendererRenderGuiItemNew));
-    containerGetItemStack = reinterpret_cast<ContainerGetItemStackFn>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ContainerScreenControllerGetItemStack));
-    bedrocktools::events::bus().subscribe<bedrocktools::events::ContainerSlotSelectedEvent>(
-        [](auto& event) { handleContainerSlotSelected(event); }
-    );
-    uintptr_t screenRenderAddress = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ScreenViewRender);
-    if (screenRenderAddress) {
-        bedrocktools::hooks::install(reinterpret_cast<void*>(screenRenderAddress), reinterpret_cast<void*>(screenViewRenderHook), reinterpret_cast<void**>(&screenViewRenderOriginal));
-    }
+    m_hooksInstalled = bedrocktools::core::uirender::subscribe(renderPass);
     hookVtable("17HoverTextRenderer", reinterpret_cast<void**>(&renderHoverBoxOriginal), reinterpret_cast<void*>(renderHoverBoxHook), bedrocktools::sdk::offsets::VTable::HoverTextRendererRenderHoverBox);
-    hookVtable("24MinecraftUIRenderContext", reinterpret_cast<void**>(&drawTextOriginal), reinterpret_cast<void*>(drawTextHook), bedrocktools::sdk::offsets::VTable::MinecraftUIRenderContextDrawText);
-    m_hooksInstalled = true;
 }
 
 void ShulkerPreviewModule::onDisable() {
     clearSelection();
+    for (int index = 0; index < ShulkerCacheSize; ++index) clearCache(index);
 }
 
 void ShulkerPreviewModule::loadConfig(const nlohmann::json& j) {
@@ -883,6 +845,3 @@ void ShulkerPreviewModule::saveConfig(nlohmann::json& j) {
     j["m_followSelectedShulker"] = m_followSelectedShulker;
 }
 
-void ShulkerPreviewHandleContainerDestroyed(void* controller) {
-    if (selectedController == controller) clearSelection();
-}

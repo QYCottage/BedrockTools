@@ -42,6 +42,7 @@ public:
     bool hideUnrankedPlayerMessages = false;
     bool hideHivePlusMessages = false;
     bool hideNoTeaming = false;
+    bool showConnectionMessages = false;
     bool autoAcceptFriend = false;
     bool autoAcceptParty = false;
     bool autoMapVote = false;

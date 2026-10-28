@@ -24,4 +24,3 @@ private:
     bool m_hooksInstalled = false;
 };
 
-void ShulkerPreviewHandleContainerDestroyed(void* controller);

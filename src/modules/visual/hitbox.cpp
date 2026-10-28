@@ -1,6 +1,7 @@
 #include "hitbox.hpp"
 #include <bedrocktools/memory/Signatures.hpp>
 #include "core/memory/Hooks.hpp"
+#include "core/RenderState.hpp"
 #include <bedrocktools/sdk/Memory.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
@@ -230,15 +231,8 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
     void* matInner = s_matSelection ? (void*)&s_matSelection
                                     : (void*)(lrpPtr + bedrocktools::sdk::offsets::LevelRendererPlayer::mSelectionOverlayMaterial);
 
-    uintptr_t colorHolderPtr = *(uintptr_t*)((uintptr_t)screenContext + bedrocktools::sdk::offsets::ScreenContext::mColorHolder);
-    if (!colorHolderPtr || colorHolderPtr < 0x1000) return;
-    float* colorHolder = (float*)colorHolderPtr;
-
-    float savedColor[4] = { colorHolder[0], colorHolder[1], colorHolder[2], colorHolder[3] };
-    colorHolder[0] = 1.0f;
-    colorHolder[1] = 1.0f;
-    colorHolder[2] = 1.0f;
-    colorHolder[3] = 1.0f;
+    bedrocktools::core::ScopedShaderColor shaderColor(screenContext);
+    if (!shaderColor) return;
 
     auto drawLines = [&](const std::vector<std::pair<bedrocktools::sdk::Vec3, bedrocktools::sdk::Vec3>>& lines, uint32_t color) {
         if (lines.empty()) return;
@@ -371,10 +365,6 @@ static void _renderLevel_hook(void* _this, void* screenContext, void* a3) {
         }
     }
 
-    colorHolder[0] = savedColor[0];
-    colorHolder[1] = savedColor[1];
-    colorHolder[2] = savedColor[2];
-    colorHolder[3] = savedColor[3];
 }
 
 HitboxModule::HitboxModule()
@@ -413,9 +403,6 @@ void HitboxModule::onInit() {
     uintptr_t rm = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately2);
     if (rm) {
         s_renderMesh = (MeshHelpers_renderMeshImmediately_t)rm;
-    } else {
-        uintptr_t rm5 = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::MeshHelpersRenderMeshImmediately);
-        if (rm5) s_renderMesh = (MeshHelpers_renderMeshImmediately_t)rm5;
     }
 
     uintptr_t rmg = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::RenderMaterialGroupCommon);
