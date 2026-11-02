@@ -110,6 +110,7 @@ using RenderChunkBuilderBuildFn = void (*)(
     const void*
 );
 using UseNewTessellationFn = bool (*)(const void*, bool);
+using BlockGraphicsForBlockFn = const void* (*)(const void*);
 using BlockSourceGetBlockFn = const void* (*)(void*, const BlockPosRaw*, std::int32_t);
 using BlockSourceIsSolidBlockingBlockFn = bool (*)(void*, const BlockPosRaw*);
 using BrightnessChangedFn = void (*)(void*, void*, const BlockPosRaw*);
@@ -127,6 +128,7 @@ TessellatorColorFn g_colorOriginal = nullptr;
 TessellatorColorObjectFn g_colorObjectOriginal = nullptr;
 TessellatorVertexFn g_vertexOriginal = nullptr;
 UseNewTessellationFn g_useNewTessellationOriginal = nullptr;
+BlockGraphicsForBlockFn g_blockGraphicsForBlock = nullptr;
 RenderChunkBuilderBuildFn g_renderChunkBuilderBuildOriginal = nullptr;
 BrightnessChangedFn g_brightnessOriginal = nullptr;
 BlockSourceGetBlockFn g_getBlock = nullptr;
@@ -562,13 +564,27 @@ private:
 };
 
 bool useNewTessellationDetour(const void* block, bool onlyNew) {
-    if ((g_enabled.load(std::memory_order_relaxed) || g_connectedGlassActive.load(std::memory_order_relaxed))
-        && g_insideTerrainBuild && !onlyNew) {
-        return false;
-    }
-    return g_useNewTessellationOriginal
-        ? g_useNewTessellationOriginal(block, onlyNew)
-        : onlyNew;
+    if (!g_useNewTessellationOriginal) return onlyNew;
+    const bool nativeResult = g_useNewTessellationOriginal(block, onlyNew);
+    const bool coloredLights = g_enabled.load(std::memory_order_acquire);
+    const bool connectedGlass = g_connectedGlassActive.load(std::memory_order_acquire);
+    if (!nativeResult || !block || !g_insideTerrainBuild || !g_blockGraphicsForBlock
+        || (!coloredLights && !connectedGlass)) return nativeResult;
+
+    const auto* blockObj = static_cast<const bedrocktools::sdk::Block*>(block);
+    const std::string* fullName = blockObj->fullName();
+    if (!fullName || fullName->size() > 256 || !fullName->starts_with("minecraft:")) return nativeResult;
+    const bool glass = connectedGlass && ConnectedGlassUsesLegacyTessellation(block);
+    if (!coloredLights && !glass) return nativeResult;
+    const void* graphics = g_blockGraphicsForBlock(block);
+    if (!graphics) return nativeResult;
+    const auto shape = bedrocktools::sdk::field<std::uint32_t>(
+        graphics, bedrocktools::sdk::offsets::BlockGraphics::mBlockShape
+    );
+    const bool cube = shape == 0 || shape == 67 || shape == 93 || shape == 117;
+    if (glass && (cube || shape == 18 || shape == 87)) return false;
+    if (coloredLights && cube) return false;
+    return nativeResult;
 }
 
 void renderChunkBuilderBuildDetour(
@@ -749,13 +765,18 @@ void applySettings(const Settings& input) {
 }
 
 bool installHooks() {
-    if (g_getBlock && g_isSolidBlockingBlock && g_setAllDirty
+    if (g_getBlock && g_isSolidBlockingBlock && g_setAllDirty && g_blockGraphicsForBlock
         && g_useNewTessellationHook && g_tessellateBlockHook
         && g_colorHook && g_colorObjectHook && g_vertexHook && g_brightnessHook
         && g_renderChunkBuilderBuildHook) {
         return true;
     }
 
+    if (!g_blockGraphicsForBlock) {
+        g_blockGraphicsForBlock = reinterpret_cast<BlockGraphicsForBlockFn>(bedrocktools::memory::resolve(
+            bedrocktools::memory::SignatureId::BlockGraphicsForBlock
+        ));
+    }
     g_getBlock = reinterpret_cast<BlockSourceGetBlockFn>(bedrocktools::memory::resolve(
         bedrocktools::memory::SignatureId::BlockSourceGetBlockForTessellation
     ));
@@ -815,7 +836,7 @@ bool installHooks() {
             &g_renderChunkBuilderBuildOriginal
         );
     }
-    const bool installed = g_getBlock && g_isSolidBlockingBlock && g_setAllDirty
+    const bool installed = g_getBlock && g_isSolidBlockingBlock && g_setAllDirty && g_blockGraphicsForBlock
         && g_useNewTessellationHook && g_tessellateBlockHook
         && g_colorHook && g_colorObjectHook && g_vertexHook && g_brightnessHook
         && g_renderChunkBuilderBuildHook;
@@ -825,6 +846,12 @@ bool installHooks() {
 
 bool setConnectedGlassActive(bool active) {
     if (active) {
+        if (!g_blockGraphicsForBlock) {
+            g_blockGraphicsForBlock = reinterpret_cast<BlockGraphicsForBlockFn>(bedrocktools::memory::resolve(
+                bedrocktools::memory::SignatureId::BlockGraphicsForBlock
+            ));
+        }
+        if (!g_blockGraphicsForBlock) return false;
         if (!g_useNewTessellationHook) {
             g_useNewTessellationHook = installHook(
                 bedrocktools::memory::SignatureId::BlockTessellatorPipelineUseNewTessellation,

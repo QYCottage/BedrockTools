@@ -155,6 +155,7 @@ enum class SignatureId : std::uint16_t {
     ItemStackFromTag,
     ContainerScreenControllerHandleSelectSlot,
     ContainerScreenControllerGetSelectedSlotInfo,
+    BlockGraphicsForBlock,
     Count
 };
 

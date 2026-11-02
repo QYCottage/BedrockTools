@@ -110,19 +110,31 @@ std::string_view stripNamespace(std::string_view name) {
     return name;
 }
 
+bool hasGlassColor(std::string_view name, std::string_view suffix) {
+    if (name.starts_with("hard_")) name.remove_prefix(5);
+    if (!name.ends_with(suffix)) return false;
+    name.remove_suffix(suffix.size());
+    constexpr std::array<std::string_view, 16> colors = {
+        "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+        "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
+    };
+    return std::find(colors.begin(), colors.end(), name) != colors.end();
+}
+
 GlassInfo classifyGlassName(std::string_view rawName, const void* identity = nullptr) {
+    if (rawName.find(':') != std::string_view::npos && !rawName.starts_with("minecraft:")) return {};
     const std::string_view name = stripNamespace(rawName);
     const bool pane = name == "glass_pane"
         || name == "hard_glass_pane"
         || name == "stained_glass_pane"
         || name == "hard_stained_glass_pane"
-        || name.ends_with("_stained_glass_pane");
+        || hasGlassColor(name, "_stained_glass_pane");
     const bool block = name == "glass"
         || name == "tinted_glass"
         || name == "hard_glass"
         || name == "stained_glass"
         || name == "hard_stained_glass"
-        || name.ends_with("_stained_glass");
+        || hasGlassColor(name, "_stained_glass");
     if (pane) return {GlassShape::Pane, name, identity};
     if (block) return {GlassShape::Block, name, identity};
     return {};
@@ -498,6 +510,11 @@ bool rebuildRenderChunks(void* clientInstance) {
     return rebuilt;
 }
 
+}
+
+bool ConnectedGlassUsesLegacyTessellation(const void* block) {
+    if (!g_enabled.load(std::memory_order_acquire)) return false;
+    return shapeEnabled(classifyGlass(block));
 }
 
 void ConnectedGlassAdjustTessellatorVertex(void* tessellator, float x, float z) {

@@ -79,6 +79,10 @@ inline constexpr std::size_t mNextColor = 0x1B0;
 inline constexpr std::size_t mNextColorSet = 0x1B4;
 }
 
+namespace BlockGraphics {
+inline constexpr std::size_t mBlockShape = 0x10;
+}
+
 namespace Block {
 inline constexpr std::size_t mBlockType = 0x68;
 inline constexpr std::size_t mLightEmission = 0xA4;
