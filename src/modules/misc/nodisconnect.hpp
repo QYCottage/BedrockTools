@@ -8,8 +8,5 @@ public:
     void onInit() override;
     void onEnable() override;
     void onDisable() override;
-
-private:
-    bool m_patched = false;
-    void* m_patchTarget = nullptr;
+    static void setRuntimeActive(bool state);
 };

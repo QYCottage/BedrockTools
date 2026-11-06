@@ -4,6 +4,7 @@
 #include "launcher/ModuleMenu.hpp"
 #include "launcher/OverlayBridge.hpp"
 #include "modules/ModuleRegistry.hpp"
+#include "modules/misc/nodisconnect.hpp"
 #include "core/memory/Hooks.hpp"
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
@@ -144,6 +145,7 @@ bool Runtime::load(pl::mod::ModContext& context) {
 }
 
 bool Runtime::enable(pl::mod::ModContext&) {
+    NoDisconnectModule::setRuntimeActive(true);
     enabled.store(true, std::memory_order_release);
     if (!launcherContext()) return true;
     if (!resolved.load(std::memory_order_acquire)) {
@@ -157,12 +159,14 @@ bool Runtime::enable(pl::mod::ModContext&) {
 }
 
 bool Runtime::disable(pl::mod::ModContext&) {
+    NoDisconnectModule::setRuntimeActive(false);
     enabled.store(false, std::memory_order_release);
     bedrocktools::config::ConfigManager::get().flush();
     return true;
 }
 
 bool Runtime::unload(pl::mod::ModContext&) {
+    NoDisconnectModule::setRuntimeActive(false);
     enabled.store(false, std::memory_order_release);
     bedrocktools::config::ConfigManager::get().flush();
     return true;

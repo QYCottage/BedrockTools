@@ -156,6 +156,10 @@ enum class SignatureId : std::uint16_t {
     ContainerScreenControllerHandleSelectSlot,
     ContainerScreenControllerGetSelectedSlotInfo,
     BlockGraphicsForBlock,
+    NoDisconnectAppCommand,
+    NoDisconnectAppSuspend,
+    NoDisconnectAppResume,
+    NoDisconnectTrimMemory,
     Count
 };
 
