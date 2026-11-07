@@ -3,7 +3,7 @@
   "id": "bedrocktools",
   "version": "1.5.11",
   "minecraft_versions": [
-    "1.26.60.X"
+    "1.26.6X.X"
   ],
   "info": {
     "name": "BedrockTools",
