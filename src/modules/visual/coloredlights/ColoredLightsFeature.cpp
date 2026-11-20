@@ -492,7 +492,7 @@ bool tessellateBlockDetour(
     const void* airAndSimpleBlocks
 ) {
     if (!g_tessellateBlockOriginal) return false;
-    if (!position) {
+    if (!position || !g_insideTerrainBuild) {
         return g_tessellateBlockOriginal(
             blockTessellator,
             meshTessellator,
