@@ -330,7 +330,7 @@ const char* const kStyleNames[] = {
     "Square", "Square Dot", "Diamond", "Plus", "X", "T Shape", "Chevron", "Arrow",
     "Star", "Scope", "Cross X", "Vertical", "Horizontal", "T Shape Down", "Brackets",
     "Brackets Dot", "Target", "Ring Ticks", "Broken Ring", "Triangle", "Grid",
-    "Mil Dots", "Converge",
+    "Mil Dots", "Converge", "Square Plus Dot",
 };
 
 constexpr int kStyleNameCount = static_cast<int>(sizeof(kStyleNames) / sizeof(kStyleNames[0]));
@@ -339,7 +339,7 @@ static_assert(kStyleNameCount == static_cast<int>(CrosshairModule::Style::Count)
               "every CrosshairModule::Style needs exactly one kStyleNames label");
 // Guards the two places that state the shape count in prose (the module
 // description below and the README): append a style, update the wording.
-static_assert(kStyleNameCount - 1 == 29,
+static_assert(kStyleNameCount - 1 == 30,
               "custom shape count changed - update the Crosshair module description");
 
 void buildShape(CrosshairModule::Style style, const ShapePainter& p, float s) {
@@ -602,6 +602,16 @@ void buildShape(CrosshairModule::Style style, const ShapePainter& p, float s) {
             break;
         }
 
+        case CrosshairModule::Style::SquarePlusDot:
+            // Square, plus and dot: the Brackets frame, the gapped Cross
+            // arms and the center dot combined, so the aim point is marked
+            // three ways at once. The arms reach past the frame, matching
+            // the reference shape where the plus sticks out of the square.
+            cornerBrackets(radius * 1.1f, radius * 0.5f);
+            cross(gap, gap + arm);
+            p.dot(halfDot);
+            break;
+
         case CrosshairModule::Style::Vanilla:
         case CrosshairModule::Style::Count:
             // Vanilla lets the game draw its own texture, Count is only the
@@ -617,7 +627,7 @@ void buildShape(CrosshairModule::Style style, const ShapePainter& p, float s) {
 } // namespace
 
 CrosshairModule::CrosshairModule()
-    : Module("Crosshair", "Replaces the vanilla crosshair with 29 custom shapes. Color, size, thickness, outline, an animated RGB mode, a hit indicator and a show-in-third-person option are configurable.") {
+    : Module("Crosshair", "Replaces the vanilla crosshair with 30 custom shapes. Color, size, thickness, outline, an animated RGB mode, a hit indicator and a show-in-third-person option are configurable.") {
     // The crosshair always sits at the exact screen center; there is nothing
     // to drag in the HUD editor.
     hideInHudEditor = true;

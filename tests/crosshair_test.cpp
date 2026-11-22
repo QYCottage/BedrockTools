@@ -254,6 +254,7 @@ int main() {
         {CrosshairModule::Style::Grid, 4, "Grid is two lines per axis"},
         {CrosshairModule::Style::MilDot, 12, "Mil Dots is four arms plus eight dots"},
         {CrosshairModule::Style::Converge, 8, "Converge is four inward chevrons"},
+        {CrosshairModule::Style::SquarePlusDot, 13, "Square Plus Dot is brackets plus a gapped cross plus the center dot"},
     };
     for (const auto& expected : kShapeChecks) {
         check(shapeFor(expected.style).size() == expected.commands, expected.what);
@@ -372,6 +373,57 @@ int main() {
         }
         check(cmds.size() == 8 && std::fabs(maxX - maxY) < 0.01f,
               "Converge is symmetric on both axes");
+    }
+
+    {
+        // Square Plus Dot (square, plus and dot): the first eight lines are
+        // the Brackets frame anchored on the box corners, the next four are
+        // the gapped Cross arms on the axes, and the last primitive is the
+        // square center dot. The arms reach past the frame, so the plus
+        // sticks out of the square on all four sides.
+        const auto cmds = shapeFor(CrosshairModule::Style::SquarePlusDot);
+        const float half = 9.0f * 1.1f;   // bracket half size, as in Brackets
+        const float gap = 3.0f;           // cross gap, as in Cross
+        const float tip = gap + 11.0f;    // cross arm tip, as in Cross
+        bool brackets = cmds.size() == 13;
+        for (size_t i = 0; i < 8 && i < cmds.size(); ++i) {
+            if (cmds[i].type != PL_DRAW_LINE ||
+                std::fabs(std::fabs(cmds[i].x) - half) > 0.01f ||
+                std::fabs(std::fabs(cmds[i].y) - half) > 0.01f) {
+                brackets = false;
+            }
+        }
+        check(brackets, "Square Plus Dot opens with the eight bracket arms on the box corners");
+
+        bool arms = cmds.size() == 13;
+        for (size_t i = 8; i < 12 && i < cmds.size(); ++i) {
+            const auto& c = cmds[i];
+            if (c.type != PL_DRAW_LINE) arms = false;
+            const bool vertical = std::fabs(c.x) < 0.01f && std::fabs(c.w) < 0.01f;
+            const bool horizontal = std::fabs(c.y) < 0.01f && std::fabs(c.h) < 0.01f;
+            if (!vertical && !horizontal) arms = false;
+            const float d0 = std::sqrt(c.x * c.x + c.y * c.y);
+            const float d1 = std::sqrt((c.x + c.w) * (c.x + c.w) + (c.y + c.h) * (c.y + c.h));
+            const float reach = std::max(d0, d1);
+            const float inner = std::min(d0, d1);
+            if (std::fabs(reach - tip) > 0.01f || std::fabs(inner - gap) > 0.01f) arms = false;
+        }
+        check(arms, "Square Plus Dot draws four gapped arms on the axes reaching past the frame");
+
+        bool dot = cmds.size() == 13 && cmds.back().type == PL_DRAW_RECT_FILLED &&
+                   std::fabs(cmds.back().x + 2.2f) < 0.01f &&
+                   std::fabs(cmds.back().y + 2.2f) < 0.01f &&
+                   std::fabs(cmds.back().w - 4.4f) < 0.01f &&
+                   std::fabs(cmds.back().h - 4.4f) < 0.01f;
+        check(dot, "Square Plus Dot ends with the square center dot");
+
+        float maxX = 0.0f, maxY = 0.0f;
+        for (const auto& c : cmds) {
+            maxX = std::max({maxX, std::fabs(c.x), std::fabs(c.x + c.w)});
+            maxY = std::max({maxY, std::fabs(c.y), std::fabs(c.y + c.h)});
+        }
+        check(cmds.size() == 13 && std::fabs(maxX - tip) < 0.01f && std::fabs(maxY - tip) < 0.01f,
+              "Square Plus Dot is symmetric and bounded by the arm tips");
     }
 
     // Size scales every shape linearly, so a new style cannot drift off center

@@ -9,7 +9,7 @@ extern CrosshairModule* g_crosshairMod;
 // Crosshair
 //
 // Replaces the vanilla crosshair (textures/gui/crosshair.png, drawn by
-// HudCursorRenderer) with one of 29 custom shapes drawn through the HUD
+// HudCursorRenderer) with one of 30 custom shapes drawn through the HUD
 // overlay. Color, scale, thickness, opacity, an outline pass, an
 // animated RGB (rainbow) mode and a hit indicator are configurable from
 // the mod menu. Selecting the "Vanilla" style restores the game's own
@@ -20,9 +20,10 @@ extern CrosshairModule* g_crosshairMod;
 // Plus, X, T Shape, T Shape Down, Chevron, Arrow, Star), gapped crosses
 // (Cross, Cross Dot, Cross X, Vertical, Horizontal), rings (Circle, Circle
 // Dot, Circle Cross, Ring Ticks, Broken Ring, Target), boxes (Square, Square
-// Dot, Diamond, Triangle, Brackets, Brackets Dot, Grid) and reticles (Scope,
-// Mil Dots, Converge). Every one of them is pure line/rect geometry through
-// the same ShapePainter, so they all share the color, thickness, opacity and
+// Dot, Diamond, Triangle, Brackets, Brackets Dot, Grid, Square Plus Dot) and
+// reticles (Scope, Mil Dots, Converge). Every one of them is pure line/rect
+// geometry through the same ShapePainter, so they all share the color,
+// thickness, opacity and
 // outline options.
 //
 // "Show In Third Person" (m_showThirdPerson) controls whether the overlay
@@ -66,6 +67,7 @@ public:
         Grid,          // tic-tac-toe grid around the aim point
         MilDot,        // gapped cross with aiming dots on the arms
         Converge,      // four chevrons pointing in at the center
+        SquarePlusDot, // square corner brackets + gapped plus + center dot
         Count
     };
 
