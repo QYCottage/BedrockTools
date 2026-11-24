@@ -21,7 +21,7 @@
 
 namespace {
 using namespace bedrocktools::sdk;
-using namespace bedrocktools::sdk::offsets;
+namespace off = bedrocktools::sdk::offsets;
 using Clock = std::chrono::steady_clock;
 using Begin = void (*)(void*, void*, int, int, int);
 using TessColor = void (*)(void*, float, float, float, float);
@@ -133,10 +133,10 @@ std::uintptr_t resolveAdrp(std::uint32_t* p, std::size_t count, std::uint32_t re
 MaterialPtr getMaterial(const char* name) {
     if (!materialGroup) return {};
     auto** vtable = *reinterpret_cast<void***>(materialGroup);
-    if (!vtable || !vtable[VTable::RenderMaterialGroup_getMaterial]) return {};
+    if (!vtable || !vtable[off::VTable::RenderMaterialGroup_getMaterial]) return {};
     HashedString hashed(name);
     using GetMaterial = MaterialPtr (*)(void*, const HashedString*);
-    return reinterpret_cast<GetMaterial>(vtable[VTable::RenderMaterialGroup_getMaterial])(
+    return reinterpret_cast<GetMaterial>(vtable[off::VTable::RenderMaterialGroup_getMaterial])(
         reinterpret_cast<void*>(materialGroup), &hashed);
 }
 
@@ -172,11 +172,11 @@ void readGameVerdict(void* rawPlayer, bool& gameInRange, bool& gameTargetPresent
     void* hit = levelGetHitResult(reinterpret_cast<void*>(level));
     if (reinterpret_cast<std::uintptr_t>(hit) < 0x1000) return;
     const int type = *reinterpret_cast<const int*>(
-        reinterpret_cast<std::uintptr_t>(hit) + HitResult::mType);
-    if (type == HitResult::TypeEntity) {
+        reinterpret_cast<std::uintptr_t>(hit) + off::HitResult::mType);
+    if (type == off::HitResult::TypeEntity) {
         gameInRange = true;
         gameTargetPresent = true;
-    } else if (type == HitResult::TypeEntityOutOfRange) {
+    } else if (type == off::HitResult::TypeEntityOutOfRange) {
         gameTargetPresent = true;
     }
 }
@@ -238,8 +238,8 @@ void tick(void* rawPlayer) {
                 void* actor = actors.begin[i].mActor;
                 if (!actor || actor == rawPlayer || reinterpret_cast<std::uintptr_t>(actor) < 0x1000) continue;
                 const auto categories = reinterpret_cast<bedrocktools::sdk::Actor*>(actor)->categories();
-                const bool isPlayer = (categories & ActorCategories::IsPlayer) != 0;
-                const bool isMob = !isPlayer && (categories & ActorCategories::IsMob) != 0;
+                const bool isPlayer = (categories & off::ActorCategories::IsPlayer) != 0;
+                const bool isMob = !isPlayer && (categories & off::ActorCategories::IsMob) != 0;
                 if (!((isPlayer && module->showPlayers) || (isMob && module->showMobs))) continue;
                 const AABB box = reinterpret_cast<bedrocktools::sdk::Actor*>(actor)->bounds();
                 if (!hitrange::validBox(box)) continue;
@@ -300,11 +300,11 @@ void render(void* renderer, void* screen) {
     MaterialPtr* material = module->seeThrough ? &throughMaterial : &depthMaterial;
     if (!material || !(*material)) return;
     auto scr = reinterpret_cast<std::uintptr_t>(screen);
-    auto tess = *reinterpret_cast<std::uintptr_t*>(scr + ScreenContext::mTessellator);
+    auto tess = *reinterpret_cast<std::uintptr_t*>(scr + off::ScreenContext::mTessellator);
     auto lrp = *reinterpret_cast<std::uintptr_t*>(
-        reinterpret_cast<std::uintptr_t>(renderer) + LevelRenderer::mLevelRendererPlayer);
+        reinterpret_cast<std::uintptr_t>(renderer) + off::LevelRenderer::mLevelRendererPlayer);
     if (tess < 0x1000 || lrp < 0x1000) return;
-    const auto cam = *reinterpret_cast<const Vec3*>(lrp + LevelRendererPlayer::mCamPos);
+    const auto cam = *reinterpret_cast<const Vec3*>(lrp + off::LevelRendererPlayer::mCamPos);
     bedrocktools::core::ScopedShaderColor shaderColor(screen);
     if (!shaderColor) return;
 
@@ -380,7 +380,7 @@ void HitRangeModule::onInit() {
     auto group = resolve(SignatureId::RenderMaterialGroupCommon);
     if (group) {
         auto address = resolveAdrp(reinterpret_cast<std::uint32_t*>(group), 2, 0);
-        if (address) materialGroup = address + MaterialGroup::mRenderMaterialGroupOffset;
+        if (address) materialGroup = address + off::MaterialGroup::mRenderMaterialGroupOffset;
     }
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) { tick(event.player); });
