@@ -13,6 +13,7 @@ public:
 
     void onInit() override;
     void onEnable() override;
+    void onDisable() override;
     void onKeybindEvent(const std::string& key, bool isDown) override;
     bool onMenuConfigChanged(std::string_view key, std::string_view value) override;
     bool showInLegacyMenu(std::string_view key) const override;
@@ -22,6 +23,7 @@ public:
 
     bool useHub = false;
     bool autoRequeue = true;
+    int requeueDelaySeconds = 0;
     bool autoRequeueSoloMode = false;
     bool autoRequeueTeamElimination = true;
     bool autoRequeueGameOver = true;

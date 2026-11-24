@@ -1,7 +1,9 @@
 #include "hiveutils.hpp"
 #include "hivemaps.hpp"
 #include "core/GameHooks.hpp"
+#include "core/DelayedAction.hpp"
 #include "core/memory/Hooks.hpp"
+#include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <pl/Platform.hpp>
@@ -29,6 +31,7 @@ using namespace bedrocktools;
 
 using SendToServerFn = void* (*)(void*, void*);
 using GetPacketSenderFn = void* (*)(void*);
+using GetLocalPlayerFn = void* (*)(void*);
 using CreatePacketFn = std::shared_ptr<void> (*)(int);
 using SetTitleHandlerFn = void (*)(void*, void*, void*);
 using TextHandlerFn = void (*)(void*, void*, void*);
@@ -37,14 +40,14 @@ using ModalReceiveFn = void (*)(void*, void*, void*, const std::shared_ptr<void>
 
 SendToServerFn sSendToServer = nullptr;
 GetPacketSenderFn sGetPacketSender = nullptr;
+GetLocalPlayerFn sGetLocalPlayer = nullptr;
 CreatePacketFn sCreatePacket = nullptr;
 SetTitleHandlerFn sSetTitleOriginal = nullptr;
 TextHandlerFn sTextOriginal = nullptr;
 ChangeDimensionFn sChangeDimensionOriginal = nullptr;
 ModalReceiveFn sModalOriginal = nullptr;
 
-std::chrono::steady_clock::time_point sLastRequeue{};
-std::mutex sRequeueMutex;
+core::DelayedAction sRequeueAction;
 std::string sCurrentGame;
 std::string sCurrentTeamColor;
 std::string sLastCopiedCode;
@@ -56,7 +59,6 @@ constexpr int kTextPacketId = 0x09;
 constexpr int kCommandRequestPacketId = 0x4D;
 constexpr int kModalFormRequestPacketId = 0x64;
 constexpr int kModalFormResponsePacketId = 0x65;
-constexpr int kRequeueCooldownMs = 3000;
 
 std::string trim(std::string value) {
     auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; });
@@ -192,27 +194,31 @@ void sendChat(const std::string& message) {
     sendPacket(packet.get());
 }
 
-bool canRequeue() {
+void processPendingRequeue(void* client) {
     HiveUtilsModule* mod = HiveUtilsModule::instance;
-    if (!mod || !mod->enabled || sCurrentGame.empty()) return false;
-    if (lower(sCurrentGame).find("hub") != std::string::npos) return false;
-    std::lock_guard<std::mutex> lock(sRequeueMutex);
-    const auto now = std::chrono::steady_clock::now();
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastRequeue).count();
-    if (elapsed < kRequeueCooldownMs) return false;
-    sLastRequeue = now;
-    return true;
+    if (!mod || !mod->enabled) {
+        sRequeueAction.cancel();
+        return;
+    }
+    void* player = client && sGetLocalPlayer ? sGetLocalPlayer(client) : nullptr;
+    auto command = sRequeueAction.take(client, player);
+    if (command && !sCurrentGame.empty() && lower(sCurrentGame).find("hub") == std::string::npos) sendCommand(*command);
 }
 
-void requeue() {
+void requeue(bool immediate = false) {
     HiveUtilsModule* mod = HiveUtilsModule::instance;
-    if (!mod || !canRequeue()) return;
-    sendCommand(mod->useHub ? "/hub" : "/q " + sCurrentGame);
+    if (!mod || !mod->enabled || sCurrentGame.empty() || !sGetLocalPlayer) return;
+    if (lower(sCurrentGame).find("hub") != std::string::npos) return;
+    void* client = core::gamehooks::clientInstance();
+    void* player = client ? sGetLocalPlayer(client) : nullptr;
+    if (immediate) sRequeueAction.cancel();
+    sRequeueAction.schedule(client, player, immediate ? 0 : mod->requeueDelaySeconds,
+                            mod->useHub ? "/hub" : "/q " + sCurrentGame);
+    if (immediate) processPendingRequeue(client);
 }
 
 void resetRequeueCooldown() {
-    std::lock_guard<std::mutex> lock(sRequeueMutex);
-    sLastRequeue = {};
+    sRequeueAction.resetCooldown();
 }
 
 void requestConnection() {
@@ -251,7 +257,9 @@ bool captureConnectionMessage(void* packet, const std::string& message) {
         std::string server = trim(line.substr(marker.size()));
         server.erase(std::remove_if(server.begin(), server.end(),
             [](unsigned char c) { return std::isdigit(c) != 0; }), server.end());
-        sCurrentGame = isKnownHiveGame(server) ? server : std::string();
+        const std::string game = isKnownHiveGame(server) ? server : std::string();
+        if (game != sCurrentGame) sRequeueAction.cancel();
+        sCurrentGame = game;
     }
     return recognized;
 }
@@ -475,11 +483,16 @@ void textDetour(void* handler, void* source, void* packet) {
 }
 
 void changeDimensionDetour(void* player, void* packet) {
+    sRequeueAction.cancel();
     HiveUtilsModule* mod = HiveUtilsModule::instance;
     if (mod && mod->enabled && packet) {
         auto* payload = reinterpret_cast<std::byte*>(packet) + sdk::offsets::Packet::Size;
         const int dimension = *reinterpret_cast<int*>(payload + sdk::offsets::ChangeDimensionPacketPayload::mDimensionId);
-        if (dimension == 0) requestConnection();
+        if (dimension == 0) {
+            sCurrentGame.clear();
+            sCurrentTeamColor.clear();
+            requestConnection();
+        }
     }
     if (sChangeDimensionOriginal) sChangeDimensionOriginal(player, packet);
 }
@@ -723,10 +736,17 @@ HiveUtilsModule::HiveUtilsModule()
 }
 
 HiveUtilsModule::~HiveUtilsModule() {
-    if (instance == this) instance = nullptr;
+    if (instance == this) {
+        sRequeueAction.cancel();
+        instance = nullptr;
+    }
 }
 
 void HiveUtilsModule::onInit() {
+    sGetLocalPlayer = reinterpret_cast<GetLocalPlayerFn>(memory::resolve(memory::SignatureId::ClientInstanceGetLocalPlayer));
+    events::bus().subscribe<events::ClientInstanceUpdateEvent>([](auto& event) {
+        processPendingRequeue(event.clientInstance);
+    });
     const std::uintptr_t title = memory::resolve(memory::SignatureId::ClientNetworkHandlerHandleSetTitle);
     if (title) hooks::install(reinterpret_cast<void*>(title), reinterpret_cast<void*>(setTitleDetour), reinterpret_cast<void**>(&sSetTitleOriginal));
     const std::uintptr_t text = memory::resolve(memory::SignatureId::ClientNetworkHandlerHandleText);
@@ -737,12 +757,19 @@ void HiveUtilsModule::onInit() {
 }
 
 void HiveUtilsModule::onEnable() {
+    sRequeueAction.cancel();
+    sCurrentGame.clear();
+    sCurrentTeamColor.clear();
     requestConnection();
+}
+
+void HiveUtilsModule::onDisable() {
+    sRequeueAction.cancel();
 }
 
 void HiveUtilsModule::onKeybindEvent(const std::string& key, bool isDown) {
     if (key == "requeueKeybind") {
-        if (isDown) requeue();
+        if (isDown) requeue(true);
         return;
     }
     Module::onKeybindEvent(key, isDown);
@@ -927,6 +954,21 @@ void HiveUtilsModule::publishMenuSchema() {
 
     section("requeue_behavior", "requeue", "Automatic Requeue");
     toggle("autoRequeue", "requeue", "requeue_behavior", "Auto Requeue", "Automatically find another match when a configured requeue condition is met.");
+    {
+        ConfigNodeV2 node;
+        node.id = "requeueDelaySeconds";
+        node.key = "requeueDelaySeconds";
+        node.category = "requeue";
+        node.section = "requeue_behavior";
+        node.title = "Requeue Delay";
+        node.description = "Seconds to wait before an automatic requeue. The requeue keybind stays immediate.";
+        node.type = ConfigControlTypeV2::SliderInt;
+        node.minValue = "0";
+        node.maxValue = "10";
+        node.step = "1";
+        node.unit = " s";
+        add(std::move(node));
+    }
     {
         ConfigNodeV2 node;
         node.id = "requeue_conditions";
@@ -1298,6 +1340,8 @@ void HiveUtilsModule::loadConfig(const nlohmann::json& j) {
     auto readString = [&](const char* key, std::string& value) { if (j.contains(key) && j[key].is_string()) value = j[key].get<std::string>(); };
     readBool("useHub", useHub);
     readBool("autoRequeue", autoRequeue);
+    readInt("requeueDelaySeconds", requeueDelaySeconds);
+    requeueDelaySeconds = std::clamp(requeueDelaySeconds, 0, 10);
     readBool("autoRequeueSoloMode", autoRequeueSoloMode);
     readBool("autoRequeueTeamElimination", autoRequeueTeamElimination);
     readBool("autoRequeueGameOver", autoRequeueGameOver);
@@ -1370,6 +1414,7 @@ void HiveUtilsModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
     j["useHub"] = useHub;
     j["autoRequeue"] = autoRequeue;
+    j["requeueDelaySeconds"] = requeueDelaySeconds;
     j["autoRequeueSoloMode"] = autoRequeueSoloMode;
     j["autoRequeueTeamElimination"] = autoRequeueTeamElimination;
     j["autoRequeueGameOver"] = autoRequeueGameOver;

@@ -154,7 +154,9 @@ void registerModulesWithLauncher() {
                 } else {
                     int minVal = 0;
                     int maxVal = 200;
-                    if (kLower.find("cps") != std::string::npos) {
+                    if (kLower == "delayseconds" || kLower == "requeuedelayseconds") {
+                        maxVal = 10;
+                    } else if (kLower.find("cps") != std::string::npos) {
                         minVal = 1;
                         maxVal = 30;
                     } else if (kLower.find("time") != std::string::npos) {

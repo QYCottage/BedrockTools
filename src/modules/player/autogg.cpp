@@ -3,41 +3,46 @@
 #include <bedrocktools/sdk/Offsets.hpp>
 #include "core/memory/Hooks.hpp"
 #include "core/GameHooks.hpp"
+#include "core/DelayedAction.hpp"
+#include <bedrocktools/events/EventBus.hpp>
+#include <pl/ModMenuConfig.hpp>
+#include <algorithm>
 #include <string>
-#include <chrono>
-#include <mutex>
-#include <vector>
 #include <memory>
+#include <new>
 #include <regex>
 
 AutoGG* AutoGG::instance = nullptr;
 
-static std::chrono::steady_clock::time_point sLastGGTime{};
-static std::mutex sTimeMutex;
+static bedrocktools::core::DelayedAction sGGAction;
 
 AutoGG::AutoGG() : Module("AutoGG", "Automatically says GG at the end of a game.") {
     instance = this;
     showInMenu = true;
 }
 
-static void* (*sendToServer)(void* sender, void* packet) = nullptr;
-static void* (*getPacketSender)(void* clientInstance) = nullptr;
-static std::shared_ptr<void> (*createPacket)(int id) = nullptr;
-
-static bool canSendGG() {
-    if (!AutoGG::instance || !AutoGG::instance->enabled) return false;
-    std::lock_guard<std::mutex> lock(sTimeMutex);
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastGGTime).count();
-    if (elapsed < 3000) { 
-        return false;
+AutoGG::~AutoGG() {
+    if (instance == this) {
+        sGGAction.cancel();
+        instance = nullptr;
     }
-    sLastGGTime = now;
-    return true;
 }
 
-static void sendGGCommand() {
-    if (!canSendGG()) return;
+static void* (*sendToServer)(void* sender, void* packet) = nullptr;
+static void* (*getPacketSender)(void* clientInstance) = nullptr;
+static void* (*getLocalPlayer)(void* clientInstance) = nullptr;
+static std::shared_ptr<void> (*createPacket)(int id) = nullptr;
+
+static void scheduleGG() {
+    AutoGG* mod = AutoGG::instance;
+    if (!mod || !mod->enabled || !getLocalPlayer) return;
+    void* client = bedrocktools::core::gamehooks::clientInstance();
+    void* player = client ? getLocalPlayer(client) : nullptr;
+    sGGAction.schedule(client, player, mod->delaySeconds, mod->ggMessage);
+}
+
+static void sendGGCommand(const std::string& message) {
+    if (!AutoGG::instance || !AutoGG::instance->enabled) return;
     
     
     if (!sendToServer) sendToServer = (decltype(sendToServer)) bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LoopbackPacketSenderSendToServer);
@@ -60,8 +65,7 @@ static void sendGGCommand() {
 
     *reinterpret_cast<uint8_t*>(payload + bedrocktools::sdk::offsets::TextPacketPayload::AuthorAndMessage::mType) = 1;
     new ((void*)(payload + bedrocktools::sdk::offsets::TextPacketPayload::AuthorAndMessage::mAuthor)) std::string("");
-    std::string customGg = AutoGG::instance ? AutoGG::instance->ggMessage : "gg";
-    new ((void*)(payload + bedrocktools::sdk::offsets::TextPacketPayload::AuthorAndMessage::mMessage)) std::string(customGg);
+    new ((void*)(payload + bedrocktools::sdk::offsets::TextPacketPayload::AuthorAndMessage::mMessage)) std::string(message);
     
     
     void* sender = getPacketSender(bedrocktools::core::gamehooks::clientInstance());
@@ -141,7 +145,7 @@ static void onHandleSetTitlePacket(void* handler, void* source, void* packet) {
         if (packetType == 0 || packetType == 1) {
             std::string text = *reinterpret_cast<std::string*>(payload + bedrocktools::sdk::offsets::SetTitlePacketPayload::mTitleText);
             if (checkTitle(text)) {
-                sendGGCommand();
+                scheduleGG();
             }
         }
     }
@@ -156,12 +160,30 @@ static void onHandleTextPacket(void* handler, void* source, void* packet) {
     if (AutoGG::instance && AutoGG::instance->enabled) {
         std::string message = getTextPacketMessage(packet);
         if (checkText(message)) {
-            sendGGCommand();
+            scheduleGG();
         }
     }
 }
 
+static void (*onChangeDimension_orig)(void*, void*) = nullptr;
+static void onChangeDimension(void* player, void* packet) {
+    sGGAction.cancel();
+    if (onChangeDimension_orig) onChangeDimension_orig(player, packet);
+}
+
 void AutoGG::onInit() {
+    getLocalPlayer = reinterpret_cast<decltype(getLocalPlayer)>(bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ClientInstanceGetLocalPlayer));
+    bedrocktools::events::bus().subscribe<bedrocktools::events::ClientInstanceUpdateEvent>([](auto& event) {
+        if (!AutoGG::instance || !AutoGG::instance->enabled) {
+            sGGAction.cancel();
+            return;
+        }
+        void* client = event.clientInstance;
+        void* player = client && getLocalPlayer ? getLocalPlayer(client) : nullptr;
+        auto message = sGGAction.take(client, player);
+        if (message) sendGGCommand(*message);
+    });
+
     uintptr_t setTitleAddr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::ClientNetworkHandlerHandleSetTitle);
     if (setTitleAddr) {
         bedrocktools::hooks::install((void*)setTitleAddr, (void*)onHandleSetTitlePacket, (void**)&onHandleSetTitlePacket_orig);
@@ -171,14 +193,64 @@ void AutoGG::onInit() {
     if (setTxtAddr) {
         bedrocktools::hooks::install((void*)setTxtAddr, (void*)onHandleTextPacket, (void**)&onHandleTextPacket_orig);
     }
+
+    uintptr_t dimensionAddr = bedrocktools::memory::resolve(bedrocktools::memory::SignatureId::LocalPlayerChangeDimension);
+    if (dimensionAddr) {
+        bedrocktools::hooks::install((void*)dimensionAddr, (void*)onChangeDimension, (void**)&onChangeDimension_orig);
+    }
+}
+
+void AutoGG::onDisable() {
+    sGGAction.cancel();
+}
+
+void AutoGG::onMenuRegistered() {
+    using namespace pl::modmenu;
+    ConfigSchemaBuilder schema;
+    schema.defaultCategory("general").category("general", "General");
+
+    ConfigNodeV2 message;
+    message.id = "ggMessage";
+    message.key = "ggMessage";
+    message.category = "general";
+    message.title = "GG Message";
+    message.type = ConfigControlTypeV2::Text;
+    schema.node(std::move(message));
+
+    ConfigNodeV2 delay;
+    delay.id = "delaySeconds";
+    delay.key = "delaySeconds";
+    delay.category = "general";
+    delay.title = "GG Delay";
+    delay.description = "Seconds to wait after a game ends before sending GG. Set 0 for no delay.";
+    delay.type = ConfigControlTypeV2::SliderInt;
+    delay.minValue = "0";
+    delay.maxValue = "10";
+    delay.step = "1";
+    delay.unit = " s";
+    schema.node(std::move(delay));
+
+    ConfigNodeV2 keybindNode;
+    keybindNode.id = "keybind";
+    keybindNode.key = "keybind";
+    keybindNode.category = "general";
+    keybindNode.title = "Keybind";
+    keybindNode.type = ConfigControlTypeV2::Keybind;
+    schema.node(std::move(keybindNode));
+    setConfigSchemaJson(moduleId, schema.toJson());
 }
 
 void AutoGG::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     if (j.contains("ggMessage")) ggMessage = j["ggMessage"].get<std::string>();
+    if (j.contains("delaySeconds") && j["delaySeconds"].is_number_integer()) {
+        delaySeconds = j["delaySeconds"].get<int>();
+    }
+    delaySeconds = std::clamp(delaySeconds, 0, 10);
 }
 
 void AutoGG::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
     j["ggMessage"] = ggMessage;
+    j["delaySeconds"] = delaySeconds;
 }
