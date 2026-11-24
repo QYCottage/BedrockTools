@@ -5,6 +5,7 @@
 // fake exists so those tests can still run standalone.
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <string>
 #include <type_traits>
@@ -20,6 +21,8 @@ public:
     bool contains(const std::string& key) const {
         return m_children.find(key) != m_children.end();
     }
+
+    std::size_t erase(const std::string& key) { return m_children.erase(key); }
 
     json& operator[](const std::string& key) { return m_children[key]; }
 

@@ -1,5 +1,6 @@
 // Integration test for the Hit Range tick sampler, authoritative crosshair
-// verdict, reach radius and ring renderer using fake game memory.
+// verdict, auto-detected survival/creative reach and ring renderer using fake
+// game memory.
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -46,7 +47,14 @@ void fakeBegin(void*, void*, int mode, int count, int) {
 void fakeColor(void*, float r, float g, float b, float a) {
     colors.push_back({r, g, b, a});
 }
-void fakeVertex(void*, float, float, float) { ++vertices; }
+void fakeVertex(void*, float x, float y, float z) {
+    // Target rings are centered on entities away from the camera, so allow a
+    // generous world-space bound rather than asserting a self-ring radius
+    // here. Mode detection's 3/5 radius is checked via effectiveReach().
+    (void)y;
+    assert(std::abs(x) <= 16.0f && std::abs(z) <= 16.0f);
+    ++vertices;
+}
 void fakeFlush(void* screen, void*, void* material, char*) {
     ++flushes;
     materials.push_back(material);
@@ -66,7 +74,8 @@ void put(std::array<std::byte, N>& data, std::size_t offset, T value) {
 }
 
 struct FakeActor {
-    alignas(std::max_align_t) std::array<std::byte, 0x500> data{};
+    // Room for the 1.26.60 Player::mGameMode field and the bounded scan.
+    alignas(std::max_align_t) std::array<std::byte, 0xC00> data{};
     alignas(std::max_align_t) std::array<std::byte, 0x100> component{};
     alignas(std::max_align_t) std::array<std::byte, 0x40> rotation{};
 
@@ -80,6 +89,9 @@ struct FakeActor {
             reinterpret_cast<std::uintptr_t>(rotation.data()));
         put(rotation, 0, rot);
         if (level) put(data, off::Actor::mLevel, reinterpret_cast<std::uintptr_t>(level));
+    }
+    void setGameMode(void* gameMode) {
+        put(data, off::Player::mGameMode, reinterpret_cast<std::uintptr_t>(gameMode));
     }
     void* ptr() { return data.data(); }
 };
@@ -152,6 +164,7 @@ int main() {
     assert(state.targetPresent && state.inRange);
     assert(state.targets.size() == 2);
     assert(state.targets[0].inRange && !state.targets[1].inRange);
+    assert(mod.effectiveReach() == survivalReach);
 
     render(renderer.data(), screen.data());
     assert(begins == 1 && flushes == 1);
@@ -288,9 +301,8 @@ int main() {
     render(renderer.data(), screen.data());
     assert(materials.back() == &depthMaterial);
 
-    // Auto Reach uses the game's mode events: 3 survival, 5 creative.
-    mod.autoReach = true;
-    mod.setCreativeMode(false);
+    // Reach is always detected, never configured: survival is 3, creative is
+    // 5, and a mode event changes the radius immediately.
     assert(mod.effectiveReach() == survivalReach);
     bedrocktools::events::GameModeActionEvent creative{
         bedrocktools::events::GameModeType::GameMode,
@@ -301,8 +313,102 @@ int main() {
         bedrocktools::events::AttackKind::SurvivalMode, nullptr, nullptr, nullptr, nullptr};
     bedrocktools::events::bus().publish(survival);
     assert(mod.effectiveReach() == survivalReach);
+    assert(modeFromGameMode(nullptr) == ModeHint::Unknown);
 
-    // Config round trip, including both color syntaxes and malformed values.
+    // The live Player owns a GameMode pointer. Polling it on the local tick
+    // notices a /gamemode switch before the next attack/build event.
+    constexpr std::size_t attackSlot = gameModeAttackVTableIndices[1];
+    alignas(void*) std::array<void*, attackSlot + 1> creativeVTable{};
+    alignas(void*) std::array<void*, attackSlot + 1> survivalVTable{};
+    learnedSurvivalVTable.store(nullptr);
+    learnedCreativeVTable.store(nullptr);
+    survivalAttackFn = reinterpret_cast<std::uintptr_t>(&fakeBegin);
+    creativeAttackFn = reinterpret_cast<std::uintptr_t>(&fakeColor);
+    creativeInternalFn = reinterpret_cast<std::uintptr_t>(&fakeVertex);
+    creativeVTable[attackSlot] = reinterpret_cast<void*>(creativeAttackFn);
+    survivalVTable[attackSlot] = reinterpret_cast<void*>(survivalAttackFn);
+    void* creativeGameMode[1]{creativeVTable.data()};
+    void* survivalGameMode[1]{survivalVTable.data()};
+    assert(looksLikeGameMode(creativeGameMode) && looksLikeGameMode(survivalGameMode));
+    player.setGameMode(creativeGameMode);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(false); // deliberately stale: polling must win
+    tick(player.ptr());
+    assert(modeFromGameMode(creativeGameMode) == ModeHint::Creative);
+    assert(mod.effectiveReach() == creativeReach);
+    player.setGameMode(survivalGameMode);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(true);  // deliberately stale again
+    tick(player.ptr());
+    assert(modeFromGameMode(survivalGameMode) == ModeHint::Survival);
+    assert(mod.effectiveReach() == survivalReach);
+
+    // When attack signatures are unavailable, vtable identities learned from
+    // mode events still detect both modes immediately.
+    survivalAttackFn = creativeAttackFn = creativeInternalFn = 0;
+    bedrocktools::events::GameModeActionEvent learnCreative{
+        bedrocktools::events::GameModeType::GameMode,
+        bedrocktools::events::GameModeAction::Attack, creativeGameMode};
+    bedrocktools::events::bus().publish(learnCreative);
+    bedrocktools::events::AttackEvent learnSurvival{
+        bedrocktools::events::AttackKind::SurvivalMode,
+        survivalGameMode, nullptr, nullptr, nullptr};
+    bedrocktools::events::bus().publish(learnSurvival);
+    player.setGameMode(creativeGameMode);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(false);
+    tick(player.ptr());
+    assert(mod.effectiveReach() == creativeReach);
+    player.setGameMode(survivalGameMode);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(true);
+    tick(player.ptr());
+    assert(mod.effectiveReach() == survivalReach);
+
+    // A minor patch that moves the Player field is handled by the bounded
+    // scan: the mode is still found on the first tick, with no event needed.
+    survivalAttackFn = reinterpret_cast<std::uintptr_t>(&fakeBegin);
+    creativeAttackFn = reinterpret_cast<std::uintptr_t>(&fakeColor);
+    creativeInternalFn = reinterpret_cast<std::uintptr_t>(&fakeVertex);
+    constexpr std::size_t unknownOffset = 0xA40;
+    player.setGameMode(nullptr);
+    put(player.data, unknownOffset, reinterpret_cast<std::uintptr_t>(creativeGameMode));
+    gameModeFieldOffset.store(off::Player::mGameMode);
+    gameModeTickCounter.store(0);
+    lastGameModeScanTick.store(0);
+    lastPolledPlayer.store(nullptr);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(false);
+    tick(player.ptr());
+    assert(gameModeFieldOffset.load() == unknownOffset);
+    assert(mod.effectiveReach() == creativeReach);
+    put(player.data, unknownOffset, std::uintptr_t{0});
+    player.setGameMode(survivalGameMode);
+    gameModeFieldOffset.store(off::Player::mGameMode);
+    gameModeTickCounter.store(0);
+    lastGameModeScanTick.store(0);
+    lastPolledPlayer.store(nullptr);
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(false);
+    tick(player.ptr());
+    assert(mod.effectiveReach() == survivalReach);
+
+    // A touch attack that connects is authoritative for a short window even
+    // if the stored hit result says the target is too far away.
+    bedrocktools::events::AttackEvent confirmed{
+        bedrocktools::events::AttackKind::SurvivalMode,
+        survivalGameMode,
+        reinterpret_cast<bedrocktools::sdk::Actor*>(targetPlayer.ptr()),
+        nullptr, nullptr};
+    bedrocktools::events::bus().publish(confirmed);
+    setHit(off::HitResult::TypeEntityOutOfRange, targetPlayer.ptr());
+    tick(player.ptr());
+    assert(state.game.available && state.game.hit == GameHit::Entity);
+    assert(state.inRange && state.targets[0].inRange);
+    mod.setGameMode(nullptr);
+
+    // Config round trip: legacy `reach` and `autoReach` keys are ignored on
+    // load and removed on save. No manual Reach control can be restored.
     nlohmann::json settings;
     settings["reach"] = 4.5f;
     settings["lineWidth"] = 0.2f;
@@ -316,9 +422,10 @@ int main() {
     settings["showMobs"] = true;
     settings["seeThrough"] = true;
     mod.loadConfig(settings);
-    assert(mod.reach == 4.5f && mod.lineWidth == 0.2f && mod.style == 2);
+    assert(!mod.showInLegacyMenu("reach") && !mod.showInLegacyMenu("autoReach"));
+    assert(mod.showInLegacyMenu("lineWidth"));
+    assert(mod.effectiveReach() == survivalReach && mod.lineWidth == 0.2f && mod.style == 2);
     assert(mod.inRangeColor == 0x80123456u && mod.outOfRangeColor == 0xFFABCDEFu);
-    assert(!mod.autoReach && mod.effectiveReach() == 4.5f);
     assert(!mod.showSelf && !mod.showTargets && !mod.showPlayers && mod.showMobs && mod.seeThrough);
     nlohmann::json invalid;
     invalid["inRangeColor"] = "#not-a-color";
@@ -326,14 +433,14 @@ int main() {
     assert(mod.inRangeColor == 0x80123456u);
     nlohmann::json saved;
     mod.saveConfig(saved);
-    assert(saved["reach"].get<float>() == 4.5f);
+    assert(!saved.contains("reach") && !saved.contains("autoReach"));
     assert(saved["lineWidth"].get<float>() == 0.2f);
     assert(saved["inRangeColor"].get<std::string>() == "#80123456");
     assert(saved["outOfRangeColor"].get<std::string>() == "#FFABCDEF");
     assert(saved["effectStyle"].get<std::string>() == jumpcircle::styleRadioValue(2));
-    assert(!saved["autoReach"].get<bool>() && saved["seeThrough"].get<bool>());
+    assert(saved["seeThrough"].get<bool>());
     mod.loadConfig(saved);
-    assert(mod.reach == 4.5f && mod.style == 2 && mod.inRangeColor == 0x80123456u);
+    assert(mod.effectiveReach() == survivalReach && mod.style == 2 && mod.inRangeColor == 0x80123456u);
     for (int i = 0; i < jumpcircle::styleCount; ++i) {
         nlohmann::json choice;
         choice["effectStyle"] = std::to_string(i);
@@ -343,7 +450,8 @@ int main() {
         mod.saveConfig(roundTrip);
         assert(jumpcircle::styleIndex(roundTrip["effectStyle"].get<std::string>()) == i);
     }
-    assert(safeReach(saved["reach"].get<float>()) == 4.5f);
+    assert(safeReach(survivalReach) == survivalReach);
+    assert(safeReach(creativeReach) == creativeReach);
     assert(safeWidth(saved["lineWidth"].get<float>()) == 0.2f);
 
     // A stale snapshot (pause / world change) draws nothing; disable clears it.

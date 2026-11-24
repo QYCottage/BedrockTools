@@ -13,11 +13,17 @@
 #include <bedrocktools/sdk/world/Actor.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -70,9 +76,23 @@ struct MaterialPtr {
 };
 
 constexpr auto pauseTimeout = std::chrono::milliseconds(300);
+constexpr auto attackConfirmWindow = std::chrono::milliseconds(300);
 constexpr float scanPadding = 16.0f;
 constexpr std::size_t maxScannedTargets = 64;
 constexpr std::size_t maxTargetRings = 8;
+// GameMode::attack lives in slot 15 on the 1.26.60 Windows layout and slot 16
+// on the Android layout used by these hooks. Check both; a pointer is accepted
+// only after its vtable passes the signature/vtable checks below.
+constexpr std::size_t gameModeAttackVTableIndices[] = {15, 16};
+// GameMode is a pointer-sized field near the end of Player. A bounded scan
+// finds it if a minor game patch shifts the layout; it only runs until a
+// vtable-validated pointer is found (or once every 20 ticks while unknown).
+constexpr std::size_t gameModeScanStart = 0x900;
+constexpr std::size_t gameModeScanEnd = 0xB40;
+constexpr std::size_t gameModeScanChunk = 0x40;
+constexpr std::uint64_t gameModeScanInterval = 20;
+
+enum class ModeHint { Unknown, Survival, Creative };
 
 HitRangeModule* module = nullptr;
 Begin tessBegin = nullptr;
@@ -83,6 +103,15 @@ RenderLevel originalRender = nullptr;
 LevelGetHitResult levelGetHitResult = nullptr;
 HitResultGetEntity hitResultGetEntity = nullptr;
 FetchNearby fetchNearby = nullptr;
+std::uintptr_t survivalAttackFn = 0;
+std::uintptr_t creativeAttackFn = 0;
+std::uintptr_t creativeInternalFn = 0;
+std::atomic<void**> learnedSurvivalVTable{nullptr};
+std::atomic<void**> learnedCreativeVTable{nullptr};
+std::atomic<std::size_t> gameModeFieldOffset{off::Player::mGameMode};
+std::atomic<std::uint64_t> gameModeTickCounter{0};
+std::atomic<std::uint64_t> lastGameModeScanTick{0};
+std::atomic<void*> lastPolledPlayer{nullptr};
 std::uintptr_t materialGroup = 0;
 MaterialPtr depthMaterial;
 MaterialPtr throughMaterial;
@@ -109,6 +138,13 @@ std::mutex stateMutex;
 State state;
 void* trackedPlayer = nullptr;
 
+struct RecentAttack {
+    void* target = nullptr;
+    Clock::time_point at{};
+};
+std::mutex recentAttackMutex;
+RecentAttack recentAttack;
+
 std::uintptr_t resolveAdrp(std::uint32_t* p, std::size_t count, std::uint32_t reg) {
     for (std::size_t i = 0; i < count; ++i) {
         auto insn = p[i];
@@ -134,6 +170,130 @@ std::uintptr_t resolveAdrp(std::uint32_t* p, std::size_t count, std::uint32_t re
         }
     }
     return 0;
+}
+
+// Reading a candidate GameMode pointer must not crash if a minor game patch
+// shifts the Player layout. process_vm_readv on our own pid safely returns a
+// short read for an unmapped address; using the raw syscall also avoids a
+// link-time dependency on an NDK API-level gate.
+template <typename T>
+bool safeRead(const void* source, T& destination) noexcept {
+    const auto address = reinterpret_cast<std::uintptr_t>(source);
+    if (address < 0x10000 || address % alignof(T) != 0) return false;
+    iovec local{&destination, sizeof(T)};
+    iovec remote{const_cast<void*>(source), sizeof(T)};
+    const long read = ::syscall(__NR_process_vm_readv, ::getpid(),
+                                &local, 1, &remote, 1, 0L);
+    return read == static_cast<long>(sizeof(T));
+}
+
+void** gameModeVTable(void* gameMode) noexcept {
+    if (reinterpret_cast<std::uintptr_t>(gameMode) < 0x10000) return nullptr;
+    void** vtable = nullptr;
+    if (!safeRead(gameMode, vtable) ||
+        reinterpret_cast<std::uintptr_t>(vtable) < 0x10000) return nullptr;
+    return vtable;
+}
+
+bool looksLikeGameMode(void* gameMode) noexcept {
+    void** vtable = gameModeVTable(gameMode);
+    if (!vtable || reinterpret_cast<std::uintptr_t>(vtable) % alignof(void*) != 0) return false;
+    // At least one of the two known attack slots must contain a plausible
+    // code pointer. This rejects random integers at stale layout offsets.
+    for (const auto slot : gameModeAttackVTableIndices) {
+        void* attack = nullptr;
+        if (!safeRead(vtable + slot, attack)) continue;
+        if (reinterpret_cast<std::uintptr_t>(attack) >= 0x10000) return true;
+    }
+    return false;
+}
+
+// The game-mode object's attack vtable slot differs between SurvivalMode and
+// the base/creative GameMode. Signature matching works immediately after a
+// mode switch; learned vtable identities keep detection working on builds
+// where one of the attack signatures is unavailable.
+ModeHint modeFromGameMode(void* gameMode) {
+    void** vtable = gameModeVTable(gameMode);
+    if (!vtable) return ModeHint::Unknown;
+    for (const auto slot : gameModeAttackVTableIndices) {
+        void* attack = nullptr;
+        if (!safeRead(vtable + slot, attack)) continue;
+        const auto address = reinterpret_cast<std::uintptr_t>(attack);
+        if (survivalAttackFn && address == survivalAttackFn) return ModeHint::Survival;
+        if ((creativeAttackFn && address == creativeAttackFn) ||
+            (creativeInternalFn && address == creativeInternalFn)) return ModeHint::Creative;
+    }
+    if (vtable == learnedSurvivalVTable.load(std::memory_order_relaxed)) return ModeHint::Survival;
+    if (vtable == learnedCreativeVTable.load(std::memory_order_relaxed)) return ModeHint::Creative;
+    return ModeHint::Unknown;
+}
+
+void learnGameModeVTable(void* gameMode, bool creative) {
+    void** vtable = gameModeVTable(gameMode);
+    if (!vtable) return;
+    (creative ? learnedCreativeVTable : learnedSurvivalVTable)
+        .store(vtable, std::memory_order_relaxed);
+}
+
+bool acceptGameMode(void* candidate) {
+    if (!looksLikeGameMode(candidate) ||
+        modeFromGameMode(candidate) == ModeHint::Unknown) return false;
+    if (module) module->setGameMode(candidate);
+    return true;
+}
+
+// Minor Bedrock patches can shift Player::mGameMode. A bounded, read-only scan
+// finds the field by requiring both a plausible vtable and a known mode
+// signature/vtable. It is throttled so normal ticks use one cached offset.
+std::size_t findGameModeField(void* rawPlayer, void*& found) {
+    const auto* bytes = reinterpret_cast<const std::byte*>(rawPlayer);
+    for (std::size_t base = gameModeScanStart; base < gameModeScanEnd;
+         base += gameModeScanChunk) {
+        alignas(void*) std::array<std::byte, gameModeScanChunk> chunk{};
+        if (!safeRead(bytes + base, chunk)) continue;
+        for (std::size_t delta = 0; delta + sizeof(void*) <= chunk.size();
+             delta += sizeof(void*)) {
+            void* candidate = nullptr;
+            std::memcpy(&candidate, chunk.data() + delta, sizeof(candidate));
+            if (acceptGameMode(candidate)) {
+                found = candidate;
+                return base + delta;
+            }
+        }
+    }
+    return 0;
+}
+
+// Poll the live Player object every local tick rather than waiting for the
+// next attack/build/interact event: changing /gamemode immediately replaces
+// the GameMode pointer (or its vtable), so the radius changes on that tick.
+void refreshGameModeFromPlayer(void* rawPlayer) {
+    if (!module || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x10000) return;
+    if (lastPolledPlayer.exchange(rawPlayer, std::memory_order_relaxed) != rawPlayer) {
+        gameModeFieldOffset.store(off::Player::mGameMode, std::memory_order_relaxed);
+        lastGameModeScanTick.store(0, std::memory_order_relaxed);
+    }
+    const auto* bytes = reinterpret_cast<const std::byte*>(rawPlayer);
+    static constexpr std::size_t kCandidates[] = {
+        off::Player::mGameMode, off::Player::mGameModeLegacy, off::Player::mGameModeAlt,
+    };
+    const auto cachedOffset = gameModeFieldOffset.load(std::memory_order_relaxed);
+    void* candidate = nullptr;
+    if (cachedOffset && safeRead(bytes + cachedOffset, candidate) &&
+        acceptGameMode(candidate)) return;
+    for (const auto offset : kCandidates) {
+        if (safeRead(bytes + offset, candidate) && acceptGameMode(candidate)) {
+            gameModeFieldOffset.store(offset, std::memory_order_relaxed);
+            return;
+        }
+    }
+    const auto tick = gameModeTickCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto lastScan = lastGameModeScanTick.load(std::memory_order_relaxed);
+    if (tick > 1 && lastScan <= tick && tick - lastScan < gameModeScanInterval) return;
+    lastGameModeScanTick.store(tick, std::memory_order_relaxed);
+    void* found = nullptr;
+    if (const auto offset = findGameModeField(rawPlayer, found))
+        gameModeFieldOffset.store(offset, std::memory_order_relaxed);
 }
 
 MaterialPtr getMaterial(const char* name) {
@@ -166,6 +326,10 @@ void ensureMaterials() {
 }
 
 void clearState() {
+    {
+        std::lock_guard attackLock(recentAttackMutex);
+        recentAttack = {};
+    }
     std::lock_guard lock(stateMutex);
     state = {};
     trackedPlayer = nullptr;
@@ -206,13 +370,27 @@ void tick(void* rawPlayer) {
         clearState();
         return;
     }
+    refreshGameModeFromPlayer(rawPlayer);
     auto* player = reinterpret_cast<bedrocktools::sdk::Actor*>(rawPlayer);
     const AABB playerBox = player->bounds();
     if (!hitrange::validBox(playerBox)) { clearState(); return; }
 
     const auto now = Clock::now();
     const float reach = module->effectiveReach();
-    const auto game = readGameVerdict(rawPlayer);
+    auto game = readGameVerdict(rawPlayer);
+    // On some builds / third-person touch attacks the stored hit result is
+    // stale or reports OutOfRange even though the swing connected. A confirmed
+    // AttackEvent therefore wins for a short window: green means a real hit.
+    {
+        std::lock_guard attackLock(recentAttackMutex);
+        if (recentAttack.target &&
+            reinterpret_cast<std::uintptr_t>(recentAttack.target) >= 0x1000 &&
+            now - recentAttack.at <= attackConfirmWindow) {
+            game.available = true;
+            game.hit = hitrange::GameHit::Entity;
+            game.entity = recentAttack.target;
+        }
+    }
     const hitrange::PlayerView view{hitrange::eyePosition(playerBox),
                                     hitrange::lookVector(player->rotation())};
 
@@ -270,8 +448,9 @@ void tick(void* rawPlayer) {
                 TargetState target;
                 target.actor = actor;
                 target.box = box;
-                // Only the entity the game itself picked may be green. The
-                // eye-ray fallback is used solely when that verdict is absent.
+                // Only the entity the game itself picked (or just confirmed in
+                // an AttackEvent) may be green. The eye-ray fallback is used
+                // solely when that verdict is absent.
                 target.inRange = game.available
                     ? (game.hit == hitrange::GameHit::Entity && game.entity == actor)
                     : hitrange::rayHitsAABB(view.eye, view.look, box, reach);
@@ -385,16 +564,21 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Ground circle that turns green only when the game says your crosshair target is attackable.") {
+    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green only on a real hit target.") {
     module = this;
     hideInHudEditor = true;
 }
 HitRangeModule::~HitRangeModule() { if (module == this) module = nullptr; }
 
 float HitRangeModule::effectiveReach() const {
-    if (!autoReach) return hitrange::safeReach(reach);
+    const auto hint = modeFromGameMode(m_gameMode.load(std::memory_order_relaxed));
+    if (hint == ModeHint::Survival) return hitrange::survivalReach;
+    if (hint == ModeHint::Creative) return hitrange::creativeReach;
     return m_creative.load(std::memory_order_relaxed)
         ? hitrange::creativeReach : hitrange::survivalReach;
+}
+void HitRangeModule::setGameMode(void* gameMode) {
+    m_gameMode.store(gameMode, std::memory_order_relaxed);
 }
 void HitRangeModule::setCreativeMode(bool creative) {
     m_creative.store(creative, std::memory_order_relaxed);
@@ -413,6 +597,9 @@ void HitRangeModule::onInit() {
     levelGetHitResult = reinterpret_cast<LevelGetHitResult>(resolve(SignatureId::LevelGetHitResult));
     hitResultGetEntity = reinterpret_cast<HitResultGetEntity>(resolve(SignatureId::HitResultGetEntity));
     fetchNearby = reinterpret_cast<FetchNearby>(resolve(SignatureId::ActorFetchNearbyActorsSorted));
+    survivalAttackFn = resolve(SignatureId::SurvivalModeAttack);
+    creativeAttackFn = resolve(SignatureId::GameModeAttack);
+    creativeInternalFn = resolve(SignatureId::GameModeAttackInternal);
     auto group = resolve(SignatureId::RenderMaterialGroupCommon);
     if (group) {
         auto address = resolveAdrp(reinterpret_cast<std::uint32_t*>(group), 2, 0);
@@ -420,18 +607,32 @@ void HitRangeModule::onInit() {
     }
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) { tick(event.player); });
-    // GameModeType::GameMode is the creative/base mode; SurvivalMode hooks are
-    // separate. Either an action or an attack reveals the active mode, which
-    // Auto Reach uses for the 3 vs 5 block radius.
+    // Mode events both identify the current mode and teach us its vtable for
+    // builds where an attack signature is missing. The local-player poll is
+    // still responsible for noticing a mode switch before any action occurs.
     bedrocktools::events::bus().subscribe<bedrocktools::events::GameModeActionEvent>(
         [](auto& event) {
-            if (module) module->setCreativeMode(
-                event.modeKind == bedrocktools::events::GameModeType::GameMode);
+            if (!module) return;
+            const bool creative = event.modeKind == bedrocktools::events::GameModeType::GameMode;
+            if (gameModeVTable(event.gameMode)) {
+                module->setGameMode(event.gameMode);
+                learnGameModeVTable(event.gameMode, creative);
+            }
+            module->setCreativeMode(creative);
         });
     bedrocktools::events::bus().subscribe<bedrocktools::events::AttackEvent>(
         [](auto& event) {
-            if (module) module->setCreativeMode(
-                event.kind == bedrocktools::events::AttackKind::GameMode);
+            if (!module) return;
+            const bool creative = event.kind == bedrocktools::events::AttackKind::GameMode;
+            if (gameModeVTable(event.gameMode)) {
+                module->setGameMode(event.gameMode);
+                learnGameModeVTable(event.gameMode, creative);
+            }
+            module->setCreativeMode(creative);
+            if (event.target && reinterpret_cast<std::uintptr_t>(event.target) >= 0x1000) {
+                std::lock_guard attackLock(recentAttackMutex);
+                recentAttack = {event.target, Clock::now()};
+            }
         });
 }
 
@@ -443,13 +644,17 @@ void HitRangeModule::onEnable() {
 }
 void HitRangeModule::onDisable() { clearState(); }
 
+bool HitRangeModule::showInLegacyMenu(std::string_view key) const {
+    // Guard against a stale launcher UI/config callback trying to put the
+    // removed manual controls back into the generic module menu.
+    if (key == "reach" || key == "autoReach") return false;
+    return Module::showInLegacyMenu(key);
+}
+
 void HitRangeModule::loadConfig(const nlohmann::json& j) {
     Module::loadConfig(j);
     if (j.contains("effectStyle") && j["effectStyle"].is_string())
         style = jumpcircle::styleIndex(j["effectStyle"].get<std::string>());
-    if (j.contains("reach")) {
-        try { reach = hitrange::safeReach(j["reach"].get<float>()); } catch (...) {}
-    }
     if (j.contains("lineWidth")) {
         try { lineWidth = hitrange::safeWidth(j["lineWidth"].get<float>()); } catch (...) {}
     }
@@ -457,7 +662,6 @@ void HitRangeModule::loadConfig(const nlohmann::json& j) {
         inRangeColor = hitrange::parseColor(j["inRangeColor"].get<std::string>(), inRangeColor);
     if (j.contains("outOfRangeColor") && j["outOfRangeColor"].is_string())
         outOfRangeColor = hitrange::parseColor(j["outOfRangeColor"].get<std::string>(), outOfRangeColor);
-    if (j.contains("autoReach")) { try { autoReach = j["autoReach"].get<bool>(); } catch (...) {} }
     if (j.contains("showSelf")) { try { showSelf = j["showSelf"].get<bool>(); } catch (...) {} }
     if (j.contains("showTargets")) { try { showTargets = j["showTargets"].get<bool>(); } catch (...) {} }
     if (j.contains("showPlayers")) { try { showPlayers = j["showPlayers"].get<bool>(); } catch (...) {} }
@@ -467,12 +671,15 @@ void HitRangeModule::loadConfig(const nlohmann::json& j) {
 
 void HitRangeModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
-    j["reach"] = hitrange::safeReach(reach);
+    // Old configurations could contain a manual Reach slider or an Auto Reach
+    // toggle. Neither exists now; erase the keys so custom configurations do
+    // not recreate the removed control in the generic module menu.
+    j.erase("reach");
+    j.erase("autoReach");
     j["lineWidth"] = hitrange::safeWidth(lineWidth);
     j["effectStyle"] = jumpcircle::styleRadioValue(style);
     j["inRangeColor"] = hitrange::colorString(inRangeColor);
     j["outOfRangeColor"] = hitrange::colorString(outOfRangeColor);
-    j["autoReach"] = autoReach;
     j["showSelf"] = showSelf;
     j["showTargets"] = showTargets;
     j["showPlayers"] = showPlayers;

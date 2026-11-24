@@ -3,11 +3,14 @@
 #include "../Module.hpp"
 #include <atomic>
 #include <cstdint>
+#include <string_view>
 
 // A native version of the Hit Range ground-circle indicator: a ring at melee
 // reach around your feet and, optionally, around nearby players and mobs.
-// Green follows the game's own crosshair verdict, so it only lights up when an
-// attack would actually land; red means out of range, blocked, or not aimed.
+// The radius is always derived from the detected game mode (3 survival /
+// 5 creative); there is no manual Reach setting. Green follows the game's own
+// crosshair verdict or a just-confirmed attack, so it only lights up when a
+// hit is actually possible.
 class HitRangeModule final : public Module {
 public:
     HitRangeModule();
@@ -17,18 +20,18 @@ public:
     void onDisable() override;
     void loadConfig(const nlohmann::json& j) override;
     void saveConfig(nlohmann::json& j) override;
+    bool showInLegacyMenu(std::string_view key) const override;
 
-    // Auto Reach uses 3 blocks in survival and 5 in creative, learned from the
-    // game's own mode events. Reach is the manual radius used when it is off.
+    // Effective reach in blocks: survival 3, creative 5. Mode is learned from
+    // the game-mode object's vtable and from mode/attack events.
     float effectiveReach() const;
+    void setGameMode(void* gameMode);
     void setCreativeMode(bool creative);
 
-    float reach = 3.0f;
     float lineWidth = 0.10f;
     int style = 0;
     std::uint32_t inRangeColor = 0xFF35D07Fu;
     std::uint32_t outOfRangeColor = 0xFFFF453Au;
-    bool autoReach = true;
     bool showSelf = true;
     bool showTargets = true;
     bool showPlayers = true;
@@ -38,5 +41,6 @@ public:
 private:
     bool m_patched = false;
     void* m_patchTarget = nullptr;
+    std::atomic<void*> m_gameMode{nullptr};
     std::atomic<bool> m_creative{false};
 };
