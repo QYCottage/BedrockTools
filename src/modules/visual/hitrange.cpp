@@ -3,7 +3,9 @@
 #include "hitbox_interp.hpp"
 #include "core/memory/Hooks.hpp"
 #include "core/RenderState.hpp"
+#include <bedrocktools/events/AttackEvent.hpp>
 #include <bedrocktools/events/EventBus.hpp>
+#include <bedrocktools/events/GameModeActionEvent.hpp>
 #include <bedrocktools/events/LocalPlayerTickEvent.hpp>
 #include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
@@ -29,6 +31,7 @@ using Vertex = void (*)(void*, float, float, float);
 using RenderMesh = void (*)(void*, void*, void*, char*);
 using RenderLevel = void (*)(void*, void*, void*);
 using LevelGetHitResult = void* (*)(void*);
+using HitResultGetEntity = void* (*)(void*);
 
 struct DistanceSortedActor {
     void* mActor;
@@ -78,6 +81,7 @@ Vertex tessVertex = nullptr;
 RenderMesh renderMesh = nullptr;
 RenderLevel originalRender = nullptr;
 LevelGetHitResult levelGetHitResult = nullptr;
+HitResultGetEntity hitResultGetEntity = nullptr;
 FetchNearby fetchNearby = nullptr;
 std::uintptr_t materialGroup = 0;
 MaterialPtr depthMaterial;
@@ -94,6 +98,8 @@ struct State {
     bool hasPlayer = false;
     bool targetPresent = false;
     bool inRange = false;
+    hitrange::GameVerdict game{};
+    const void* hittableActor = nullptr;
     hitbox::Track selfTrack{};
     Clock::time_point selfSampleTime{};
     Clock::time_point lastTick{};
@@ -165,20 +171,34 @@ void clearState() {
     trackedPlayer = nullptr;
 }
 
-void readGameVerdict(void* rawPlayer, bool& gameInRange, bool& gameTargetPresent) {
-    if (!levelGetHitResult || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return;
+// The game's HitResult already applies the exact attack/interaction distance,
+// line of sight and camera rules. TypeEntity means "attackable entity under
+// the crosshair"; TypeEntityOutOfRange means an entity is aimed at but too
+// far. Anything else is a block or no hit. This is sampled on the client tick
+// like the Crosshair indicator, never from the render hook.
+hitrange::GameVerdict readGameVerdict(void* rawPlayer) {
+    hitrange::GameVerdict verdict;
+    if (!levelGetHitResult || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return verdict;
     auto* level = reinterpret_cast<bedrocktools::sdk::Actor*>(rawPlayer)->level();
-    if (reinterpret_cast<std::uintptr_t>(level) < 0x1000) return;
+    if (reinterpret_cast<std::uintptr_t>(level) < 0x1000) return verdict;
     void* hit = levelGetHitResult(reinterpret_cast<void*>(level));
-    if (reinterpret_cast<std::uintptr_t>(hit) < 0x1000) return;
+    if (reinterpret_cast<std::uintptr_t>(hit) < 0x1000) return verdict;
+    verdict.available = true;
     const int type = *reinterpret_cast<const int*>(
         reinterpret_cast<std::uintptr_t>(hit) + off::HitResult::mType);
     if (type == off::HitResult::TypeEntity) {
-        gameInRange = true;
-        gameTargetPresent = true;
+        verdict.hit = hitrange::GameHit::Entity;
     } else if (type == off::HitResult::TypeEntityOutOfRange) {
-        gameTargetPresent = true;
+        verdict.hit = hitrange::GameHit::EntityOutOfRange;
+    } else {
+        verdict.hit = hitrange::GameHit::Other;
     }
+    if (hitResultGetEntity &&
+        (verdict.hit == hitrange::GameHit::Entity || verdict.hit == hitrange::GameHit::EntityOutOfRange)) {
+        void* entity = hitResultGetEntity(hit);
+        if (reinterpret_cast<std::uintptr_t>(entity) >= 0x1000) verdict.entity = entity;
+    }
+    return verdict;
 }
 
 void tick(void* rawPlayer) {
@@ -191,9 +211,10 @@ void tick(void* rawPlayer) {
     if (!hitrange::validBox(playerBox)) { clearState(); return; }
 
     const auto now = Clock::now();
-    const float reach = hitrange::safeReach(module->reach);
-    bool gameInRange = false, gameTargetPresent = false;
-    readGameVerdict(rawPlayer, gameInRange, gameTargetPresent);
+    const float reach = module->effectiveReach();
+    const auto game = readGameVerdict(rawPlayer);
+    const hitrange::PlayerView view{hitrange::eyePosition(playerBox),
+                                    hitrange::lookVector(player->rotation())};
 
     // Copy the previous interpolation state, then sample the game outside the
     // lock so the render hook never waits on an actor fetch.
@@ -244,12 +265,16 @@ void tick(void* rawPlayer) {
                 const AABB box = reinterpret_cast<bedrocktools::sdk::Actor*>(actor)->bounds();
                 if (!hitrange::validBox(box)) continue;
                 enemyBoxes.push_back(box);
-                if (nextTargets.size() >= maxTargetRings) continue; // keep checking for the verdict
+                if (nextTargets.size() >= maxTargetRings) continue; // keep scanning for the fallback verdict
 
                 TargetState target;
                 target.actor = actor;
                 target.box = box;
-                target.inRange = hitrange::inReach(playerBox, box, reach);
+                // Only the entity the game itself picked may be green. The
+                // eye-ray fallback is used solely when that verdict is absent.
+                target.inRange = game.available
+                    ? (game.hit == hitrange::GameHit::Entity && game.entity == actor)
+                    : hitrange::rayHitsAABB(view.eye, view.look, box, reach);
                 const Vec3 center = hitrange::feetCenter(box);
                 auto old = std::find_if(previousTargets.begin(), previousTargets.end(),
                     [actor](const TargetState& t) { return t.actor == actor; });
@@ -267,8 +292,7 @@ void tick(void* rawPlayer) {
             }
         }
     }
-    const auto verdict = hitrange::classify(
-        playerBox, enemyBoxes, reach, gameInRange, gameTargetPresent);
+    const auto verdict = hitrange::classify(enemyBoxes, reach, game, view);
 
     {
         std::lock_guard lock(stateMutex);
@@ -276,6 +300,8 @@ void tick(void* rawPlayer) {
         state.hasPlayer = true;
         state.targetPresent = verdict.targetPresent;
         state.inRange = verdict.inRange;
+        state.game = game;
+        state.hittableActor = verdict.hittableActor;
         state.selfTrack = selfTrack;
         state.selfSampleTime = selfSampleTime;
         state.lastTick = now;
@@ -329,7 +355,7 @@ void render(void* renderer, void* screen) {
     }
     if (rings.empty()) return;
 
-    const float reach = hitrange::safeReach(module->reach);
+    const float reach = module->effectiveReach();
     const float width = hitrange::safeWidth(module->lineWidth);
     const auto style = static_cast<jumpcircle::Style>(
         std::clamp(module->style, 0, jumpcircle::styleCount - 1));
@@ -359,11 +385,20 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Draws a red/green ground circle at your melee reach and around nearby targets.") {
+    : Module("Hit Range", "Ground circle that turns green only when the game says your crosshair target is attackable.") {
     module = this;
     hideInHudEditor = true;
 }
 HitRangeModule::~HitRangeModule() { if (module == this) module = nullptr; }
+
+float HitRangeModule::effectiveReach() const {
+    if (!autoReach) return hitrange::safeReach(reach);
+    return m_creative.load(std::memory_order_relaxed)
+        ? hitrange::creativeReach : hitrange::survivalReach;
+}
+void HitRangeModule::setCreativeMode(bool creative) {
+    m_creative.store(creative, std::memory_order_relaxed);
+}
 
 void HitRangeModule::onInit() {
     using bedrocktools::memory::resolve;
@@ -376,6 +411,7 @@ void HitRangeModule::onInit() {
     if (!mesh) mesh = resolve(SignatureId::MeshHelpersRenderMeshImmediately);
     renderMesh = reinterpret_cast<RenderMesh>(mesh);
     levelGetHitResult = reinterpret_cast<LevelGetHitResult>(resolve(SignatureId::LevelGetHitResult));
+    hitResultGetEntity = reinterpret_cast<HitResultGetEntity>(resolve(SignatureId::HitResultGetEntity));
     fetchNearby = reinterpret_cast<FetchNearby>(resolve(SignatureId::ActorFetchNearbyActorsSorted));
     auto group = resolve(SignatureId::RenderMaterialGroupCommon);
     if (group) {
@@ -384,6 +420,19 @@ void HitRangeModule::onInit() {
     }
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) { tick(event.player); });
+    // GameModeType::GameMode is the creative/base mode; SurvivalMode hooks are
+    // separate. Either an action or an attack reveals the active mode, which
+    // Auto Reach uses for the 3 vs 5 block radius.
+    bedrocktools::events::bus().subscribe<bedrocktools::events::GameModeActionEvent>(
+        [](auto& event) {
+            if (module) module->setCreativeMode(
+                event.modeKind == bedrocktools::events::GameModeType::GameMode);
+        });
+    bedrocktools::events::bus().subscribe<bedrocktools::events::AttackEvent>(
+        [](auto& event) {
+            if (module) module->setCreativeMode(
+                event.kind == bedrocktools::events::AttackKind::GameMode);
+        });
 }
 
 void HitRangeModule::onEnable() {
@@ -408,6 +457,7 @@ void HitRangeModule::loadConfig(const nlohmann::json& j) {
         inRangeColor = hitrange::parseColor(j["inRangeColor"].get<std::string>(), inRangeColor);
     if (j.contains("outOfRangeColor") && j["outOfRangeColor"].is_string())
         outOfRangeColor = hitrange::parseColor(j["outOfRangeColor"].get<std::string>(), outOfRangeColor);
+    if (j.contains("autoReach")) { try { autoReach = j["autoReach"].get<bool>(); } catch (...) {} }
     if (j.contains("showSelf")) { try { showSelf = j["showSelf"].get<bool>(); } catch (...) {} }
     if (j.contains("showTargets")) { try { showTargets = j["showTargets"].get<bool>(); } catch (...) {} }
     if (j.contains("showPlayers")) { try { showPlayers = j["showPlayers"].get<bool>(); } catch (...) {} }
@@ -422,6 +472,7 @@ void HitRangeModule::saveConfig(nlohmann::json& j) {
     j["effectStyle"] = jumpcircle::styleRadioValue(style);
     j["inRangeColor"] = hitrange::colorString(inRangeColor);
     j["outOfRangeColor"] = hitrange::colorString(outOfRangeColor);
+    j["autoReach"] = autoReach;
     j["showSelf"] = showSelf;
     j["showTargets"] = showTargets;
     j["showPlayers"] = showPlayers;

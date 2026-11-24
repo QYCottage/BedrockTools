@@ -66,12 +66,12 @@ Jump and landing are inferred from vertical movement, not a verified game-side g
 
 **Hit Range** is a native version of the red/green ground-circle indicator shown in the *Hit range+* texture pack: it draws a ring at melee reach so you can see exactly where an attack is possible.
 
-- **Reach** sets the radius in blocks (3 by default for survival; set it to 5 for creative), **Line Width** sets the ring thickness, and **Effect Style** offers the same 13 shapes as Jump Circle. **In Range Color** is green and **Out Of Range Color** is red by default; both pickers also control opacity.
-- Your own ring turns green as soon as a nearby player or mob's hitbox is within reach, and red otherwise. The game's own crosshair hit result is included too, so creative and item reach bonuses are respected even when the slider is left at 3.
-- **Show Targets** draws the same ring around up to eight nearby enemies: green when that enemy can be hit, red when it cannot. **Show Players** and **Show Mobs** choose which groups count and get a ring; **Show Self** hides your own ring while keeping the target rings.
+- **Auto Reach** (on by default) learns the active mode from the game's own mode/attack events and uses 3 blocks in survival or 5 in creative. Turn it off to use the manual **Reach** slider. **Line Width** sets the ring thickness and **Effect Style** offers the same 13 shapes as Jump Circle. **In Range Color** is green and **Out Of Range Color** is red by default; both pickers also control opacity.
+- Green is now **authoritative**: it follows `Level::getHitResult()` and lights up only for `TypeEntity`, i.e. an entity actually under the crosshair and inside the game's allowed attack distance. `TypeEntityOutOfRange`, a block hit, and no hit stay red. This fixes the reported false green where a mob was merely near the player's collision box but behind a wall, off to the side, or not aimed at — swinging then did no damage.
+- **Show Targets** draws the same ring around up to eight nearby enemies. Only the exact entity the game picked is green; every other ring is red. **Show Players** and **Show Mobs** choose which groups get a ring, and **Show Self** hides your own ring while keeping the target rings.
 - **See Through** switches to a no-depth material when the game build provides one; otherwise the ring is depth-tested and terrain occludes it normally. All rings are local-only, follow their actor between ticks, and never send anything to the server.
 
-The reach test uses the shortest distance between collision boxes rather than centre-to-centre distance, so tall players, large mobs and height differences do not produce false negatives. Nearby actors are sampled on the client tick, while the local player's ring is interpolated from its last two position samples; world changes, pauses and disabling the module clear the overlay.
+When the hit-result signature is unavailable, the module falls back to an eye-height ray/AABB test instead of a plain AABB-to-AABB distance, so an entity behind you or beside you cannot turn the ring green. Nearby actors are sampled on the client tick; the local player's ring is interpolated from its last two position samples. World changes, pauses and disabling the module clear the overlay.
 
 ## Inventory HUD
 
