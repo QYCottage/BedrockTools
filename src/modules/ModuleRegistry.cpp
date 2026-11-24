@@ -5,6 +5,7 @@
 #include "visual/blockoutline.hpp"
 #include "visual/jumpcircle.hpp"
 #include "visual/damagecircle.hpp"
+#include "visual/hitrange.hpp"
 #include "misc/commentkey.hpp"
 #include "misc/commandhotkey.hpp"
 #include "hud/crosshair.hpp"
@@ -78,4 +79,5 @@ void registerAllModules() {
     registry.emplace<ArmorModule>();
     registry.emplace<JumpCircleModule>();
     registry.emplace<DamageCircleModule>();
+    registry.emplace<HitRangeModule>();
 }
