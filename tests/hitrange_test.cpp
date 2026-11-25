@@ -1,4 +1,4 @@
-// Integration test for the Hit Range tick sampler, in-range/frontal/LOS
+// Integration test for the Hit Range tick sampler, camera-independent range/LOS
 // verdict, stable attack-frame rings, auto-detected survival/creative reach and
 // ring renderer using fake game memory.
 #include <array>
@@ -29,22 +29,19 @@ std::vector<void*> materials;
 fake_render::GpuColor gpu;
 
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_level{};
-alignas(std::max_align_t) std::array<std::byte, 0x100> g_hitResult{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_dimension{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_region{};
-void* g_pickedActor = nullptr;
 bool g_wall = false;
+bool g_lowWall = false;
 std::vector<DistanceSortedActor> g_nearby;
 
-void* fakeLevelGetHitResult(void*) { return g_hitResult.data(); }
-void* fakeHitResultGetEntity(void*) { return g_pickedActor; }
 ActorVec fakeFetch(void*, void*, int) {
     return ActorVec{g_nearby.data(), g_nearby.data() + g_nearby.size(),
                     g_nearby.data() + g_nearby.size()};
 }
-bool fakeIsSolid(void* region, const BlockPosI&) {
+bool fakeIsSolid(void* region, const BlockPosI& position) {
     assert(region == g_region.data());
-    return g_wall;
+    return g_wall || (g_lowWall && position.y == 64);
 }
 void fakeBegin(void*, void*, int mode, int count, int) {
     assert(mode == 1);
@@ -71,10 +68,11 @@ void resetDraw() {
     colors.clear();
     materials.clear();
 }
-void fresh(bool wall = false) {
+void fresh(bool wall = false, bool lowWall = false) {
     clearState();
     resetDraw();
     g_wall = wall;
+    g_lowWall = lowWall;
 }
 
 template <typename T, std::size_t N>
@@ -117,10 +115,6 @@ void expectColor(std::size_t index, std::uint32_t value) {
     assert(std::abs(colors[index][1] - g) < 0.001f);
     assert(std::abs(colors[index][2] - b) < 0.001f);
 }
-void setHit(int type, void* picked = nullptr) {
-    put(g_hitResult, off::HitResult::mType, type);
-    g_pickedActor = picked;
-}
 } // namespace
 
 int main() {
@@ -138,7 +132,6 @@ int main() {
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     targetMob.set(offCrosshairBox, off::ActorCategories::IsMob);
     distantMob.set(farMobBox, off::ActorCategories::IsMob);
-    setHit(off::HitResult::TypeNoHit);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f},
                 {targetMob.ptr(), 2.4f, 0.0f},
                 {distantMob.ptr(), 7.0f, 0.0f}};
@@ -164,8 +157,6 @@ int main() {
     tessColor = fakeColor;
     tessVertex = fakeVertex;
     renderMesh = fakeFlush;
-    levelGetHitResult = fakeLevelGetHitResult;
-    hitResultGetEntity = fakeHitResultGetEntity;
     fetchNearby = fakeFetch;
     isSolidBlockingBlock = fakeIsSolid;
     materialGroup = 1;
@@ -173,12 +164,11 @@ int main() {
     throughMaterial.data[0] = &vertices;
     mod.showMobs = true;
 
-    // Problem 3: TypeNoHit (crosshair not on an entity) still turns both the
-    // self and every qualifying in-range/frontal/visible target ring green.
+    // Problem 5: green is determined only by eye distance and native LOS.
+    // No crosshair HitResult or camera direction is sampled by the module.
     fresh();
     tick(player.ptr());
-    assert(state.hasPlayer && state.game.available);
-    assert(state.game.hit == GameHit::Other);
+    assert(state.hasPlayer);
     assert(state.hittableActor == targetPlayer.ptr());
     assert(state.targetPresent && state.inRange && state.reach == survivalReach);
     assert(state.targets.size() == 3);
@@ -192,14 +182,30 @@ int main() {
     assert(colors.size() == static_cast<std::size_t>(vertices));
     expectColor(0, mod.inRangeColor);                  // own ring: green
     expectColor(vertexCount, mod.inRangeColor);        // front player: green
-    expectColor(2 * vertexCount, mod.inRangeColor);    // off-crosshair mob: green
+    expectColor(2 * vertexCount, mod.inRangeColor);    // off-axis mob: green
     expectColor(3 * vertexCount, mod.outOfRangeColor); // distant mob: red
     assert(materials.back() == &depthMaterial);
     assert((gpu.rgba == fake_render::Color{1, 1, 1, 1}));
     assert((color.rgba == fake_render::Color{.2f, .3f, .4f, .5f}) && color.dirty == 1);
     assert((legacy.rgba == fake_render::Color{.7f, .6f, .5f, .4f}));
 
-    // A solid wall vetoes the frontal targets: no behind-wall false green.
+    // A 180-degree screen rotation must not change any ring color or radius.
+    fresh();
+    player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data(), Vec2{0, 180});
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && state.reach == survivalReach);
+    assert(state.targets.size() == 3);
+    assert(state.targets[0].inRange && state.targets[1].inRange &&
+           !state.targets[2].inRange);
+    resetDraw();
+    render(renderer.data(), screen.data());
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+    expectColor(2 * vertexCount, mod.inRangeColor);
+    expectColor(3 * vertexCount, mod.outOfRangeColor);
+    player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
+
+    // A solid wall vetoes every target: no behind-wall false green.
     fresh(true);
     tick(player.ptr());
     assert(state.targetPresent && !state.inRange);
@@ -209,49 +215,46 @@ int main() {
     expectColor(0, mod.outOfRangeColor);
     expectColor(vertexCount, mod.outOfRangeColor);
 
-    // The game's explicit out-of-range entity verdict remains authoritative.
-    fresh();
-    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
-    setHit(off::HitResult::TypeEntityOutOfRange, targetPlayer.ptr());
+    // A partially visible target (head line clear, body line blocked) must
+    // stay red: problem 5 showed that a permissive green could fail to hit.
+    fresh(false, true);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}}; // frontBox: center line blocked
     tick(player.ptr());
-    assert(state.game.hit == GameHit::EntityOutOfRange);
-    assert(state.targetPresent && !state.inRange && !state.targets[0].inRange);
+    assert(state.targetPresent && !state.inRange);
+    assert(state.targets.size() == 1 && !state.targets[0].inRange);
 
-    // Plain radial/AABB proximity is still not enough: side/behind stay red.
+    // A target beside/behind the player is eligible when inside reach with a
+    // clear sight line; plain AABB proximity alone still cannot beat a wall.
     fresh();
     targetPlayer.set(nearBox, off::ActorCategories::IsPlayer);
     targetMob.set(behindBox, off::ActorCategories::IsMob);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}, {targetMob.ptr(), 2.3f, 0.0f}};
-    setHit(off::HitResult::TypeNoHit);
     tick(player.ptr());
-    assert(state.targetPresent && !state.inRange);
-    assert(!state.targets[0].inRange && !state.targets[1].inRange);
+    assert(state.targetPresent && state.inRange);
+    assert(state.targets[0].inRange && state.targets[1].inRange);
+    fresh(true);
+    tick(player.ptr());
+    assert(!state.inRange && !state.targets[0].inRange);
 
-    // Without the native solid-block signature, fail closed to exact TypeEntity.
+    // Without the native solid-block signature, fail closed to red. There is
+    // no exact TypeEntity/crosshair fallback that can promise a false hit.
     fresh();
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
     isSolidBlockingBlock = nullptr;
-    setHit(off::HitResult::TypeEntity, targetPlayer.ptr());
-    tick(player.ptr());
-    assert(state.inRange && state.targets[0].inRange);
-    fresh();
-    setHit(off::HitResult::TypeNoHit);
     tick(player.ptr());
     assert(!state.inRange && !state.targets[0].inRange);
     isSolidBlockingBlock = fakeIsSolid;
 
-    // A confirmed attack does not override the hit result or flash the rings,
-    // and a GameMode-labelled attack cannot resize them from 3 to 5 blocks.
-    fresh();
+    // A confirmed attack cannot flash a false green or resize the rings from
+    // 3 to 5 blocks. A solid wall is an authoritative range/LOS red verdict.
+    fresh(true);
     targetPlayer.set(nearBox, off::ActorCategories::IsPlayer);
-    setHit(off::HitResult::TypeEntityOutOfRange, targetPlayer.ptr());
     bedrocktools::events::AttackEvent badHint{
         bedrocktools::events::AttackKind::GameMode, nullptr,
         reinterpret_cast<bedrocktools::sdk::Actor*>(targetPlayer.ptr()), nullptr, nullptr};
     bedrocktools::events::bus().publish(badHint);
     tick(player.ptr());
-    assert(state.game.hit == GameHit::EntityOutOfRange);
     assert(!state.inRange && !state.targets[0].inRange);
     assert(mod.effectiveReach() == survivalReach);
 
@@ -259,7 +262,6 @@ int main() {
     fresh();
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
-    setHit(off::HitResult::TypeNoHit);
     tick(player.ptr());
     assert(state.inRange && state.targets.size() == 1);
     bedrocktools::events::AttackEvent hit{
@@ -293,7 +295,6 @@ int main() {
     fresh();
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
-    setHit(off::HitResult::TypeNoHit);
     tick(player.ptr());
     const float beforeX = state.targets[0].stableCenter.x;
     targetPlayer.set(farPlayerBox, off::ActorCategories::IsPlayer);
@@ -307,7 +308,6 @@ int main() {
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     targetMob.set(farMobBox, off::ActorCategories::IsMob);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}, {targetMob.ptr(), 7.0f, 0.0f}};
-    setHit(off::HitResult::TypeNoHit);
     mod.showMobs = false;
     tick(player.ptr());
     assert(state.targets.size() == 1 && state.inRange);

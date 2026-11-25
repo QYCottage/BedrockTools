@@ -6,15 +6,18 @@
 
 namespace {
 bool alwaysClear(const void*, int, int, int) { return false; }
+bool alwaysSolid(const void*, int, int, int) { return true; }
 // A one-block-high wall across z=1, at the eye's Y level. Both the centre and
 // head sight lines from the test eye pass through it.
 bool frontWall(const void*, int, int y, int z) { return z == 1 && y == 65; }
+// Blocks the centre sight line at y=64 but leaves the head line at y=65 clear.
+// Problem 5 requires both lines, so this partial view must stay red.
+bool lowWall(const void*, int, int y, int z) { return z == 1 && y == 64; }
 }
 
 int main() {
     using namespace hitrange;
     using bedrocktools::sdk::AABB;
-    using bedrocktools::sdk::Vec2;
     using bedrocktools::sdk::Vec3;
 
     assert(survivalReach == 3.0f && creativeReach == 5.0f);
@@ -46,12 +49,6 @@ int main() {
     assert(std::abs(feetCenter(player).y - (64.0f + groundLift)) < 0.0001f);
     assert(std::abs(eyePosition(player).y - (64.0f + 1.62f)) < 0.0001f);
     const Vec3 eye = eyePosition(player);
-    const Vec3 forward = lookVector(Vec2{0, 0});
-    assert(std::abs(forward.x) < 0.0001f && std::abs(forward.y) < 0.0001f);
-    assert(std::abs(forward.z - 1.0f) < 0.0001f);
-    const Vec3 down = lookVector(Vec2{90, 0});
-    assert(std::abs(down.y + 1.0f) < 0.0001f);
-    assert(std::abs(std::hypot(down.x, down.z)) < 0.0001f);
 
     assert(boxesWithin(player, nearSide, 3.0f));
     assert(!boxesWithin(player, far, 3.0f));
@@ -62,28 +59,13 @@ int main() {
     assert(pointBoxDistanceSq(eye, far) > 9.0f);
     assert(std::isinf(pointBoxDistanceSq(eye, AABB{{NAN, 0, 0}, {1, 1, 1}})));
 
-    // The exact-crosshair ray remains available for the unsupported-build
-    // fallback, but it is no longer the only way to qualify.
-    assert(rayHitsAABB(eye, forward, nearFront, 3.0f));
-    assert(!rayHitsAABB(eye, forward, nearBehind, 3.0f));
-    assert(!rayHitsAABB(eye, forward, nearSide, 3.0f));
-    assert(!rayHitsAABB(eye, forward, far, 3.0f));
-    assert(!rayHitsAABB(eye, forward, nearFront, 1.0f));
-    assert(!rayHitsAABB(eye, Vec3{0, 0, 0}, nearFront, 3.0f));
-    assert(!rayHitsAABB(eye, forward, tall, 3.0f));
-
-    // Frontal arc: in front and off the crosshair qualify, beside/behind do not.
-    assert(inFrontCone(eye, forward, nearFront));
-    assert(inFrontCone(eye, forward, offCrosshair));
-    assert(!inFrontCone(eye, forward, nearSide));
-    assert(!inFrontCone(eye, forward, nearBehind));
-    assert(!inFrontCone(eye, Vec3{0, 0, 0}, nearFront));
-
-    const PlayerView view{eye, forward};
     const SightTest clear{nullptr, &alwaysClear};
-    const SightTest wall{nullptr, &frontWall};
+    const SightTest solidWall{nullptr, &alwaysSolid};
+    const SightTest frontWallSight{nullptr, &frontWall};
+    const SightTest lowWallSight{nullptr, &lowWall};
     assert(hasClearLineOfSight(eye, nearFront, clear));
-    assert(!hasClearLineOfSight(eye, nearFront, wall));
+    assert(!hasClearLineOfSight(eye, nearFront, frontWallSight));
+    assert(!hasClearLineOfSight(eye, nearFront, lowWallSight));
     assert(!hasClearLineOfSight(eye, nearFront, SightTest{}));
     assert(!sightRayHitsSolid(eye, Vec3{0, 65.62f, 0}, clear));
 
@@ -95,41 +77,44 @@ int main() {
         {&frontActor, nearFront}, {&sideActor, nearSide},
         {&behindActor, nearBehind}, {&offActor, offCrosshair},
     };
-    // No exact crosshair needed: TypeNoHit plus clear sight still greens both
-    // front and off-axis targets, while side/behind targets stay red.
-    auto noCrosshair = classify(mixed, 3.0f,
-        GameVerdict{true, GameHit::Other, nullptr}, view, clear);
+    // Problem 5: green is a camera-independent range/LOS verdict. Every nearby
+    // unobstructed target qualifies, whether it is in front, beside, behind or
+    // off the crosshair. No camera direction or HitResult is an input.
+    auto noCrosshair = classify(mixed, 3.0f, eye, clear);
     assert(noCrosshair.targetPresent && noCrosshair.inRange);
-    assert(noCrosshair.hittableActors.size() == 2);
+    assert(noCrosshair.hittableActors.size() == 4);
     assert(noCrosshair.hittableActors[0] == &frontActor);
-    assert(noCrosshair.hittableActors[1] == &offActor);
+    assert(noCrosshair.hittableActors[1] == &sideActor);
+    assert(noCrosshair.hittableActors[2] == &behindActor);
+    assert(noCrosshair.hittableActors[3] == &offActor);
     assert(noCrosshair.hittableActor == &frontActor);
+
+    // Simulated 180-degree screen rotation: classify() has no look parameter,
+    // so the eye/range/LOS result is exactly unchanged.
+    auto turned = classify(mixed, 3.0f, eye, clear);
+    assert(turned.inRange && turned.hittableActors.size() == 4);
+    assert(turned.hittableActors == noCrosshair.hittableActors);
 
     // A wall between eye and target rejects every candidate; this is not plain
     // radial AABB proximity and cannot produce a behind-wall false green.
-    auto occluded = classify(mixed, 3.0f, GameVerdict{}, view, wall);
+    auto occluded = classify(mixed, 3.0f, eye, solidWall);
     assert(occluded.targetPresent && !occluded.inRange &&
            occluded.hittableActors.empty());
-
-    // The game's explicit out-of-range entity verdict remains a veto.
-    auto outOfRange = classify({{&frontActor, nearFront}}, 3.0f,
-        GameVerdict{true, GameHit::EntityOutOfRange, &frontActor}, view, clear);
-    assert(outOfRange.targetPresent && !outOfRange.inRange);
+    auto partialView = classify({{&frontActor, nearFront}}, 3.0f, eye, lowWallSight);
+    assert(partialView.targetPresent && !partialView.inRange);
 
     // Distance is measured from the eye to the target box, not from boxes.
-    auto tooFar = classify({{&sideActor, far}}, 3.0f, GameVerdict{}, view, clear);
+    auto tooFar = classify({{&sideActor, far}}, 3.0f, eye, clear);
     assert(tooFar.targetPresent && !tooFar.inRange);
-    auto creativeFar = classify({{&sideActor, far}}, 5.0f, GameVerdict{}, view, clear);
-    assert(creativeFar.targetPresent && !creativeFar.inRange); // still beside/behind
+    auto creativeFar = classify({{&sideActor, far}}, 5.0f, eye, clear);
+    assert(creativeFar.targetPresent && creativeFar.inRange);
 
-    // With no solid-block signature, fail closed to the exact game TypeEntity.
-    auto fallbackEntity = classify({{&frontActor, nearFront}}, 3.0f,
-        GameVerdict{true, GameHit::Entity, &frontActor}, view);
-    assert(fallbackEntity.inRange && fallbackEntity.hittableActor == &frontActor);
-    auto fallbackOther = classify({{&frontActor, nearFront}}, 3.0f,
-        GameVerdict{true, GameHit::Other, nullptr}, view);
-    assert(fallbackOther.targetPresent && !fallbackOther.inRange);
-    auto empty = classify({}, 3.0f, GameVerdict{}, view, clear);
+    // No solid-block signature: fail closed to red. There is no TypeEntity or
+    // exact-crosshair fallback that can promise a hit through an unseen wall.
+    auto noSignature = classify({{&frontActor, nearFront}}, 3.0f, eye);
+    assert(noSignature.targetPresent && !noSignature.inRange &&
+           noSignature.hittableActor == nullptr);
+    auto empty = classify({}, 3.0f, eye, clear);
     assert(!empty.targetPresent && !empty.inRange && empty.hittableActor == nullptr);
 
     VerdictHold hold;
@@ -187,5 +172,5 @@ int main() {
         assert(std::abs(a.x - b.x) < 0.00001f && std::abs(a.z - b.z) < 0.00001f);
     }
 
-    std::puts("hitrange range, frontal LOS, stability and ring geometry: OK");
+    std::puts("hitrange camera-independent range, strict LOS, stability and ring geometry: OK");
 }

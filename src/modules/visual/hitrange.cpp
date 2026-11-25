@@ -36,8 +36,6 @@ using TessColor = void (*)(void*, float, float, float, float);
 using Vertex = void (*)(void*, float, float, float);
 using RenderMesh = void (*)(void*, void*, void*, char*);
 using RenderLevel = void (*)(void*, void*, void*);
-using LevelGetHitResult = void* (*)(void*);
-using HitResultGetEntity = void* (*)(void*);
 
 // BlockSource::isSolidBlockingBlock(BlockPos const&), the same native query
 // used by the Hitbox wall-occlusion pass.
@@ -110,8 +108,6 @@ TessColor tessColor = nullptr;
 Vertex tessVertex = nullptr;
 RenderMesh renderMesh = nullptr;
 RenderLevel originalRender = nullptr;
-LevelGetHitResult levelGetHitResult = nullptr;
-HitResultGetEntity hitResultGetEntity = nullptr;
 FetchNearby fetchNearby = nullptr;
 IsSolidBlockingBlock isSolidBlockingBlock = nullptr;
 std::uintptr_t survivalAttackFn = 0;
@@ -142,7 +138,6 @@ struct State {
     bool hasPlayer = false;
     bool targetPresent = false;
     bool inRange = false;
-    hitrange::GameVerdict game{};
     const void* hittableActor = nullptr;
     float reach = hitrange::survivalReach;
     hitbox::Track selfTrack{};
@@ -366,36 +361,6 @@ void clearState() {
     trackedPlayer = nullptr;
 }
 
-// The game's HitResult is no longer the crosshair-only gate. It supplies an
-// exact TypeEntity fallback if the native occlusion query is missing, and an
-// authoritative TypeEntityOutOfRange veto for a target the game says is too
-// far. TypeBlock/TypeNoHit do not veto a different target in the frontal cone.
-// Sampling happens on the client tick, never from the render hook.
-hitrange::GameVerdict readGameVerdict(void* rawPlayer) {
-    hitrange::GameVerdict verdict;
-    if (!levelGetHitResult || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return verdict;
-    auto* level = reinterpret_cast<bedrocktools::sdk::Actor*>(rawPlayer)->level();
-    if (reinterpret_cast<std::uintptr_t>(level) < 0x1000) return verdict;
-    void* hit = levelGetHitResult(reinterpret_cast<void*>(level));
-    if (reinterpret_cast<std::uintptr_t>(hit) < 0x1000) return verdict;
-    verdict.available = true;
-    const int type = *reinterpret_cast<const int*>(
-        reinterpret_cast<std::uintptr_t>(hit) + off::HitResult::mType);
-    if (type == off::HitResult::TypeEntity) {
-        verdict.hit = hitrange::GameHit::Entity;
-    } else if (type == off::HitResult::TypeEntityOutOfRange) {
-        verdict.hit = hitrange::GameHit::EntityOutOfRange;
-    } else {
-        verdict.hit = hitrange::GameHit::Other;
-    }
-    if (hitResultGetEntity &&
-        (verdict.hit == hitrange::GameHit::Entity || verdict.hit == hitrange::GameHit::EntityOutOfRange)) {
-        void* entity = hitResultGetEntity(hit);
-        if (reinterpret_cast<std::uintptr_t>(entity) >= 0x1000) verdict.entity = entity;
-    }
-    return verdict;
-}
-
 // Resolve the dimension's BlockSource through safely checked pointers. The
 // module only reads it; it never changes world state or sends packets.
 void* occlusionRegion(void* rawPlayer) noexcept {
@@ -432,9 +397,9 @@ void tick(void* rawPlayer) {
     // Cache the radius for this tick as well: the render hook must not read a
     // mode hint that changes between the tick and the draw call.
     const float reach = module->effectiveReach();
-    const auto game = readGameVerdict(rawPlayer);
-    const hitrange::PlayerView view{hitrange::eyePosition(playerBox),
-                                    hitrange::lookVector(player->rotation())};
+    // Problem 5: only the eye position and native sight test decide green.
+    // Camera rotation and the crosshair HitResult are deliberately not read.
+    const Vec3 eye = hitrange::eyePosition(playerBox);
     void* region = occlusionRegion(rawPlayer);
     const hitrange::SightTest sight{
         region, (region && isSolidBlockingBlock) ? &nativeSolidBlock : nullptr};
@@ -512,7 +477,7 @@ void tick(void* rawPlayer) {
                 const hitrange::TargetCandidate candidate{actor, box};
                 candidates.push_back(candidate);
                 const bool rawInRange = hitrange::candidateHittable(
-                    candidate, reach, game, view, sight);
+                    candidate, reach, eye, sight);
                 if (nextTargets.size() >= maxTargetRings) continue; // keep scanning for the verdict
 
                 TargetState target;
@@ -560,7 +525,7 @@ void tick(void* rawPlayer) {
         nextTargets.push_back(std::move(held));
     }
 
-    const auto verdict = hitrange::classify(candidates, reach, game, view, sight);
+    const auto verdict = hitrange::classify(candidates, reach, eye, sight);
     const bool stableInRange = verdictHold.update(verdict.inRange, nowSeconds);
 
     {
@@ -569,7 +534,6 @@ void tick(void* rawPlayer) {
         state.hasPlayer = true;
         state.targetPresent = verdict.targetPresent || !nextTargets.empty();
         state.inRange = stableInRange;
-        state.game = game;
         state.hittableActor = verdict.hittableActor;
         state.reach = reach;
         state.selfTrack = selfTrack;
@@ -659,7 +623,7 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green for an in-range, frontal, visible target.") {
+    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green for an in-range, unobstructed target regardless of camera aim.") {
     module = this;
     hideInHudEditor = true;
 }
@@ -701,8 +665,6 @@ void HitRangeModule::onInit() {
     auto mesh = resolve(SignatureId::MeshHelpersRenderMeshImmediately2);
     if (!mesh) mesh = resolve(SignatureId::MeshHelpersRenderMeshImmediately);
     renderMesh = reinterpret_cast<RenderMesh>(mesh);
-    levelGetHitResult = reinterpret_cast<LevelGetHitResult>(resolve(SignatureId::LevelGetHitResult));
-    hitResultGetEntity = reinterpret_cast<HitResultGetEntity>(resolve(SignatureId::HitResultGetEntity));
     fetchNearby = reinterpret_cast<FetchNearby>(resolve(SignatureId::ActorFetchNearbyActorsSorted));
     isSolidBlockingBlock = reinterpret_cast<IsSolidBlockingBlock>(
         resolve(SignatureId::BlockSourceIsSolidBlockingBlock));
@@ -740,7 +702,7 @@ void HitRangeModule::onInit() {
             }
         });
     // A hit only latches the target's stable ring for the short hold window.
-    // It does not override the crosshair verdict, color, mode or radius.
+    // It does not override the range/LOS verdict, color, mode or radius.
     bedrocktools::events::bus().subscribe<bedrocktools::events::AttackEvent>(
         [](auto& event) {
             if (!module) return;

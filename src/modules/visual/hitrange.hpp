@@ -11,7 +11,8 @@
 // reach around your feet and, optionally, around nearby players and mobs.
 // The radius is always derived from the detected game mode (3 survival /
 // 5 creative); there is no manual Reach setting. Green follows an in-range,
-// frontal, unobstructed target rather than the exact crosshair, and attack
+// unobstructed target and is independent of camera/crosshair rotation, so
+// turning the screen no longer changes a reachable target to red. Attack
 // frames cannot resize, flash or briefly drop the rings.
 class HitRangeModule final : public Module {
 public:
