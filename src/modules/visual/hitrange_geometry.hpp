@@ -2,12 +2,13 @@
 
 // Pure geometry and configuration helpers for the Hit Range overlay.
 //
-// The reference effect is a thin ground ring at melee reach. Green must mean
-// "the game would actually let me hit the entity under the crosshair", not
-// merely "some entity happens to be within three blocks of my collision box".
-// The authoritative verdict comes from Level::getHitResult(); the ray/AABB
-// helpers below are only a fallback for builds where that signature is
-// missing. Keeping them here makes the reach test testable on the host.
+// Green means "an eligible player/mob is inside the automatic 3/5-block reach,
+// in the player's frontal arc and not hidden behind solid terrain". It does NOT
+// require the crosshair to be exactly on that entity, but it is also not plain
+// AABB proximity: targets behind the player or behind a wall stay red. The
+// native BlockSource solid-block query supplies occlusion; when that signature
+// is unavailable, only the game's exact TypeEntity verdict is allowed as a
+// fail-closed fallback. These helpers are host-testable without Minecraft.
 
 #include "hitbox_interp.hpp"
 #include "jumpcircle_geometry.hpp"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +38,16 @@ inline constexpr float groundLift = 0.03f;   // avoids z-fighting with the floor
 inline constexpr int segments = jumpcircle::segments;
 inline constexpr int bands = jumpcircle::bands;
 inline constexpr int vertexCount = segments * bands * 4;
+
+// A broad frontal arc (~75 degrees to either side) is deliberately more
+// permissive than the exact crosshair ray, while still rejecting entities
+// beside or behind the player.
+inline constexpr float frontCosine = 0.25f;
+inline constexpr int maxSightVoxels = 128;
+// Short holds suppress hit-frame flashes without leaving stale green state.
+inline constexpr double greenHoldSeconds = 0.18;
+inline constexpr float maxCenterStep = 0.75f; // blocks per sampled tick
+inline constexpr int modeConfirmations = 2;
 
 inline constexpr std::uint32_t defaultInRangeColor = 0xFF35D07Fu;    // green
 inline constexpr std::uint32_t defaultOutOfRangeColor = 0xFFFF453Au; // red
@@ -74,6 +86,10 @@ inline bool validBox(const bedrocktools::sdk::AABB& box) {
            box.max.x >= box.min.x && box.max.y >= box.min.y && box.max.z >= box.min.z;
 }
 
+inline bedrocktools::sdk::Vec3 boxCenter(const bedrocktools::sdk::AABB& box) {
+    return {(box.min.x + box.max.x) * 0.5f, (box.min.y + box.max.y) * 0.5f,
+            (box.min.z + box.max.z) * 0.5f};
+}
 inline bedrocktools::sdk::Vec3 feetCenter(const bedrocktools::sdk::AABB& box,
                                            float lift = groundLift) {
     return {(box.min.x + box.max.x) * 0.5f, box.min.y + lift,
@@ -82,7 +98,7 @@ inline bedrocktools::sdk::Vec3 feetCenter(const bedrocktools::sdk::AABB& box,
 
 // Bedrock measures melee reach from the eye, not from the feet or the AABB
 // centre. The eye is clamped to the box height so sneaking/shrinking does not
-// put the fallback ray above the player's head.
+// put the sight ray above the player's head.
 inline bedrocktools::sdk::Vec3 eyePosition(const bedrocktools::sdk::AABB& box) {
     const float height = std::max(0.0f, box.max.y - box.min.y);
     const float eyeHeight = std::min(1.62f, height * 0.9f);
@@ -109,8 +125,8 @@ inline float axisGap(float aMin, float aMax, float bMin, float bMax) {
 }
 
 // Shortest distance between two collision boxes. Retained for diagnostics and
-// host tests; it is deliberately NOT used to decide the green/red state any
-// more, because a nearby but unaimed/occluded entity is not attackable.
+// host tests; the green/red decision uses eye-to-target-box distance, a frontal
+// cone, and solid-block line of sight, never this box-to-box proximity alone.
 inline float boxDistanceSq(const bedrocktools::sdk::AABB& a,
                            const bedrocktools::sdk::AABB& b) {
     const float dx = axisGap(a.min.x, a.max.x, b.min.x, b.max.x);
@@ -123,9 +139,18 @@ inline bool boxesWithin(const bedrocktools::sdk::AABB& player,
     const float limit = safeReach(reach);
     return boxDistanceSq(player, target) <= limit * limit;
 }
+inline float pointBoxDistanceSq(const bedrocktools::sdk::Vec3& point,
+                                const bedrocktools::sdk::AABB& box) {
+    if (!validBox(box)) return std::numeric_limits<float>::infinity();
+    const float dx = axisGap(point.x, point.x, box.min.x, box.max.x);
+    const float dy = axisGap(point.y, point.y, box.min.y, box.max.y);
+    const float dz = axisGap(point.z, point.z, box.min.z, box.max.z);
+    return dx * dx + dy * dy + dz * dz;
+}
 
 // Slab ray/AABB intersection. `direction` must be normalized; a zero-length
 // direction is treated as a miss. Only a hit inside [0, maxDistance] counts.
+// Retained for the exact-crosshair fallback and diagnostics.
 inline bool rayHitsAABB(const bedrocktools::sdk::Vec3& origin,
                         const bedrocktools::sdk::Vec3& direction,
                         const bedrocktools::sdk::AABB& box, float maxDistance) {
@@ -154,9 +179,28 @@ inline bool rayHitsAABB(const bedrocktools::sdk::Vec3& origin,
     return true;
 }
 
+// True when the target's centre lies in the forward cone. `look` may be
+// non-unit; comparing squared cosine keeps the test scale-independent.
+inline bool inFrontCone(const bedrocktools::sdk::Vec3& eye,
+                        const bedrocktools::sdk::Vec3& look,
+                        const bedrocktools::sdk::AABB& box,
+                        float minimumCosine = frontCosine) {
+    if (!validBox(box)) return false;
+    const auto center = boxCenter(box);
+    const bedrocktools::sdk::Vec3 to{center.x - eye.x, center.y - eye.y, center.z - eye.z};
+    const float lookSq = look.x * look.x + look.y * look.y + look.z * look.z;
+    const float toSq = to.x * to.x + to.y * to.y + to.z * to.z;
+    if (!(lookSq > 0.0f) || !(toSq > 0.0f) ||
+        !std::isfinite(lookSq) || !std::isfinite(toSq)) return false;
+    const float dot = to.x * look.x + to.y * look.y + to.z * look.z;
+    if (!(dot > 0.0f)) return false;
+    const float cosine = std::clamp(minimumCosine, 0.0f, 1.0f);
+    return dot * dot >= cosine * cosine * lookSq * toSq;
+}
+
 enum class GameHit : std::uint8_t {
     Unknown,          // signature missing or unreadable hit result
-    Entity,           // HitResult::TypeEntity: attackable entity under crosshair
+    Entity,           // HitResult::TypeEntity: entity under the crosshair
     EntityOutOfRange, // HitResult::TypeEntityOutOfRange
     Other,            // block / no hit / any other type
 };
@@ -169,40 +213,214 @@ struct GameVerdict {
 
 struct PlayerView {
     bedrocktools::sdk::Vec3 eye{};
-    bedrocktools::sdk::Vec3 look{}; // normalized
+    bedrocktools::sdk::Vec3 look{}; // normally normalized
 };
+
+struct TargetCandidate {
+    const void* actor = nullptr;
+    bedrocktools::sdk::AABB box{};
+};
+
+// Pure callback interface for the native BlockSource solid-block query.
+struct SightTest {
+    using SolidBlock = bool (*)(const void* context, int x, int y, int z);
+    const void* context = nullptr;
+    SolidBlock isSolid = nullptr;
+    explicit operator bool() const { return isSolid != nullptr; }
+};
+
+// Amanatides & Woo voxel traversal from eye to one visible point on the target.
+// The starting voxel and the target's own voxel are never tested, so camera
+// clipping and mobs hugging a wall do not produce false occlusion.
+inline bool sightRayHitsSolid(const bedrocktools::sdk::Vec3& origin,
+                              const bedrocktools::sdk::Vec3& target,
+                              const SightTest& sight) {
+    if (!sight || !hitbox::isFinite(origin) || !hitbox::isFinite(target)) return false;
+    const float dx = target.x - origin.x;
+    const float dy = target.y - origin.y;
+    const float dz = target.z - origin.z;
+    const float lengthSq = dx * dx + dy * dy + dz * dz;
+    if (!(lengthSq > 1e-8f) || !std::isfinite(lengthSq)) return false;
+
+    int x = static_cast<int>(std::floor(origin.x));
+    int y = static_cast<int>(std::floor(origin.y));
+    int z = static_cast<int>(std::floor(origin.z));
+    const int ex = static_cast<int>(std::floor(target.x));
+    const int ey = static_cast<int>(std::floor(target.y));
+    const int ez = static_cast<int>(std::floor(target.z));
+    if (x == ex && y == ey && z == ez) return false;
+
+    int stepX = 0, stepY = 0, stepZ = 0;
+    constexpr float inf = 1e30f;
+    float tMaxX = inf, tMaxY = inf, tMaxZ = inf;
+    float tDeltaX = inf, tDeltaY = inf, tDeltaZ = inf;
+    if (dx > 0.0f) {
+        stepX = 1; tDeltaX = 1.0f / dx; tMaxX = (x + 1 - origin.x) * tDeltaX;
+    } else if (dx < 0.0f) {
+        stepX = -1; tDeltaX = -1.0f / dx; tMaxX = (origin.x - x) * tDeltaX;
+    }
+    if (dy > 0.0f) {
+        stepY = 1; tDeltaY = 1.0f / dy; tMaxY = (y + 1 - origin.y) * tDeltaY;
+    } else if (dy < 0.0f) {
+        stepY = -1; tDeltaY = -1.0f / dy; tMaxY = (origin.y - y) * tDeltaY;
+    }
+    if (dz > 0.0f) {
+        stepZ = 1; tDeltaZ = 1.0f / dz; tMaxZ = (z + 1 - origin.z) * tDeltaZ;
+    } else if (dz < 0.0f) {
+        stepZ = -1; tDeltaZ = -1.0f / dz; tMaxZ = (origin.z - z) * tDeltaZ;
+    }
+
+    for (int step = 0; step < maxSightVoxels; ++step) {
+        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+            x += stepX;
+            if (tMaxX > 1.0f) break;
+            tMaxX += tDeltaX;
+        } else if (tMaxY < tMaxZ) {
+            y += stepY;
+            if (tMaxY > 1.0f) break;
+            tMaxY += tDeltaY;
+        } else {
+            z += stepZ;
+            if (tMaxZ > 1.0f) break;
+            tMaxZ += tDeltaZ;
+        }
+        if (x == ex && y == ey && z == ez) break;
+        if (sight.isSolid(sight.context, x, y, z)) return true;
+    }
+    return false;
+}
+
+// A target is visible when either its centre or head has a clear line. Sampling
+// the head lets a tall mob peeking over a low wall remain visible; a fully
+// hidden target is rejected.
+inline bool hasClearLineOfSight(const bedrocktools::sdk::Vec3& eye,
+                                const bedrocktools::sdk::AABB& box,
+                                const SightTest& sight) {
+    if (!sight || !validBox(box)) return false;
+    const auto center = boxCenter(box);
+    const bedrocktools::sdk::Vec3 head{center.x, box.max.y - 0.05f, center.z};
+    return !sightRayHitsSolid(eye, center, sight) ||
+           !sightRayHitsSolid(eye, head, sight);
+}
+
+// Range is eye-to-nearest-point-on-target-box, not player-AABB-to-target-AABB.
+// The crosshair hit result is only an extra out-of-range veto or a fail-closed
+// fallback when the native occlusion query is unavailable.
+inline bool candidateHittable(const TargetCandidate& candidate, float reach,
+                              const GameVerdict& game, const PlayerView& view,
+                              const SightTest& sight) {
+    if (!validBox(candidate.box)) return false;
+    const float limit = safeReach(reach);
+    if (pointBoxDistanceSq(view.eye, candidate.box) > limit * limit) return false;
+    if (!inFrontCone(view.eye, view.look, candidate.box)) return false;
+    if (game.available && game.hit == GameHit::EntityOutOfRange &&
+        game.entity == candidate.actor) return false;
+    if (sight) return hasClearLineOfSight(view.eye, candidate.box, sight);
+    return game.available && game.hit == GameHit::Entity &&
+           game.entity == candidate.actor;
+}
 
 struct ReachVerdict {
     bool targetPresent = false;
     bool inRange = false;
-    const void* hittableActor = nullptr; // entity to draw green, when known
+    const void* hittableActor = nullptr; // first qualifying actor, for diagnostics
+    std::vector<const void*> hittableActors{};
 };
 
-// The game's crosshair verdict is authoritative when it is available: green
-// only for TypeEntity, red for TypeEntityOutOfRange or a block/no-hit. ORing a
-// geometric "enemy nearby" test on top of that produced false greens in the
-// reported bug (entity behind a wall, or not actually under the crosshair).
-// The eye-ray fallback is used only when the hit-result signature is missing.
-inline ReachVerdict classify(const std::vector<bedrocktools::sdk::AABB>& enemies,
+inline ReachVerdict classify(const std::vector<TargetCandidate>& candidates,
                              float reach, const GameVerdict& game,
-                             const PlayerView& view) {
-    if (game.available) {
-        switch (game.hit) {
-            case GameHit::Entity:
-                return {true, true, game.entity};
-            case GameHit::EntityOutOfRange:
-                return {true, false, nullptr};
-            default:
-                return {false, false, nullptr};
-        }
-    }
+                             const PlayerView& view, const SightTest& sight = {}) {
     ReachVerdict verdict;
-    const float limit = safeReach(reach);
-    for (const auto& enemy : enemies) {
+    for (const auto& candidate : candidates) {
         verdict.targetPresent = true;
-        if (rayHitsAABB(view.eye, view.look, enemy, limit)) verdict.inRange = true;
+        if (candidateHittable(candidate, reach, game, view, sight))
+            verdict.hittableActors.push_back(candidate.actor);
     }
+    verdict.inRange = !verdict.hittableActors.empty();
+    verdict.hittableActor = verdict.inRange ? verdict.hittableActors.front() : nullptr;
     return verdict;
+}
+
+// Green enters immediately but leaves only after a short dwell, so a one-frame
+// actor-fetch miss, arm swing or occlusion read cannot flash the rings red.
+struct VerdictHold {
+    bool initialized = false;
+    bool stable = false;
+    double changedAt = 0.0;
+
+    bool update(bool candidate, double nowSeconds,
+                double holdSeconds = greenHoldSeconds) {
+        if (!std::isfinite(nowSeconds) || !std::isfinite(holdSeconds)) return stable;
+        if (nowSeconds < changedAt) changedAt = nowSeconds;
+        if (!initialized) {
+            initialized = true;
+            stable = candidate;
+            changedAt = nowSeconds;
+            return stable;
+        }
+        if (candidate != stable) {
+            const double required = candidate ? 0.0 : std::max(0.0, holdSeconds);
+            if (nowSeconds - changedAt >= required) {
+                stable = candidate;
+                changedAt = nowSeconds;
+            }
+        } else if (candidate) {
+            changedAt = nowSeconds; // refresh the green hold while still valid
+        }
+        return stable;
+    }
+};
+
+// A single wrong attack/mode-event label must not resize every ring from 3 to
+// 5 blocks. Confirmed live game-mode reads bypass the filter; weaker events
+// need two consistent samples.
+struct StableMode {
+    bool creative = false;
+    int pending = -1;
+    int streak = 0;
+
+    void reset(bool value) {
+        creative = value;
+        pending = -1;
+        streak = 0;
+    }
+    bool observe(bool desired, int confirmations = modeConfirmations) {
+        confirmations = std::max(1, confirmations);
+        if (desired == creative) {
+            pending = -1;
+            streak = 0;
+            return creative;
+        }
+        const int value = desired ? 1 : 0;
+        if (pending != value) {
+            pending = value;
+            streak = 1;
+        } else {
+            ++streak;
+        }
+        if (streak >= confirmations) {
+            creative = desired;
+            pending = -1;
+            streak = 0;
+        }
+        return creative;
+    }
+};
+
+// Clamp a ring centre's per-tick movement. Knockback or a recycled actor read
+// cannot make the circle teleport; it catches up smoothly over later ticks.
+inline bedrocktools::sdk::Vec3 stepToward(const bedrocktools::sdk::Vec3& from,
+                                          const bedrocktools::sdk::Vec3& to,
+                                          float maxDistance) {
+    if (!hitbox::isFinite(from) || !hitbox::isFinite(to) ||
+        !(maxDistance > 0.0f) || !std::isfinite(maxDistance)) return from;
+    const bedrocktools::sdk::Vec3 delta{to.x - from.x, to.y - from.y, to.z - from.z};
+    const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y +
+                                     delta.z * delta.z);
+    if (!(distance > maxDistance)) return to;
+    const float scale = maxDistance / distance;
+    return {from.x + delta.x * scale, from.y + delta.y * scale,
+            from.z + delta.z * scale};
 }
 
 inline bedrocktools::sdk::Vec3 interpolatedCenter(const hitbox::Track& track,

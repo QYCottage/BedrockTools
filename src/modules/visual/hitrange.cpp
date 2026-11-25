@@ -39,6 +39,13 @@ using RenderLevel = void (*)(void*, void*, void*);
 using LevelGetHitResult = void* (*)(void*);
 using HitResultGetEntity = void* (*)(void*);
 
+// BlockSource::isSolidBlockingBlock(BlockPos const&), the same native query
+// used by the Hitbox wall-occlusion pass.
+struct BlockPosI {
+    int x, y, z;
+};
+using IsSolidBlockingBlock = bool (*)(void*, const BlockPosI&);
+
 struct DistanceSortedActor {
     void* mActor;
     float mDistance;
@@ -76,7 +83,10 @@ struct MaterialPtr {
 };
 
 constexpr auto pauseTimeout = std::chrono::milliseconds(300);
-constexpr auto attackConfirmWindow = std::chrono::milliseconds(300);
+// A hit can briefly remove a target from the game's nearby-actor result. The
+// observed hit frames lose one ring for about 100 ms; hold it just long enough
+// to span that gap without leaving a stale ring behind.
+constexpr auto targetHoldWindow = std::chrono::milliseconds(180);
 constexpr float scanPadding = 16.0f;
 constexpr std::size_t maxScannedTargets = 64;
 constexpr std::size_t maxTargetRings = 8;
@@ -103,6 +113,7 @@ RenderLevel originalRender = nullptr;
 LevelGetHitResult levelGetHitResult = nullptr;
 HitResultGetEntity hitResultGetEntity = nullptr;
 FetchNearby fetchNearby = nullptr;
+IsSolidBlockingBlock isSolidBlockingBlock = nullptr;
 std::uintptr_t survivalAttackFn = 0;
 std::uintptr_t creativeAttackFn = 0;
 std::uintptr_t creativeInternalFn = 0;
@@ -120,8 +131,12 @@ struct TargetState {
     void* actor = nullptr;
     hitbox::Track track{};
     Clock::time_point sampleTime{};
+    Clock::time_point lastSeen{};
     AABB box{};
+    Vec3 stableCenter{};
     bool inRange = false;
+    bool held = false;
+    hitrange::VerdictHold hold{};
 };
 struct State {
     bool hasPlayer = false;
@@ -129,9 +144,12 @@ struct State {
     bool inRange = false;
     hitrange::GameVerdict game{};
     const void* hittableActor = nullptr;
+    float reach = hitrange::survivalReach;
     hitbox::Track selfTrack{};
+    Vec3 selfStableCenter{};
     Clock::time_point selfSampleTime{};
     Clock::time_point lastTick{};
+    hitrange::VerdictHold verdictHold{};
     std::vector<TargetState> targets;
 };
 std::mutex stateMutex;
@@ -212,7 +230,7 @@ bool looksLikeGameMode(void* gameMode) noexcept {
 // the base/creative GameMode. Signature matching works immediately after a
 // mode switch; learned vtable identities keep detection working on builds
 // where one of the attack signatures is unavailable.
-ModeHint modeFromGameMode(void* gameMode) {
+ModeHint modeFromGameMode(void* gameMode, bool allowLearned = true) {
     void** vtable = gameModeVTable(gameMode);
     if (!vtable) return ModeHint::Unknown;
     for (const auto slot : gameModeAttackVTableIndices) {
@@ -223,8 +241,10 @@ ModeHint modeFromGameMode(void* gameMode) {
         if ((creativeAttackFn && address == creativeAttackFn) ||
             (creativeInternalFn && address == creativeInternalFn)) return ModeHint::Creative;
     }
-    if (vtable == learnedSurvivalVTable.load(std::memory_order_relaxed)) return ModeHint::Survival;
-    if (vtable == learnedCreativeVTable.load(std::memory_order_relaxed)) return ModeHint::Creative;
+    if (allowLearned) {
+        if (vtable == learnedSurvivalVTable.load(std::memory_order_relaxed)) return ModeHint::Survival;
+        if (vtable == learnedCreativeVTable.load(std::memory_order_relaxed)) return ModeHint::Creative;
+    }
     return ModeHint::Unknown;
 }
 
@@ -236,9 +256,20 @@ void learnGameModeVTable(void* gameMode, bool creative) {
 }
 
 bool acceptGameMode(void* candidate) {
-    if (!looksLikeGameMode(candidate) ||
-        modeFromGameMode(candidate) == ModeHint::Unknown) return false;
-    if (module) module->setGameMode(candidate);
+    if (!looksLikeGameMode(candidate)) return false;
+    const auto hint = modeFromGameMode(candidate);
+    if (hint == ModeHint::Unknown) return false;
+    if (module) {
+        module->setGameMode(candidate);
+        // A validated live Player read is authoritative: change the radius now,
+        // without waiting for debounced event hints.
+        module->setCreativeMode(hint == ModeHint::Creative);
+    }
+    // Only a signature-confirmed identity may teach future reads. Event labels
+    // from an attack are not allowed to poison the learned vtable cache.
+    const auto direct = modeFromGameMode(candidate, false);
+    if (direct != ModeHint::Unknown)
+        learnGameModeVTable(candidate, direct == ModeHint::Creative);
     return true;
 }
 
@@ -335,11 +366,11 @@ void clearState() {
     trackedPlayer = nullptr;
 }
 
-// The game's HitResult already applies the exact attack/interaction distance,
-// line of sight and camera rules. TypeEntity means "attackable entity under
-// the crosshair"; TypeEntityOutOfRange means an entity is aimed at but too
-// far. Anything else is a block or no hit. This is sampled on the client tick
-// like the Crosshair indicator, never from the render hook.
+// The game's HitResult is no longer the crosshair-only gate. It supplies an
+// exact TypeEntity fallback if the native occlusion query is missing, and an
+// authoritative TypeEntityOutOfRange veto for a target the game says is too
+// far. TypeBlock/TypeNoHit do not veto a different target in the frontal cone.
+// Sampling happens on the client tick, never from the render hook.
 hitrange::GameVerdict readGameVerdict(void* rawPlayer) {
     hitrange::GameVerdict verdict;
     if (!levelGetHitResult || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return verdict;
@@ -365,6 +396,27 @@ hitrange::GameVerdict readGameVerdict(void* rawPlayer) {
     return verdict;
 }
 
+// Resolve the dimension's BlockSource through safely checked pointers. The
+// module only reads it; it never changes world state or sends packets.
+void* occlusionRegion(void* rawPlayer) noexcept {
+    if (!rawPlayer || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return nullptr;
+    const auto* bytes = reinterpret_cast<const std::byte*>(rawPlayer);
+    void* dimension = nullptr;
+    if (!safeRead(bytes + off::Actor::mDimension, dimension) ||
+        reinterpret_cast<std::uintptr_t>(dimension) < 0x1000) return nullptr;
+    void* region = nullptr;
+    if (!safeRead(reinterpret_cast<const std::byte*>(dimension) + off::Dimension::mBlockSource,
+                  region) ||
+        reinterpret_cast<std::uintptr_t>(region) < 0x1000) return nullptr;
+    return region;
+}
+
+bool nativeSolidBlock(const void* context, int x, int y, int z) noexcept {
+    if (!isSolidBlockingBlock || !context) return false;
+    const BlockPosI position{x, y, z};
+    return isSolidBlockingBlock(const_cast<void*>(context), position);
+}
+
 void tick(void* rawPlayer) {
     if (!module || !module->enabled || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) {
         clearState();
@@ -376,29 +428,34 @@ void tick(void* rawPlayer) {
     if (!hitrange::validBox(playerBox)) { clearState(); return; }
 
     const auto now = Clock::now();
+    const double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
+    // Cache the radius for this tick as well: the render hook must not read a
+    // mode hint that changes between the tick and the draw call.
     const float reach = module->effectiveReach();
-    auto game = readGameVerdict(rawPlayer);
-    // On some builds / third-person touch attacks the stored hit result is
-    // stale or reports OutOfRange even though the swing connected. A confirmed
-    // AttackEvent therefore wins for a short window: green means a real hit.
-    {
-        std::lock_guard attackLock(recentAttackMutex);
-        if (recentAttack.target &&
-            reinterpret_cast<std::uintptr_t>(recentAttack.target) >= 0x1000 &&
-            now - recentAttack.at <= attackConfirmWindow) {
-            game.available = true;
-            game.hit = hitrange::GameHit::Entity;
-            game.entity = recentAttack.target;
-        }
-    }
+    const auto game = readGameVerdict(rawPlayer);
     const hitrange::PlayerView view{hitrange::eyePosition(playerBox),
                                     hitrange::lookVector(player->rotation())};
+    void* region = occlusionRegion(rawPlayer);
+    const hitrange::SightTest sight{
+        region, (region && isSolidBlockingBlock) ? &nativeSolidBlock : nullptr};
+
+    RecentAttack attack{};
+    {
+        std::lock_guard attackLock(recentAttackMutex);
+        attack = recentAttack;
+    }
+    const bool attackActive = attack.target && attack.at != Clock::time_point{} &&
+        reinterpret_cast<std::uintptr_t>(attack.target) >= 0x1000 &&
+        now - attack.at <= targetHoldWindow;
 
     // Copy the previous interpolation state, then sample the game outside the
     // lock so the render hook never waits on an actor fetch.
+    bool hadPlayer = false;
     hitbox::Track selfTrack{};
+    Vec3 selfStableCenter{};
     Clock::time_point selfSampleTime{};
     Clock::time_point lastTick{};
+    hitrange::VerdictHold verdictHold{};
     std::vector<TargetState> previousTargets;
     {
         std::lock_guard lock(stateMutex);
@@ -406,9 +463,12 @@ void tick(void* rawPlayer) {
             state = {};
             trackedPlayer = rawPlayer;
         }
+        hadPlayer = state.hasPlayer;
         selfTrack = state.selfTrack;
+        selfStableCenter = state.selfStableCenter;
         selfSampleTime = state.selfSampleTime;
         lastTick = state.lastTick;
+        verdictHold = state.verdictHold;
         previousTargets = state.targets;
     }
     const bool paused = lastTick != Clock::time_point{} && now - lastTick > pauseTimeout;
@@ -422,11 +482,18 @@ void tick(void* rawPlayer) {
     }
     const float selfElapsed = selfSampleTime == Clock::time_point{}
         ? 0.05f : std::chrono::duration<float>(now - selfSampleTime).count();
-    if (hitbox::pushSample(selfTrack, hitrange::feetCenter(playerBox), selfElapsed))
+    const Vec3 selfSample = hitrange::feetCenter(playerBox);
+    if (!hadPlayer) {
+        selfStableCenter = selfSample;
+    } else {
+        selfStableCenter = hitrange::stepToward(selfStableCenter, selfSample,
+                                                hitrange::maxCenterStep);
+    }
+    if (hitbox::pushSample(selfTrack, selfStableCenter, selfElapsed))
         selfSampleTime = now;
 
     std::vector<TargetState> nextTargets;
-    std::vector<AABB> enemyBoxes;
+    std::vector<hitrange::TargetCandidate> candidates;
     if (fetchNearby) {
         Vec3 extent{reach + scanPadding, reach + scanPadding, reach + scanPadding};
         const ActorVec actors = fetchNearby(rawPlayer, &extent, 1);
@@ -442,48 +509,74 @@ void tick(void* rawPlayer) {
                 if (!((isPlayer && module->showPlayers) || (isMob && module->showMobs))) continue;
                 const AABB box = reinterpret_cast<bedrocktools::sdk::Actor*>(actor)->bounds();
                 if (!hitrange::validBox(box)) continue;
-                enemyBoxes.push_back(box);
-                if (nextTargets.size() >= maxTargetRings) continue; // keep scanning for the fallback verdict
+                const hitrange::TargetCandidate candidate{actor, box};
+                candidates.push_back(candidate);
+                const bool rawInRange = hitrange::candidateHittable(
+                    candidate, reach, game, view, sight);
+                if (nextTargets.size() >= maxTargetRings) continue; // keep scanning for the verdict
 
                 TargetState target;
                 target.actor = actor;
                 target.box = box;
-                // Only the entity the game itself picked (or just confirmed in
-                // an AttackEvent) may be green. The eye-ray fallback is used
-                // solely when that verdict is absent.
-                target.inRange = game.available
-                    ? (game.hit == hitrange::GameHit::Entity && game.entity == actor)
-                    : hitrange::rayHitsAABB(view.eye, view.look, box, reach);
-                const Vec3 center = hitrange::feetCenter(box);
+                target.lastSeen = now;
+                target.held = false;
+                const Vec3 desiredCenter = hitrange::feetCenter(box);
                 auto old = std::find_if(previousTargets.begin(), previousTargets.end(),
                     [actor](const TargetState& t) { return t.actor == actor; });
                 if (old != previousTargets.end()) {
                     target.track = old->track;
                     target.sampleTime = old->sampleTime;
+                    target.hold = old->hold;
+                    target.stableCenter = hitrange::stepToward(
+                        old->stableCenter, desiredCenter, hitrange::maxCenterStep);
                     const float elapsed = target.sampleTime == Clock::time_point{}
                         ? 0.05f : std::chrono::duration<float>(now - target.sampleTime).count();
-                    if (hitbox::pushSample(target.track, center, elapsed)) target.sampleTime = now;
+                    if (hitbox::pushSample(target.track, target.stableCenter, elapsed))
+                        target.sampleTime = now;
                 } else {
-                    hitbox::pushSample(target.track, center, 0.05f);
+                    target.stableCenter = desiredCenter;
+                    hitbox::pushSample(target.track, target.stableCenter, 0.05f);
                     target.sampleTime = now;
                 }
+                target.inRange = target.hold.update(rawInRange, nowSeconds);
                 nextTargets.push_back(std::move(target));
             }
         }
     }
-    const auto verdict = hitrange::classify(enemyBoxes, reach, game, view);
+
+    // An attack can briefly make the nearby-actor fetch omit the target. Keep
+    // the last stable ring and color rather than dropping/blinking it on every
+    // hit. Held entries are render-only: the stale actor pointer is never read.
+    for (const auto& old : previousTargets) {
+        if (std::any_of(nextTargets.begin(), nextTargets.end(),
+                        [&old](const TargetState& t) { return t.actor == old.actor; })) continue;
+        const bool withinHold = old.lastSeen != Clock::time_point{} &&
+                                now - old.lastSeen <= targetHoldWindow;
+        const bool heldByAttack = attackActive && attack.target == old.actor;
+        if (!withinHold && !heldByAttack) continue;
+        if (nextTargets.size() >= maxTargetRings) break;
+        TargetState held = old;
+        held.held = true;
+        nextTargets.push_back(std::move(held));
+    }
+
+    const auto verdict = hitrange::classify(candidates, reach, game, view, sight);
+    const bool stableInRange = verdictHold.update(verdict.inRange, nowSeconds);
 
     {
         std::lock_guard lock(stateMutex);
         if (trackedPlayer != rawPlayer) return; // a newer tick owns a different player
         state.hasPlayer = true;
-        state.targetPresent = verdict.targetPresent;
-        state.inRange = verdict.inRange;
+        state.targetPresent = verdict.targetPresent || !nextTargets.empty();
+        state.inRange = stableInRange;
         state.game = game;
         state.hittableActor = verdict.hittableActor;
+        state.reach = reach;
         state.selfTrack = selfTrack;
+        state.selfStableCenter = selfStableCenter;
         state.selfSampleTime = selfSampleTime;
         state.lastTick = now;
+        state.verdictHold = verdictHold;
         state.targets = std::move(nextTargets);
     }
 }
@@ -534,7 +627,9 @@ void render(void* renderer, void* screen) {
     }
     if (rings.empty()) return;
 
-    const float reach = module->effectiveReach();
+    // Use the radius sampled on the last client tick. A mode/event hint can no
+    // longer resize the rings halfway through an attack frame.
+    const float reach = hitrange::safeReach(snapshot.reach);
     const float width = hitrange::safeWidth(module->lineWidth);
     const auto style = static_cast<jumpcircle::Style>(
         std::clamp(module->style, 0, jumpcircle::styleCount - 1));
@@ -564,16 +659,18 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green only on a real hit target.") {
+    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green for an in-range, frontal, visible target.") {
     module = this;
     hideInHudEditor = true;
 }
 HitRangeModule::~HitRangeModule() { if (module == this) module = nullptr; }
 
 float HitRangeModule::effectiveReach() const {
-    const auto hint = modeFromGameMode(m_gameMode.load(std::memory_order_relaxed));
+    const auto hint = modeFromGameMode(m_gameMode.load(std::memory_order_relaxed), false);
     if (hint == ModeHint::Survival) return hitrange::survivalReach;
     if (hint == ModeHint::Creative) return hitrange::creativeReach;
+    // Learned vtable identities and debounced non-attack events are fallbacks
+    // for builds where the direct attack signatures are unavailable.
     return m_creative.load(std::memory_order_relaxed)
         ? hitrange::creativeReach : hitrange::survivalReach;
 }
@@ -581,7 +678,17 @@ void HitRangeModule::setGameMode(void* gameMode) {
     m_gameMode.store(gameMode, std::memory_order_relaxed);
 }
 void HitRangeModule::setCreativeMode(bool creative) {
-    m_creative.store(creative, std::memory_order_relaxed);
+    observeGameMode(creative, true);
+}
+void HitRangeModule::observeGameMode(bool creative, bool authoritative) {
+    bool stable;
+    {
+        std::lock_guard lock(m_modeMutex);
+        if (authoritative) m_mode.reset(creative);
+        else m_mode.observe(creative);
+        stable = m_mode.creative;
+    }
+    m_creative.store(stable, std::memory_order_relaxed);
 }
 
 void HitRangeModule::onInit() {
@@ -597,6 +704,8 @@ void HitRangeModule::onInit() {
     levelGetHitResult = reinterpret_cast<LevelGetHitResult>(resolve(SignatureId::LevelGetHitResult));
     hitResultGetEntity = reinterpret_cast<HitResultGetEntity>(resolve(SignatureId::HitResultGetEntity));
     fetchNearby = reinterpret_cast<FetchNearby>(resolve(SignatureId::ActorFetchNearbyActorsSorted));
+    isSolidBlockingBlock = reinterpret_cast<IsSolidBlockingBlock>(
+        resolve(SignatureId::BlockSourceIsSolidBlockingBlock));
     survivalAttackFn = resolve(SignatureId::SurvivalModeAttack);
     creativeAttackFn = resolve(SignatureId::GameModeAttack);
     creativeInternalFn = resolve(SignatureId::GameModeAttackInternal);
@@ -607,28 +716,34 @@ void HitRangeModule::onInit() {
     }
     bedrocktools::events::bus().subscribe<bedrocktools::events::LocalPlayerTickEvent>(
         [](auto& event) { tick(event.player); });
-    // Mode events both identify the current mode and teach us its vtable for
-    // builds where an attack signature is missing. The local-player poll is
-    // still responsible for noticing a mode switch before any action occurs.
+    // Signature-confirmed mode events are authoritative; other non-attack
+    // events are only debounced fallback hints. Attack labels never resize the
+    // rings: on Android they can be wrong for a single arm swing.
     bedrocktools::events::bus().subscribe<bedrocktools::events::GameModeActionEvent>(
         [](auto& event) {
             if (!module) return;
-            const bool creative = event.modeKind == bedrocktools::events::GameModeType::GameMode;
-            if (gameModeVTable(event.gameMode)) {
-                module->setGameMode(event.gameMode);
-                learnGameModeVTable(event.gameMode, creative);
+            bool known = false;
+            if (looksLikeGameMode(event.gameMode)) {
+                const auto hint = modeFromGameMode(event.gameMode, false);
+                if (hint != ModeHint::Unknown) {
+                    const bool creative = hint == ModeHint::Creative;
+                    module->setGameMode(event.gameMode);
+                    module->setCreativeMode(creative);
+                    learnGameModeVTable(event.gameMode, creative);
+                    known = true;
+                }
             }
-            module->setCreativeMode(creative);
+            if (!known && event.action != bedrocktools::events::GameModeAction::Attack) {
+                if (gameModeVTable(event.gameMode)) module->setGameMode(event.gameMode);
+                module->observeGameMode(
+                    event.modeKind == bedrocktools::events::GameModeType::GameMode, false);
+            }
         });
+    // A hit only latches the target's stable ring for the short hold window.
+    // It does not override the crosshair verdict, color, mode or radius.
     bedrocktools::events::bus().subscribe<bedrocktools::events::AttackEvent>(
         [](auto& event) {
             if (!module) return;
-            const bool creative = event.kind == bedrocktools::events::AttackKind::GameMode;
-            if (gameModeVTable(event.gameMode)) {
-                module->setGameMode(event.gameMode);
-                learnGameModeVTable(event.gameMode, creative);
-            }
-            module->setCreativeMode(creative);
             if (event.target && reinterpret_cast<std::uintptr_t>(event.target) >= 0x1000) {
                 std::lock_guard attackLock(recentAttackMutex);
                 recentAttack = {event.target, Clock::now()};
