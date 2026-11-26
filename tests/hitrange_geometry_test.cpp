@@ -11,8 +11,12 @@ bool alwaysSolid(const void*, int, int, int) { return true; }
 // head sight lines from the test eye pass through it.
 bool frontWall(const void*, int, int y, int z) { return z == 1 && y == 65; }
 // Blocks the centre sight line at y=64 but leaves the head line at y=65 clear.
-// Problem 5 requires both lines, so this partial view must stay red.
+// Problem 5 requires one complete visible face, so this partial view stays red.
 bool lowWall(const void*, int, int y, int z) { return z == 1 && y == 64; }
+// Problem 6 vertical cases: a cage/support block blocks the old centre/head
+// rays, while a full top/bottom face remains visible from above/below.
+bool aboveSolid(const void*, int, int y, int z) { return z == 2 && y == 65; }
+bool belowSolid(const void*, int, int y, int z) { return z == 1 && y == 66; }
 }
 
 int main() {
@@ -45,6 +49,9 @@ int main() {
     const AABB far{{4.4f, 64.0f, -0.3f}, {5.0f, 65.8f, 0.3f}};
     const AABB tall{{2.0f, 70.0f, -0.3f}, {2.6f, 72.0f, 0.3f}};
     const AABB offCrosshair{{1.5f, 64.0f, 1.5f}, {2.1f, 65.8f, 2.1f}};
+    const AABB highPlayer{{-0.3f, 65.0f, -0.3f}, {0.3f, 66.8f, 0.3f}};
+    const AABB lowPlayer{{-0.3f, 63.0f, -0.3f}, {0.3f, 64.8f, 0.3f}};
+    const AABB elevated{{-0.3f, 65.0f, 2.0f}, {0.3f, 66.8f, 2.6f}};
     assert(validBox(player) && !validBox(AABB{{NAN, 0, 0}, {1, 1, 1}}));
     assert(std::abs(feetCenter(player).y - (64.0f + groundLift)) < 0.0001f);
     assert(std::abs(eyePosition(player).y - (64.0f + 1.62f)) < 0.0001f);
@@ -109,6 +116,24 @@ int main() {
     auto creativeFar = classify({{&sideActor, far}}, 5.0f, eye, clear);
     assert(creativeFar.targetPresent && creativeFar.inRange);
 
+    // Problem 6: one-block vertical offsets stay green when the 3D distance is
+    // inside reach and a complete top/bottom face is visible. A full wall still
+    // vetoes the same vertical setup.
+    const SightTest aboveSight{nullptr, &aboveSolid};
+    const SightTest belowSight{nullptr, &belowSolid};
+    const Vec3 highEye = eyePosition(highPlayer);
+    const Vec3 lowEye = eyePosition(lowPlayer);
+    assert(visibleFaceCandidates(highEye, nearFront).size() >= 2);
+    assert(visibleFaceCandidates(lowEye, elevated).size() >= 2);
+    auto above = classify({{&frontActor, nearFront}}, 3.0f, highEye, aboveSight);
+    assert(above.targetPresent && above.inRange && above.hittableActor == &frontActor);
+    auto below = classify({{&frontActor, elevated}}, 3.0f, lowEye, belowSight);
+    assert(below.targetPresent && below.inRange && below.hittableActor == &frontActor);
+    auto aboveWall = classify({{&frontActor, nearFront}}, 3.0f, highEye, solidWall);
+    assert(aboveWall.targetPresent && !aboveWall.inRange);
+    auto belowWall = classify({{&frontActor, elevated}}, 3.0f, lowEye, solidWall);
+    assert(belowWall.targetPresent && !belowWall.inRange);
+
     // No solid-block signature: fail closed to red. There is no TypeEntity or
     // exact-crosshair fallback that can promise a hit through an unseen wall.
     auto noSignature = classify({{&frontActor, nearFront}}, 3.0f, eye);
@@ -172,5 +197,5 @@ int main() {
         assert(std::abs(a.x - b.x) < 0.00001f && std::abs(a.z - b.z) < 0.00001f);
     }
 
-    std::puts("hitrange camera-independent range, strict LOS, stability and ring geometry: OK");
+    std::puts("hitrange camera-independent 3D range, vertical LOS, stability and ring geometry: OK");
 }

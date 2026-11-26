@@ -31,8 +31,8 @@ fake_render::GpuColor gpu;
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_level{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_dimension{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_region{};
-bool g_wall = false;
-bool g_lowWall = false;
+enum class SightMode { Clear, Wall, LowWall, Above, Below };
+SightMode g_sightMode = SightMode::Clear;
 std::vector<DistanceSortedActor> g_nearby;
 
 ActorVec fakeFetch(void*, void*, int) {
@@ -41,7 +41,14 @@ ActorVec fakeFetch(void*, void*, int) {
 }
 bool fakeIsSolid(void* region, const BlockPosI& position) {
     assert(region == g_region.data());
-    return g_wall || (g_lowWall && position.y == 64);
+    switch (g_sightMode) {
+        case SightMode::Wall: return true;
+        case SightMode::LowWall: return position.y == 64 && position.z == 1;
+        case SightMode::Above: return position.y == 65 && position.z == 2;
+        case SightMode::Below: return position.y == 66 && position.z == 1;
+        case SightMode::Clear: return false;
+    }
+    return false;
 }
 void fakeBegin(void*, void*, int mode, int count, int) {
     assert(mode == 1);
@@ -68,11 +75,10 @@ void resetDraw() {
     colors.clear();
     materials.clear();
 }
-void fresh(bool wall = false, bool lowWall = false) {
+void fresh(SightMode mode = SightMode::Clear) {
     clearState();
     resetDraw();
-    g_wall = wall;
-    g_lowWall = lowWall;
+    g_sightMode = mode;
 }
 
 template <typename T, std::size_t N>
@@ -126,6 +132,9 @@ int main() {
     const AABB frontBox{{-0.3f, 64.0f, 2.0f}, {0.3f, 65.8f, 2.6f}};
     const AABB behindBox{{-0.3f, 64.0f, -2.6f}, {0.3f, 65.8f, -2.0f}};
     const AABB offCrosshairBox{{1.5f, 64.0f, 1.5f}, {2.1f, 65.8f, 2.1f}};
+    const AABB highPlayerBox{{-0.3f, 65.0f, -0.3f}, {0.3f, 66.8f, 0.3f}};
+    const AABB lowPlayerBox{{-0.3f, 63.0f, -0.3f}, {0.3f, 64.8f, 0.3f}};
+    const AABB elevatedBox{{-0.3f, 65.0f, 2.0f}, {0.3f, 66.8f, 2.6f}};
 
     FakeActor player, targetPlayer, targetMob, distantMob;
     player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
@@ -205,8 +214,48 @@ int main() {
     expectColor(3 * vertexCount, mod.outOfRangeColor);
     player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
 
+    // Problem 6: a target one block above/below the eye stays green when the
+    // 3D distance is inside reach and the nearest top/bottom face is clear.
+    fresh(SightMode::Above);
+    player.set(highPlayerBox, off::ActorCategories::IsPlayer, g_level.data());
+    targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && state.targets.size() == 1);
+    assert(state.targets[0].inRange);
+    resetDraw();
+    render(renderer.data(), screen.data());
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    fresh(SightMode::Below);
+    player.set(lowPlayerBox, off::ActorCategories::IsPlayer, g_level.data());
+    targetPlayer.set(elevatedBox, off::ActorCategories::IsPlayer);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && state.targets.size() == 1);
+    assert(state.targets[0].inRange);
+    resetDraw();
+    render(renderer.data(), screen.data());
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    // A full wall still rejects the same vertical angles.
+    fresh(SightMode::Wall);
+    tick(player.ptr());
+    assert(!state.inRange && !state.targets[0].inRange);
+
+    // Restore the normal-level scenario for the remaining regressions.
+    player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
+    targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
+    targetMob.set(offCrosshairBox, off::ActorCategories::IsMob);
+    distantMob.set(farMobBox, off::ActorCategories::IsMob);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f},
+                {targetMob.ptr(), 2.4f, 0.0f},
+                {distantMob.ptr(), 7.0f, 0.0f}};
+
     // A solid wall vetoes every target: no behind-wall false green.
-    fresh(true);
+    fresh(SightMode::Wall);
     tick(player.ptr());
     assert(state.targetPresent && !state.inRange);
     assert(!state.targets[0].inRange && !state.targets[1].inRange &&
@@ -217,7 +266,7 @@ int main() {
 
     // A partially visible target (head line clear, body line blocked) must
     // stay red: problem 5 showed that a permissive green could fail to hit.
-    fresh(false, true);
+    fresh(SightMode::LowWall);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}}; // frontBox: center line blocked
     tick(player.ptr());
     assert(state.targetPresent && !state.inRange);
@@ -232,7 +281,7 @@ int main() {
     tick(player.ptr());
     assert(state.targetPresent && state.inRange);
     assert(state.targets[0].inRange && state.targets[1].inRange);
-    fresh(true);
+    fresh(SightMode::Wall);
     tick(player.ptr());
     assert(!state.inRange && !state.targets[0].inRange);
 
@@ -248,7 +297,7 @@ int main() {
 
     // A confirmed attack cannot flash a false green or resize the rings from
     // 3 to 5 blocks. A solid wall is an authoritative range/LOS red verdict.
-    fresh(true);
+    fresh(SightMode::Wall);
     targetPlayer.set(nearBox, off::ActorCategories::IsPlayer);
     bedrocktools::events::AttackEvent badHint{
         bedrocktools::events::AttackKind::GameMode, nullptr,

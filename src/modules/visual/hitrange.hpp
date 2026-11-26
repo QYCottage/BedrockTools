@@ -10,9 +10,10 @@
 // A native version of the Hit Range ground-circle indicator: a ring at melee
 // reach around your feet and, optionally, around nearby players and mobs.
 // The radius is always derived from the detected game mode (3 survival /
-// 5 creative); there is no manual Reach setting. Green follows an in-range,
+// 5 creative); there is no manual Reach setting. Green follows a 3D in-range,
 // unobstructed target and is independent of camera/crosshair rotation, so
-// turning the screen no longer changes a reachable target to red. Attack
+// turning the screen no longer changes a reachable target to red. Targets one
+// block above or below stay green while their nearest face is visible. Attack
 // frames cannot resize, flash or briefly drop the rings.
 class HitRangeModule final : public Module {
 public:

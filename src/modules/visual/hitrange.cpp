@@ -397,8 +397,9 @@ void tick(void* rawPlayer) {
     // Cache the radius for this tick as well: the render hook must not read a
     // mode hint that changes between the tick and the draw call.
     const float reach = module->effectiveReach();
-    // Problem 5: only the eye position and native sight test decide green.
-    // Camera rotation and the crosshair HitResult are deliberately not read.
+    // Problems 5/6: only the 3D eye position and native sight test decide
+    // green. Camera rotation/crosshair HitResult are deliberately not read, and
+    // the LOS sampler covers targets above or below the player as well.
     const Vec3 eye = hitrange::eyePosition(playerBox);
     void* region = occlusionRegion(rawPlayer);
     const hitrange::SightTest sight{
@@ -623,7 +624,7 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green for an in-range, unobstructed target regardless of camera aim.") {
+    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green for a 3D in-range, unobstructed target regardless of camera aim or vertical offset.") {
     module = this;
     hideInHudEditor = true;
 }
