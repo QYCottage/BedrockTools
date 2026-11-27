@@ -46,6 +46,12 @@ namespace HudPlayerRenderer {
 inline constexpr std::size_t mTimeRemaining = 0xC;
 }
 
+namespace UIControl {
+// Verified from HudPlayerRenderer::render -> UIControl::getSize (0x9A60F68: add x0, x0, #0x40).
+inline constexpr std::size_t mPosition = 0x38;
+inline constexpr std::size_t mSize = 0x40;
+}
+
 namespace ShulkerPreview {
 inline constexpr std::size_t ItemStackBaseItem = 0x8;
 inline constexpr std::size_t ItemStackBaseUserData = 0x10;

@@ -38,8 +38,12 @@ for source in "${root}"/tests/*_test.cpp; do
     extra_srcs=()
     skip=""
     case "${name}" in
-        jumpcircle_test|damagecircle_test|hitrange_test|paperdoll_test)
+        jumpcircle_test|damagecircle_test|hitrange_test)
             extra+=(-I "${root}/tests/fakepl" -I "${root}/tests/fakejson")
+            ;;
+        paperdoll_test)
+            extra+=(-I "${root}/tests/fakepl" -I "${root}/tests/fakejson")
+            extra_srcs+=("${root}/src/core/events/Events.cpp")
             ;;
         blockoutline_test)
             # Includes the production renderer with host substitutes for the
