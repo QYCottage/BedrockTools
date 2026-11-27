@@ -38,7 +38,7 @@ for source in "${root}"/tests/*_test.cpp; do
     extra_srcs=()
     skip=""
     case "${name}" in
-        jumpcircle_test|damagecircle_test)
+        jumpcircle_test|damagecircle_test|hitrange_test)
             extra+=(-I "${root}/tests/fakepl" -I "${root}/tests/fakejson")
             ;;
         blockoutline_test)

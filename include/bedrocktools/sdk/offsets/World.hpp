@@ -8,6 +8,12 @@ namespace bedrocktools::sdk::offsets {
 namespace Player {
 inline constexpr std::size_t mName = 0xB28;
 inline constexpr std::size_t mSkin = 0xA18;
+// Player-owned GameMode pointer on the supported 1.26.60 client. The two
+// older positions are kept as candidates for minor game patches; readers must
+// validate the pointed-to object's vtable before using any of them.
+inline constexpr std::size_t mGameMode = 0xAC8;
+inline constexpr std::size_t mGameModeLegacy = 0xAA0;
+inline constexpr std::size_t mGameModeAlt = 0xAB8;
 }
 
 namespace Mob {

@@ -15,7 +15,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 ## Features
 
 - Native C++20 mod built for LeviLauncher and Preloader
-- 12 configurable modules
+- 13 configurable modules
 - Public headers for Minecraft wrappers, offsets, signatures, and utilities
 - Typed event system with runtime subscriptions for other native mods
 - LeviLauncher mod-menu integration and persistent configuration
@@ -23,7 +23,7 @@ The source is public so people can study how a real LeviLauncher mod is structur
 
 ## Modules
 
-**Visual:** Hitbox, Block Outline, Wings, Jump Circle, Damage Circle
+**Visual:** Hitbox, Block Outline, Wings, Jump Circle, Damage Circle, Hit Range
 
 **HUD:** Effect Display, Crosshair, Inventory HUD, Armor
 
@@ -61,6 +61,18 @@ Enable **Jump Circle** to show a soft effect at takeoff and landing, including w
 In **Jump Circle**, enable **Persistent** to keep effects visible after they expand instead of fading. For mobile performance, only the most recent 24 effects are retained; disabling the module or changing worlds clears them. Turning Persistent off allows older effects to expire. The effect is depth-tested and visible in third person.
 
 Jump and landing are inferred from vertical movement, not a verified game-side ground event. Automatic jumps and walking off blocks do not depend on button input, but unusual movement, flight, water, bounce effects, jump boosts or partial-block steps may be missed or mistaken for jumps/landings. Rendering depends on the supported Bedrock version's native signatures and materials.
+
+## Hit Range
+
+**Hit Range** is a native version of the red/green ground-circle indicator shown in the *Hit range+* texture pack: it draws a ring at melee reach so you can see exactly where an attack is possible. The circle's height is configurable, so it is no longer limited to the feet.
+
+- There is **no Reach slider and no Auto Reach toggle** any more. The module detects Survival versus Creative every local-player tick from the live Player's game-mode object (validated against its attack vtable), with learned vtable identities and debounced non-attack mode events as compatibility fallbacks. It then uses exactly 3 blocks in Survival or 5 in Creative, and a validated mode switch updates the cached radius immediately — without waiting for an attack. Attack-event labels cannot flip the radius during an arm swing. Old `reach` and `autoReach` configuration keys are ignored and removed on save, so the generic menu cannot recreate the removed controls. **Effect Style** offers the same 13 shapes as Jump Circle. **In Range Color** is green and **Out Of Range Color** is red by default; both pickers also control opacity.
+- Green now means **inside the automatic 3/5-block 3D reach + at least one clear line from the eye to an exposed point on the target**, and it is deliberately **camera/crosshair independent**: turning the screen no longer turns a reachable mob red or an unreachable one green. Distance is measured from the eye to each candidate hit point rather than from the feet or a flat horizontal radius, so vertical offsets and narrow visible corners are included. The voxel line-of-sight sampler checks a 5x5 grid plus the closest point on every near-facing face — including the top/bottom face when the player is above or below — and a single clear, in-reach point is enough. A wall that blocks every exposed point stays red, but a cage or support block that hides only part of a target no longer forces red when another visible part can be hit. Voxels overlapping the target's own box are ignored so a supporting/cage block is not mistaken for a wall. The module also reads the game's own `Level::getHitResult()` + `HitResultGetEntity` as an **optional positive-only confirmation**: a `TypeEntity` verdict for a trusted nearby actor can turn that actor green even if the conservative LOS sampler is blocked, but `TypeEntityOutOfRange`, a block/no-hit result or turning the crosshair away can never veto a target that geometry says is hittable from another direction. So the ring can become green **without the crosshair being on the object**, like the accuracy of a crosshair indicator but not limited to the current aim. Targets behind a wall or too far away stay red; targets beside or behind the player are still eligible when they are inside reach.
+- **Ring Level** picks where the circle is drawn: **Feet** (the original ground ring, default), **Middle** (the centre of each actor's collision box) or **Head** (its top). The choice is saved with the module config and applies to both your ring and every target ring; each target uses its own hitbox, so tall mobs get a head-level ring at their own head. **Ring Height Offset** is an optional `-2..2` block fine adjustment on top of that level, and **Line Width** sets the ring thickness. Changing the level changes only the drawn height — never reach, colour or the hittability verdict — and takes effect on the next client tick without rebuilding the stable horizontal centres.
+- Your ring turns green when **any** eligible target is hittable; each target ring turns green only for its own hittable target. **Show Targets** draws the same ring around up to eight nearby enemies; out-of-range or hidden rings remain red. **Show Players** and **Show Mobs** choose which groups get a ring, and **Show Self** hides your own ring while keeping the target rings.
+- Attack frames keep the rings stable: the radius is taken from the last client tick, centres are clamped against knockback-sized jumps, a brief green dwell suppresses one-frame flicker, and a hit-frame nearby-actor miss holds the last stable target ring instead of dropping it. A confirmed attack never overrides the range/LOS verdict or flashes a false green. **See Through** switches to a no-depth material when the game build provides one; otherwise the ring is depth-tested and terrain occludes it normally. All rings are local-only and never send anything to the server.
+
+When the native solid-block signature is unavailable, the module fails closed to red rather than guessing visibility through walls; even a `TypeEntity` confirmation is ignored unless the native occlusion signature is available. Both hit-result signatures are optional too: without them, the camera-independent geometry remains the sole verdict. Nearby actors are sampled on the client tick; self and target rings are interpolated from their last stable position samples. World changes, pauses and disabling the module clear the overlay.
 
 ## Inventory HUD
 

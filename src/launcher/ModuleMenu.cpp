@@ -1,6 +1,7 @@
 #include "ModuleMenu.hpp"
 #include "ExternalButtonRefresh.hpp"
 #include "modules/ModuleRegistry.hpp"
+#include "modules/visual/hitrange_geometry.hpp"
 #include "config/ConfigManager.hpp"
 #include <pl/ModMenu.hpp>
 #include <algorithm>
@@ -243,6 +244,14 @@ void registerModulesWithLauncher() {
                 } else if (kLower == "effectsize") {
                     minVal = 0.5f;
                     maxVal = 2.5f;
+                } else if (kLower == "linewidth") {
+                    // Hit Range ring thickness in blocks.
+                    minVal = hitrange::minWidth;
+                    maxVal = hitrange::maxWidth;
+                } else if (kLower == "ringheightoffset") {
+                    // Fine vertical adjustment for the Hit Range circle.
+                    minVal = hitrange::minRingHeightOffset;
+                    maxVal = hitrange::maxRingHeightOffset;
                 } else if (kLower.find("opacity") != std::string::npos ||
                     kLower.find("color") != std::string::npos ||
                     kLower.find("alpha") != std::string::npos) {
