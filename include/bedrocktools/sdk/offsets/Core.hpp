@@ -19,6 +19,7 @@ inline constexpr std::size_t MinecraftUIRenderContextGetFullClippingRectangle = 
 inline constexpr std::size_t MinecraftUIRenderContextGetTexture = 33;
 inline constexpr std::size_t HudCameraRendererRender = 17;
 inline constexpr std::size_t HudMobEffectsRendererRender = 17;
+inline constexpr std::size_t HudPlayerRendererRender = 17;
 inline constexpr std::size_t ClientInstanceGetMinecraftGame = 79;
 inline constexpr std::size_t ClientInstanceGetLocalPlayer = 31;
 inline constexpr std::size_t PlayerGetCarriedItem = 78;
