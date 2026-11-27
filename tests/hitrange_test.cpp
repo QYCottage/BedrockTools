@@ -31,7 +31,7 @@ fake_render::GpuColor gpu;
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_level{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_dimension{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_region{};
-enum class SightMode { Clear, Wall, LowWall, Above, Below };
+enum class SightMode { Clear, Wall, PartialWall, Above, Below };
 SightMode g_sightMode = SightMode::Clear;
 std::vector<DistanceSortedActor> g_nearby;
 
@@ -43,7 +43,7 @@ bool fakeIsSolid(void* region, const BlockPosI& position) {
     assert(region == g_region.data());
     switch (g_sightMode) {
         case SightMode::Wall: return true;
-        case SightMode::LowWall: return position.y == 64 && position.z == 1;
+        case SightMode::PartialWall: return position.y == 64 && position.z == 1;
         case SightMode::Above: return position.y == 65 && position.z == 2;
         case SightMode::Below: return position.y == 66 && position.z == 1;
         case SightMode::Clear: return false;
@@ -214,8 +214,9 @@ int main() {
     expectColor(3 * vertexCount, mod.outOfRangeColor);
     player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
 
-    // Problem 6: a target one block above/below the eye stays green when the
-    // 3D distance is inside reach and the nearest top/bottom face is clear.
+    // Problems 6/7: a target one block above/below the eye stays green when
+    // the 3D distance is inside reach and an exposed top/bottom/side point is
+    // clear, even when a support/cage block hides the old centre/head ray.
     fresh(SightMode::Above);
     player.set(highPlayerBox, off::ActorCategories::IsPlayer, g_level.data());
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
@@ -264,10 +265,23 @@ int main() {
     expectColor(0, mod.outOfRangeColor);
     expectColor(vertexCount, mod.outOfRangeColor);
 
-    // A partially visible target (head line clear, body line blocked) must
-    // stay red: problem 5 showed that a permissive green could fail to hit.
-    fresh(SightMode::LowWall);
-    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}}; // frontBox: center line blocked
+    // Problem 7: a same-level target partly hidden by one low wooden block is
+    // still hittable through an exposed upper point. The complete-face rule
+    // used to keep this red until climbing one block above the target; both
+    // the self ring and this target's ring must now be green immediately.
+    fresh(SightMode::PartialWall);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}}; // frontBox: low line blocked
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange);
+    assert(state.targets.size() == 1 && state.targets[0].inRange);
+    resetDraw();
+    render(renderer.data(), screen.data());
+    assert(lastCount == 2 * vertexCount);
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    // A wall that covers every exposed point is still an authoritative red.
+    fresh(SightMode::Wall);
     tick(player.ptr());
     assert(state.targetPresent && !state.inRange);
     assert(state.targets.size() == 1 && !state.targets[0].inRange);

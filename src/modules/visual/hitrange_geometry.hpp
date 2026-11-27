@@ -3,14 +3,16 @@
 // Pure geometry and configuration helpers for the Hit Range overlay.
 //
 // Green means "an eligible player/mob is inside the automatic 3/5-block 3D
-// reach and at least one face visible from the player's eye has unobstructed
-// sight lines". It is deliberately independent of the camera/crosshair
-// direction: turning the screen must not turn a reachable target red or an
-// unreachable one green. Sampling those visible faces also covers attacks from
-// above or below the target by one or more blocks. It is not plain AABB
-// proximity: a solid wall across every visible face keeps the ring red. The
-// native BlockSource solid-block query supplies occlusion; without that
-// signature the verdict fails closed to red, never to a crosshair-only guess.
+// reach and at least one exposed point on a face visible from the player's eye
+// has an unobstructed sight line within that reach". It is deliberately
+// independent of the camera/crosshair direction: turning the screen must not
+// turn a reachable target red or an unreachable one green. Dense sampling of
+// every near-facing face covers attacks from above, below, beside and behind;
+// one clear, in-reach hit point is enough when a cage or support block hides
+// only part of the target. It is not plain AABB proximity: a solid wall across
+// every exposed point keeps the ring red. The native BlockSource solid-block
+// query supplies occlusion; without that signature the verdict fails closed to
+// red, never to a crosshair-only guess.
 // These helpers are host-testable without Minecraft.
 
 #include "hitbox_interp.hpp"
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -135,6 +138,12 @@ inline float pointBoxDistanceSq(const bedrocktools::sdk::Vec3& point,
     return dx * dx + dy * dy + dz * dz;
 }
 
+inline float pointDistanceSq(const bedrocktools::sdk::Vec3& a,
+                              const bedrocktools::sdk::Vec3& b) {
+    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
 struct TargetCandidate {
     const void* actor = nullptr;
     bedrocktools::sdk::AABB box{};
@@ -221,95 +230,117 @@ inline bool sightRayHitsSolid(const bedrocktools::sdk::Vec3& origin,
     return false;
 }
 
-// Build five inset sample points on one face of the target AABB. Problem 6
-// showed that always aiming the LOS test at the box centre/head made targets
-// above or below the player turn red: those rays cut through supporting/cage
-// blocks. Testing complete faces instead covers vertical offsets while a wall
-// covering any part of every visible face still stays red. Five samples per
-// face preserve problem 5's rejection of partial visibility.
-using FaceSamples = std::array<bedrocktools::sdk::Vec3, 5>;
+// Problem 7 showed that requiring one *complete* clear face made a same-level
+// target behind a cage/support block red, while stepping one block above it
+// exposed a full top face. A melee hit only needs one exposed point, so each
+// near-facing face now contributes its closest point to the eye (preserving the
+// exact in-reach corner) plus a 5x5 grid. The first clear, in-reach sample
+// wins; a wall that blocks every exposed sample still keeps the ring red.
+inline constexpr std::size_t faceGrid = 5;
+inline constexpr std::size_t faceSampleCount = faceGrid * faceGrid + 1;
+using FaceSamples = std::array<bedrocktools::sdk::Vec3, faceSampleCount>;
+inline constexpr std::array<float, faceGrid> faceFractions{
+    0.1f, 0.3f, 0.5f, 0.7f, 0.9f};
 
-inline FaceSamples samplesOnYFace(float faceY, float lowX, float highX,
-                                  float lowZ, float highZ) {
-    constexpr float q = 0.25f, r = 0.75f, h = 0.5f;
-    return {{{std::lerp(lowX, highX, h), faceY, std::lerp(lowZ, highZ, h)},
-             {std::lerp(lowX, highX, q), faceY, std::lerp(lowZ, highZ, q)},
-             {std::lerp(lowX, highX, r), faceY, std::lerp(lowZ, highZ, q)},
-             {std::lerp(lowX, highX, q), faceY, std::lerp(lowZ, highZ, r)},
-             {std::lerp(lowX, highX, r), faceY, std::lerp(lowZ, highZ, r)}}};
+inline FaceSamples samplesOnYFace(const bedrocktools::sdk::Vec3& eye, float faceY,
+                                  float lowX, float highX, float lowZ, float highZ) {
+    FaceSamples samples{};
+    samples[0] = {std::clamp(eye.x, lowX, highX), faceY,
+                  std::clamp(eye.z, lowZ, highZ)};
+    std::size_t index = 1;
+    for (const float fz : faceFractions) {
+        for (const float fx : faceFractions) {
+            samples[index++] = {std::lerp(lowX, highX, fx), faceY,
+                                std::lerp(lowZ, highZ, fz)};
+        }
+    }
+    return samples;
 }
-inline FaceSamples samplesOnXFace(float faceX, float lowY, float highY,
-                                  float lowZ, float highZ) {
-    constexpr float q = 0.25f, r = 0.75f, h = 0.5f;
-    return {{{faceX, std::lerp(lowY, highY, h), std::lerp(lowZ, highZ, h)},
-             {faceX, std::lerp(lowY, highY, q), std::lerp(lowZ, highZ, q)},
-             {faceX, std::lerp(lowY, highY, r), std::lerp(lowZ, highZ, q)},
-             {faceX, std::lerp(lowY, highY, q), std::lerp(lowZ, highZ, r)},
-             {faceX, std::lerp(lowY, highY, r), std::lerp(lowZ, highZ, r)}}};
+inline FaceSamples samplesOnXFace(const bedrocktools::sdk::Vec3& eye, float faceX,
+                                  float lowY, float highY, float lowZ, float highZ) {
+    FaceSamples samples{};
+    samples[0] = {faceX, std::clamp(eye.y, lowY, highY),
+                  std::clamp(eye.z, lowZ, highZ)};
+    std::size_t index = 1;
+    for (const float fy : faceFractions) {
+        for (const float fz : faceFractions) {
+            samples[index++] = {faceX, std::lerp(lowY, highY, fy),
+                                std::lerp(lowZ, highZ, fz)};
+        }
+    }
+    return samples;
 }
-inline FaceSamples samplesOnZFace(float faceZ, float lowX, float highX,
-                                  float lowY, float highY) {
-    constexpr float q = 0.25f, r = 0.75f, h = 0.5f;
-    return {{{std::lerp(lowX, highX, h), std::lerp(lowY, highY, h), faceZ},
-             {std::lerp(lowX, highX, q), std::lerp(lowY, highY, q), faceZ},
-             {std::lerp(lowX, highX, r), std::lerp(lowY, highY, q), faceZ},
-             {std::lerp(lowX, highX, q), std::lerp(lowY, highY, r), faceZ},
-             {std::lerp(lowX, highX, r), std::lerp(lowY, highY, r), faceZ}}};
+inline FaceSamples samplesOnZFace(const bedrocktools::sdk::Vec3& eye, float faceZ,
+                                  float lowX, float highX, float lowY, float highY) {
+    FaceSamples samples{};
+    samples[0] = {std::clamp(eye.x, lowX, highX),
+                  std::clamp(eye.y, lowY, highY), faceZ};
+    std::size_t index = 1;
+    for (const float fy : faceFractions) {
+        for (const float fx : faceFractions) {
+            samples[index++] = {std::lerp(lowX, highX, fx),
+                                std::lerp(lowY, highY, fy), faceZ};
+        }
+    }
+    return samples;
 }
 
 // Return one candidate face per axis the eye is outside. From above/below the
-// player gets a top/bottom face in addition to the horizontal near face; an
-// unobstructed face is enough to land a melee hit from that direction.
+// player gets a top/bottom face in addition to the horizontal near face; every
+// face is a set of possible first-hit points, not an all-or-nothing surface.
 inline std::vector<FaceSamples> visibleFaceCandidates(
     const bedrocktools::sdk::Vec3& eye, const bedrocktools::sdk::AABB& box) {
-    constexpr float maxInset = 0.05f;
-    const float insetX = std::min(maxInset, (box.max.x - box.min.x) * 0.25f);
-    const float insetY = std::min(maxInset, (box.max.y - box.min.y) * 0.25f);
-    const float insetZ = std::min(maxInset, (box.max.z - box.min.z) * 0.25f);
+    constexpr float maxInset = 0.001f; // keep exact reach edges from being lost to the inset
+    const float insetX = std::min(maxInset, (box.max.x - box.min.x) * 0.2f);
+    const float insetY = std::min(maxInset, (box.max.y - box.min.y) * 0.2f);
+    const float insetZ = std::min(maxInset, (box.max.z - box.min.z) * 0.2f);
     const float lowX = box.min.x + insetX, highX = box.max.x - insetX;
     const float lowY = box.min.y + insetY, highY = box.max.y - insetY;
     const float lowZ = box.min.z + insetZ, highZ = box.max.z - insetZ;
     std::vector<FaceSamples> faces;
     faces.reserve(3);
-    if (eye.y > box.max.y) faces.push_back(samplesOnYFace(highY, lowX, highX, lowZ, highZ));
-    else if (eye.y < box.min.y) faces.push_back(samplesOnYFace(lowY, lowX, highX, lowZ, highZ));
-    if (eye.x > box.max.x) faces.push_back(samplesOnXFace(highX, lowY, highY, lowZ, highZ));
-    else if (eye.x < box.min.x) faces.push_back(samplesOnXFace(lowX, lowY, highY, lowZ, highZ));
-    if (eye.z > box.max.z) faces.push_back(samplesOnZFace(highZ, lowX, highX, lowY, highY));
-    else if (eye.z < box.min.z) faces.push_back(samplesOnZFace(lowZ, lowX, highX, lowY, highY));
-    if (faces.empty()) faces.push_back(samplesOnYFace(highY, lowX, highX, lowZ, highZ));
+    if (eye.y > box.max.y) faces.push_back(samplesOnYFace(eye, highY, lowX, highX, lowZ, highZ));
+    else if (eye.y < box.min.y) faces.push_back(samplesOnYFace(eye, lowY, lowX, highX, lowZ, highZ));
+    if (eye.x > box.max.x) faces.push_back(samplesOnXFace(eye, highX, lowY, highY, lowZ, highZ));
+    else if (eye.x < box.min.x) faces.push_back(samplesOnXFace(eye, lowX, lowY, highY, lowZ, highZ));
+    if (eye.z > box.max.z) faces.push_back(samplesOnZFace(eye, highZ, lowX, highX, lowY, highY));
+    else if (eye.z < box.min.z) faces.push_back(samplesOnZFace(eye, lowZ, lowX, highX, lowY, highY));
+    if (faces.empty()) faces.push_back(samplesOnYFace(eye, highY, lowX, highX, lowZ, highZ));
     return faces;
 }
 
 inline bool hasClearLineOfSight(const bedrocktools::sdk::Vec3& eye,
                                 const bedrocktools::sdk::AABB& box,
-                                const SightTest& sight) {
-    if (!sight || !validBox(box)) return false;
-    if (pointBoxDistanceSq(eye, box) <= 1e-8f) return true; // eye already inside target
+                                float reach, const SightTest& sight) {
+    if (!sight || !validBox(box) || !hitbox::isFinite(eye)) return false;
+    const float limit = safeReach(reach);
+    const float limitSq = limit * limit;
+    const float nearestSq = pointBoxDistanceSq(eye, box);
+    if (!std::isfinite(nearestSq) || nearestSq > limitSq) return false;
+    if (nearestSq <= 1e-8f) return true; // eye already inside the target
     for (const auto& face : visibleFaceCandidates(eye, box)) {
-        bool faceClear = true;
         for (const auto& point : face) {
-            if (sightRayHitsSolid(eye, point, sight, &box)) { faceClear = false; break; }
+            // Reach is measured to the actual exposed hit point, not merely to
+            // the nearest corner of a partly unreachable collision box.
+            if (pointDistanceSq(eye, point) > limitSq) continue;
+            if (!sightRayHitsSolid(eye, point, sight, &box)) return true;
         }
-        if (faceClear) return true;
     }
     return false;
 }
 
-// Range is the 3D eye-to-nearest-point-on-target-box distance, not
-// player-AABB-to-target-AABB or a flat horizontal radius. The green decision is
-// camera-independent: it needs only the eye position and the native solid-block
-// sight test, including targets above/below by up to the automatic reach. There
-// is no frontal cone, no crosshair HitResult and no exact-aim fallback. Without
-// the occlusion signature the module fails closed to red instead of promising
-// a hit through an unseen wall.
+// Range is the 3D eye-to-exposed-hit-point distance, not player-AABB-to-target-
+// AABB or a flat horizontal radius. The green decision is camera-independent:
+// it needs only the eye position and the native solid-block sight test, works
+// from every direction including above/below, and accepts partial visibility.
+// There is no frontal cone, no crosshair HitResult and no exact-aim fallback.
+// Without the occlusion signature the module fails closed to red instead of
+// promising a hit through an unseen wall.
 inline bool candidateHittable(const TargetCandidate& candidate, float reach,
                               const bedrocktools::sdk::Vec3& eye,
                               const SightTest& sight) {
     if (!sight || !validBox(candidate.box)) return false;
-    const float limit = safeReach(reach);
-    if (pointBoxDistanceSq(eye, candidate.box) > limit * limit) return false;
-    return hasClearLineOfSight(eye, candidate.box, sight);
+    return hasClearLineOfSight(eye, candidate.box, reach, sight);
 }
 
 struct ReachVerdict {
