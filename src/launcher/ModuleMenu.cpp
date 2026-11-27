@@ -248,6 +248,10 @@ void registerModulesWithLauncher() {
                     // Hit Range ring thickness in blocks.
                     minVal = hitrange::minWidth;
                     maxVal = hitrange::maxWidth;
+                } else if (kLower == "ringheightoffset") {
+                    // Fine vertical adjustment for the Hit Range circle.
+                    minVal = hitrange::minRingHeightOffset;
+                    maxVal = hitrange::maxRingHeightOffset;
                 } else if (kLower.find("opacity") != std::string::npos ||
                     kLower.find("color") != std::string::npos ||
                     kLower.find("alpha") != std::string::npos) {

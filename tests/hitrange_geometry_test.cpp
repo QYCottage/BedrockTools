@@ -58,6 +58,33 @@ int main() {
     assert(validBox(player) && !validBox(AABB{{NAN, 0, 0}, {1, 1, 1}}));
     assert(std::abs(feetCenter(player).y - (64.0f + groundLift)) < 0.0001f);
     assert(std::abs(eyePosition(player).y - (64.0f + 1.62f)) < 0.0001f);
+
+    // Ring Level: Feet keeps the floor lift, Middle uses the box centre and
+    // Head uses the box top. The optional offset is clamped and does not affect
+    // the reach/hittability helpers.
+    assert(ringLevelCount == 3);
+    assert(safeRingLevel(-5) == RingLevelFeet && safeRingLevel(99) == RingLevelHead);
+    assert(ringLevelIndex("0,Feet,Middle,Head") == RingLevelFeet);
+    assert(ringLevelIndex("Middle") == RingLevelMiddle);
+    assert(ringLevelIndex("Head") == RingLevelHead);
+    assert(ringLevelIndex("2") == RingLevelHead);
+    assert(ringLevelIndex("99") == RingLevelHead);
+    assert(ringLevelIndex("unknown") == RingLevelFeet);
+    assert(ringLevelRadioValue(RingLevelMiddle) == "1,Feet,Middle,Head");
+    assert(safeRingHeightOffset(0.5f) == 0.5f);
+    assert(safeRingHeightOffset(100.0f) == maxRingHeightOffset);
+    assert(safeRingHeightOffset(-100.0f) == minRingHeightOffset);
+    assert(safeRingHeightOffset(NAN) == defaultRingHeightOffset);
+    assert(std::abs(ringLevelY(player, RingLevelFeet) - (64.0f + groundLift)) < 0.0001f);
+    assert(std::abs(ringLevelY(player, RingLevelMiddle) - 64.9f) < 0.0001f);
+    assert(std::abs(ringLevelY(player, RingLevelHead) - 65.8f) < 0.0001f);
+    assert(std::abs(ringLevelY(tall, RingLevelMiddle) - 71.0f) < 0.0001f);
+    assert(std::abs(ringLevelY(tall, RingLevelHead) - 72.0f) < 0.0001f);
+    const Vec3 middleOffset = ringCenterForLevel(player, RingLevelMiddle, 0.5f);
+    assert(std::abs(middleOffset.x) < 0.0001f && std::abs(middleOffset.z) < 0.0001f);
+    assert(std::abs(middleOffset.y - 65.4f) < 0.0001f);
+    assert(std::abs(ringCenterForLevel(player, RingLevelHead, 100.0f).y -
+                    (65.8f + maxRingHeightOffset)) < 0.0001f);
     const Vec3 eye = eyePosition(player);
 
     assert(boxesWithin(player, nearSide, 3.0f));
@@ -251,5 +278,5 @@ int main() {
         assert(std::abs(a.x - b.x) < 0.00001f && std::abs(a.z - b.z) < 0.00001f);
     }
 
-    std::puts("hitrange camera-independent 3D range, exposed-point LOS, native confirmation, stability and ring geometry: OK");
+    std::puts("hitrange camera-independent 3D range, exposed-point LOS, native confirmation, ring levels, stability and ring geometry: OK");
 }

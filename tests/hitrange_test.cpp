@@ -1,7 +1,7 @@
 // Integration test for the Hit Range tick sampler, camera-independent range/LOS
-// verdict, positive-only native hit-result confirmation, stable attack-frame
-// rings, auto-detected survival/creative reach and ring renderer using fake
-// game memory.
+// verdict, positive-only native hit-result confirmation, configurable ring
+// levels, stable attack-frame rings, auto-detected survival/creative reach and
+// ring renderer using fake game memory.
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -26,6 +26,7 @@ namespace off = bedrocktools::sdk::offsets;
 
 int vertices = 0, begins = 0, flushes = 0, lastCount = 0;
 std::vector<std::array<float, 4>> colors;
+std::vector<float> vertexYs;
 std::vector<void*> materials;
 fake_render::GpuColor gpu;
 
@@ -64,8 +65,8 @@ void fakeColor(void*, float r, float g, float b, float a) {
     colors.push_back({r, g, b, a});
 }
 void fakeVertex(void*, float x, float y, float z) {
-    (void)y;
     assert(std::abs(x) <= 16.0f && std::abs(z) <= 16.0f);
+    vertexYs.push_back(y);
     ++vertices;
 }
 void fakeFlush(void* screen, void*, void* material, char*) {
@@ -79,6 +80,7 @@ void resetDraw() {
     vertices = begins = flushes = lastCount = 0;
     colors.clear();
     materials.clear();
+    vertexYs.clear();
 }
 void fresh(SightMode mode = SightMode::Clear) {
     clearState();
@@ -131,6 +133,12 @@ void expectColor(std::size_t index, std::uint32_t value) {
     assert(std::abs(colors[index][0] - r) < 0.001f);
     assert(std::abs(colors[index][1] - g) < 0.001f);
     assert(std::abs(colors[index][2] - b) < 0.001f);
+}
+// The fake camera sits at y=65; render() submits camera-relative vertices.
+void expectRingY(float worldY) {
+    assert(!vertexYs.empty());
+    const float expected = worldY - 65.0f;
+    for (const float y : vertexYs) assert(std::abs(y - expected) < 0.001f);
 }
 } // namespace
 
@@ -585,6 +593,8 @@ int main() {
     nlohmann::json settings;
     settings["reach"] = 4.5f;
     settings["lineWidth"] = 0.2f;
+    settings["ringLevel"] = "1";
+    settings["ringHeightOffset"] = 0.4f;
     settings["effectStyle"] = "2";
     settings["inRangeColor"] = "#80123456";
     settings["outOfRangeColor"] = "#ABCDEF";
@@ -596,8 +606,10 @@ int main() {
     settings["seeThrough"] = true;
     mod.loadConfig(settings);
     assert(!mod.showInLegacyMenu("reach") && !mod.showInLegacyMenu("autoReach"));
-    assert(mod.showInLegacyMenu("lineWidth"));
+    assert(mod.showInLegacyMenu("lineWidth") && mod.showInLegacyMenu("ringLevel") &&
+           mod.showInLegacyMenu("ringHeightOffset"));
     assert(mod.effectiveReach() == survivalReach && mod.lineWidth == 0.2f && mod.style == 2);
+    assert(mod.ringLevel == RingLevelMiddle && mod.ringHeightOffset == 0.4f);
     assert(mod.inRangeColor == 0x80123456u && mod.outOfRangeColor == 0xFFABCDEFu);
     assert(!mod.showSelf && !mod.showTargets && !mod.showPlayers && mod.showMobs && mod.seeThrough);
     nlohmann::json invalid;
@@ -608,12 +620,15 @@ int main() {
     mod.saveConfig(saved);
     assert(!saved.contains("reach") && !saved.contains("autoReach"));
     assert(saved["lineWidth"].get<float>() == 0.2f);
+    assert(saved["ringLevel"].get<std::string>() == ringLevelRadioValue(RingLevelMiddle));
+    assert(saved["ringHeightOffset"].get<float>() == 0.4f);
     assert(saved["inRangeColor"].get<std::string>() == "#80123456");
     assert(saved["outOfRangeColor"].get<std::string>() == "#FFABCDEF");
     assert(saved["effectStyle"].get<std::string>() == jumpcircle::styleRadioValue(2));
     assert(saved["seeThrough"].get<bool>());
     mod.loadConfig(saved);
     assert(mod.effectiveReach() == survivalReach && mod.style == 2 && mod.inRangeColor == 0x80123456u);
+    assert(mod.ringLevel == RingLevelMiddle && mod.ringHeightOffset == 0.4f);
     for (int i = 0; i < jumpcircle::styleCount; ++i) {
         nlohmann::json choice;
         choice["effectStyle"] = std::to_string(i);
@@ -623,9 +638,72 @@ int main() {
         mod.saveConfig(roundTrip);
         assert(jumpcircle::styleIndex(roundTrip["effectStyle"].get<std::string>()) == i);
     }
+    for (int i = 0; i < ringLevelCount; ++i) {
+        nlohmann::json choice;
+        choice["ringLevel"] = std::to_string(i);
+        mod.loadConfig(choice);
+        assert(mod.ringLevel == i);
+        nlohmann::json roundTrip;
+        mod.saveConfig(roundTrip);
+        assert(ringLevelIndex(roundTrip["ringLevel"].get<std::string>()) == i);
+    }
+    nlohmann::json badHeight;
+    badHeight["ringLevel"] = "unknown";
+    badHeight["ringHeightOffset"] = 100.0f;
+    mod.loadConfig(badHeight);
+    assert(mod.ringLevel == RingLevelFeet && mod.ringHeightOffset == maxRingHeightOffset);
+
     assert(safeReach(survivalReach) == survivalReach);
     assert(safeReach(creativeReach) == creativeReach);
     assert(safeWidth(saved["lineWidth"].get<float>()) == 0.2f);
+
+    // Ring Level changes only the drawn Y of every ring. The horizontal
+    // centres, radius, colours and hittability verdict remain unchanged.
+    mod.showSelf = true;
+    mod.showTargets = true;
+    mod.showPlayers = true;
+    mod.setGameMode(nullptr);
+    mod.setCreativeMode(false);
+    player.setGameMode(nullptr);
+    player.set(playerBox, off::ActorCategories::IsPlayer, g_level.data());
+    targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
+    mod.ringLevel = RingLevelFeet;
+    mod.ringHeightOffset = 0.0f;
+    fresh();
+    tick(player.ptr());
+    assert(state.reach == survivalReach && state.ringLevel == RingLevelFeet);
+    render(renderer.data(), screen.data());
+    expectRingY(64.0f + groundLift);
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    mod.ringLevel = RingLevelMiddle;
+    fresh();
+    tick(player.ptr());
+    assert(state.ringLevel == RingLevelMiddle);
+    render(renderer.data(), screen.data());
+    expectRingY(64.9f);
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    mod.ringLevel = RingLevelHead;
+    fresh();
+    tick(player.ptr());
+    render(renderer.data(), screen.data());
+    expectRingY(65.8f);
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    // The fine offset is applied on top of the chosen level and is clamped by
+    // the config/geometry helpers, not by the renderer.
+    mod.ringHeightOffset = 0.5f;
+    fresh();
+    tick(player.ptr());
+    render(renderer.data(), screen.data());
+    expectRingY(66.3f);
+    mod.ringLevel = RingLevelFeet;
+    mod.ringHeightOffset = 0.0f;
 
     // A stale snapshot (pause / world change) draws nothing; disable clears it.
     mod.showSelf = true;

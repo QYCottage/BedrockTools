@@ -2,6 +2,11 @@
 
 // Pure geometry and configuration helpers for the Hit Range overlay.
 //
+// The ring can be drawn at the feet, the middle or the head of each actor's
+// collision box, with an optional fine vertical offset. Changing the level
+// affects only the drawn height: it never changes hittability, reach, colour
+// or the camera-independent verdict.
+//
 // Green means "an eligible player/mob is inside the automatic 3/5-block 3D
 // reach and at least one exposed point on a face visible from the player's eye
 // has an unobstructed sight line within that reach". It is deliberately
@@ -43,6 +48,9 @@ inline constexpr float defaultWidth = 0.10f; // blocks
 inline constexpr float minWidth = 0.02f;
 inline constexpr float maxWidth = 0.50f;
 inline constexpr float groundLift = 0.03f;   // avoids z-fighting with the floor
+inline constexpr float defaultRingHeightOffset = 0.0f;
+inline constexpr float minRingHeightOffset = -2.0f; // blocks
+inline constexpr float maxRingHeightOffset = 2.0f;  // blocks
 inline constexpr int segments = jumpcircle::segments;
 inline constexpr int bands = jumpcircle::bands;
 inline constexpr int vertexCount = segments * bands * 4;
@@ -61,6 +69,47 @@ inline float safeReach(float value) {
 }
 inline float safeWidth(float value) {
     return std::isfinite(value) ? std::clamp(value, minWidth, maxWidth) : defaultWidth;
+}
+inline float safeRingHeightOffset(float value) {
+    return std::isfinite(value)
+        ? std::clamp(value, minRingHeightOffset, maxRingHeightOffset)
+        : defaultRingHeightOffset;
+}
+
+// Persistent Ring Level picker. The first token is the selected index and the
+// remaining comma-separated tokens are the launcher radio labels, matching the
+// existing Effect Style convention.
+enum RingLevel : int {
+    RingLevelFeet = 0,
+    RingLevelMiddle = 1,
+    RingLevelHead = 2,
+};
+inline constexpr int ringLevelCount = 3;
+inline constexpr std::array<std::string_view, ringLevelCount> ringLevelNames{
+    "Feet", "Middle", "Head"};
+inline int safeRingLevel(int value) {
+    return std::clamp(value, 0, ringLevelCount - 1);
+}
+inline int ringLevelIndex(std::string_view value) {
+    value = value.substr(0, value.find(','));
+    for (int i = 0; i < ringLevelCount; ++i) {
+        if (value == ringLevelNames[i] || value == std::to_string(i)) return i;
+    }
+    try {
+        std::size_t consumed = 0;
+        const int parsed = std::stoi(std::string(value), &consumed);
+        if (consumed == value.size()) return safeRingLevel(parsed);
+    } catch (...) {}
+    return RingLevelFeet;
+}
+inline std::string ringLevelRadioValue(int value) {
+    const int index = safeRingLevel(value);
+    std::string result = std::to_string(index);
+    for (const auto name : ringLevelNames) {
+        result += ',';
+        result += name;
+    }
+    return result;
 }
 
 // The launcher color picker sends #AARRGGBB; #RRGGBB is accepted for configs
@@ -97,6 +146,27 @@ inline bedrocktools::sdk::Vec3 boxCenter(const bedrocktools::sdk::AABB& box) {
 inline bedrocktools::sdk::Vec3 feetCenter(const bedrocktools::sdk::AABB& box,
                                            float lift = groundLift) {
     return {(box.min.x + box.max.x) * 0.5f, box.min.y + lift,
+            (box.min.z + box.max.z) * 0.5f};
+}
+
+// Rendered ring height for one actor. Feet keeps the small floor lift; Middle
+// uses the collision-box centre and Head uses its top. Every ring uses its own
+// actor box, so a tall mob's head ring is not tied to the player's height.
+inline float ringLevelY(const bedrocktools::sdk::AABB& box, int level) {
+    if (!validBox(box)) return 0.0f;
+    switch (safeRingLevel(level)) {
+        case RingLevelMiddle: return (box.min.y + box.max.y) * 0.5f;
+        case RingLevelHead: return box.max.y;
+        case RingLevelFeet:
+        default: return box.min.y + groundLift;
+    }
+}
+inline bedrocktools::sdk::Vec3 ringCenterForLevel(
+    const bedrocktools::sdk::AABB& box, int level,
+    float heightOffset = defaultRingHeightOffset) {
+    if (!validBox(box)) return {};
+    return {(box.min.x + box.max.x) * 0.5f,
+            ringLevelY(box, level) + safeRingHeightOffset(heightOffset),
             (box.min.z + box.max.z) * 0.5f};
 }
 

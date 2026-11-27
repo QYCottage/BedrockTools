@@ -148,6 +148,9 @@ struct State {
     bool gameConfirmed = false;
     const void* hittableActor = nullptr;
     float reach = hitrange::survivalReach;
+    AABB selfBox{};
+    int ringLevel = hitrange::RingLevelFeet;
+    float ringHeightOffset = hitrange::defaultRingHeightOffset;
     hitbox::Track selfTrack{};
     Vec3 selfStableCenter{};
     Clock::time_point selfSampleTime{};
@@ -575,6 +578,9 @@ void tick(void* rawPlayer) {
         state.gameConfirmed = verdict.gameConfirmed;
         state.hittableActor = verdict.hittableActor;
         state.reach = reach;
+        state.selfBox = playerBox;
+        state.ringLevel = module->ringLevel;
+        state.ringHeightOffset = module->ringHeightOffset;
         state.selfTrack = selfTrack;
         state.selfStableCenter = selfStableCenter;
         state.selfSampleTime = selfSampleTime;
@@ -614,17 +620,29 @@ void render(void* renderer, void* screen) {
         std::uint32_t color;
     };
     std::vector<DrawRing> rings;
+    // Ring Level is applied at draw time from each actor's own box, so a menu
+    // change takes effect on the next tick without rebuilding or smoothing the
+    // horizontal centre tracks.
+    const int ringLevel = hitrange::safeRingLevel(snapshot.ringLevel);
+    const float heightOffset = hitrange::safeRingHeightOffset(snapshot.ringHeightOffset);
+    const auto ringY = [ringLevel, heightOffset](const AABB& box) {
+        return hitrange::ringLevelY(box, ringLevel) + heightOffset;
+    };
     if (module->showSelf) {
         const float elapsed = snapshot.selfSampleTime == Clock::time_point{}
             ? 0.05f : std::chrono::duration<float>(now - snapshot.selfSampleTime).count();
-        rings.push_back({hitrange::interpolatedCenter(snapshot.selfTrack, elapsed),
+        Vec3 center = hitrange::interpolatedCenter(snapshot.selfTrack, elapsed);
+        center.y = ringY(snapshot.selfBox);
+        rings.push_back({center,
                          snapshot.inRange ? module->inRangeColor : module->outOfRangeColor});
     }
     if (module->showTargets) {
         for (const auto& target : snapshot.targets) {
             const float elapsed = target.sampleTime == Clock::time_point{}
                 ? 0.05f : std::chrono::duration<float>(now - target.sampleTime).count();
-            rings.push_back({hitrange::interpolatedCenter(target.track, elapsed),
+            Vec3 center = hitrange::interpolatedCenter(target.track, elapsed);
+            center.y = ringY(target.box);
+            rings.push_back({center,
                              target.inRange ? module->inRangeColor : module->outOfRangeColor});
         }
     }
@@ -662,7 +680,7 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green when the game or camera-independent exposed-point geometry confirms a target is hittable, without requiring crosshair aim.") {
+    : Module("Hit Range", "Auto-sized circle at feet, middle or head level (survival/creative) that turns green when the game or camera-independent exposed-point geometry confirms a target is hittable, without requiring crosshair aim.") {
     module = this;
     hideInHudEditor = true;
 }
@@ -778,6 +796,19 @@ void HitRangeModule::loadConfig(const nlohmann::json& j) {
     if (j.contains("lineWidth")) {
         try { lineWidth = hitrange::safeWidth(j["lineWidth"].get<float>()); } catch (...) {}
     }
+    if (j.contains("ringLevel")) {
+        try {
+            if (j["ringLevel"].is_string())
+                ringLevel = hitrange::ringLevelIndex(j["ringLevel"].get<std::string>());
+            else if (j["ringLevel"].is_number_integer())
+                ringLevel = hitrange::safeRingLevel(j["ringLevel"].get<int>());
+        } catch (...) {}
+    }
+    if (j.contains("ringHeightOffset")) {
+        try {
+            ringHeightOffset = hitrange::safeRingHeightOffset(j["ringHeightOffset"].get<float>());
+        } catch (...) {}
+    }
     if (j.contains("inRangeColor") && j["inRangeColor"].is_string())
         inRangeColor = hitrange::parseColor(j["inRangeColor"].get<std::string>(), inRangeColor);
     if (j.contains("outOfRangeColor") && j["outOfRangeColor"].is_string())
@@ -797,6 +828,8 @@ void HitRangeModule::saveConfig(nlohmann::json& j) {
     j.erase("reach");
     j.erase("autoReach");
     j["lineWidth"] = hitrange::safeWidth(lineWidth);
+    j["ringLevel"] = hitrange::ringLevelRadioValue(ringLevel);
+    j["ringHeightOffset"] = hitrange::safeRingHeightOffset(ringHeightOffset);
     j["effectStyle"] = jumpcircle::styleRadioValue(style);
     j["inRangeColor"] = hitrange::colorString(inRangeColor);
     j["outOfRangeColor"] = hitrange::colorString(outOfRangeColor);
