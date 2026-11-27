@@ -43,6 +43,11 @@ struct BlockPosI {
     int x, y, z;
 };
 using IsSolidBlockingBlock = bool (*)(void*, const BlockPosI&);
+// Level::getHitResult() and HitResult::getEntity(): the game's own crosshair
+// picking verdict. Hit Range uses them only as a positive confirmation, never
+// as a requirement or a veto for the camera-independent green decision.
+using LevelGetHitResult = void* (*)(void*);
+using HitResultGetEntity = void* (*)(void*);
 
 struct DistanceSortedActor {
     void* mActor;
@@ -110,6 +115,8 @@ RenderMesh renderMesh = nullptr;
 RenderLevel originalRender = nullptr;
 FetchNearby fetchNearby = nullptr;
 IsSolidBlockingBlock isSolidBlockingBlock = nullptr;
+LevelGetHitResult levelGetHitResult = nullptr;
+HitResultGetEntity hitResultGetEntity = nullptr;
 std::uintptr_t survivalAttackFn = 0;
 std::uintptr_t creativeAttackFn = 0;
 std::uintptr_t creativeInternalFn = 0;
@@ -138,6 +145,7 @@ struct State {
     bool hasPlayer = false;
     bool targetPresent = false;
     bool inRange = false;
+    bool gameConfirmed = false;
     const void* hittableActor = nullptr;
     float reach = hitrange::survivalReach;
     hitbox::Track selfTrack{};
@@ -382,6 +390,30 @@ bool nativeSolidBlock(const void* context, int x, int y, int z) noexcept {
     return isSolidBlockingBlock(const_cast<void*>(context), position);
 }
 
+// Read the game's own current HitResult. TypeEntity already means "the picked
+// actor is under the crosshair AND inside the game's allowed reach"; the actor
+// is resolved through the native getter instead of an unpinned struct offset.
+// This is a positive-only signal: it can confirm one trusted nearby actor, but
+// it never turns another hittable target red and is never used without the
+// native solid-block signature below.
+void* nativeHittableEntity(void* rawPlayer) noexcept {
+    if (!levelGetHitResult || !hitResultGetEntity ||
+        reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) return nullptr;
+    const auto* bytes = reinterpret_cast<const std::byte*>(rawPlayer);
+    void* level = nullptr;
+    if (!safeRead(bytes + off::Actor::mLevel, level) ||
+        reinterpret_cast<std::uintptr_t>(level) < 0x1000) return nullptr;
+    void* hit = levelGetHitResult(level);
+    if (!hit || reinterpret_cast<std::uintptr_t>(hit) < 0x1000) return nullptr;
+    int hitType = 0;
+    if (!safeRead(reinterpret_cast<const std::byte*>(hit) + off::HitResult::mType, hitType) ||
+        hitType != off::HitResult::TypeEntity) return nullptr;
+    void* entity = hitResultGetEntity(hit);
+    if (!entity || entity == rawPlayer ||
+        reinterpret_cast<std::uintptr_t>(entity) < 0x1000) return nullptr;
+    return entity;
+}
+
 void tick(void* rawPlayer) {
     if (!module || !module->enabled || reinterpret_cast<std::uintptr_t>(rawPlayer) < 0x1000) {
         clearState();
@@ -397,14 +429,17 @@ void tick(void* rawPlayer) {
     // Cache the radius for this tick as well: the render hook must not read a
     // mode hint that changes between the tick and the draw call.
     const float reach = module->effectiveReach();
-    // Problems 5-7: only the 3D eye position and native sight test decide
-    // green. Camera rotation/crosshair HitResult are deliberately not read, and
-    // the exposed-point sampler covers partial visibility and targets above or
-    // below the player without accepting a wall-hidden target.
+    // Native verdict confirmation: geometry stays camera-independent. The game's own
+    // TypeEntity HitResult is read as a positive-only confirmation, not as a
+    // crosshair requirement; TypeEntityOutOfRange/block/no-hit never vetoes a
+    // target that the exposed-point sampler can hit from any direction.
     const Vec3 eye = hitrange::eyePosition(playerBox);
     void* region = occlusionRegion(rawPlayer);
     const hitrange::SightTest sight{
         region, (region && isSolidBlockingBlock) ? &nativeSolidBlock : nullptr};
+    void* gameActor = nativeHittableEntity(rawPlayer);
+    std::vector<const void*> confirmedActors;
+    if (gameActor) confirmedActors.push_back(gameActor);
 
     RecentAttack attack{};
     {
@@ -478,8 +513,9 @@ void tick(void* rawPlayer) {
                 if (!hitrange::validBox(box)) continue;
                 const hitrange::TargetCandidate candidate{actor, box};
                 candidates.push_back(candidate);
+                const bool gameConfirmed = gameActor && gameActor == actor;
                 const bool rawInRange = hitrange::candidateHittable(
-                    candidate, reach, eye, sight);
+                    candidate, reach, eye, sight, gameConfirmed);
                 if (nextTargets.size() >= maxTargetRings) continue; // keep scanning for the verdict
 
                 TargetState target;
@@ -527,7 +563,7 @@ void tick(void* rawPlayer) {
         nextTargets.push_back(std::move(held));
     }
 
-    const auto verdict = hitrange::classify(candidates, reach, eye, sight);
+    const auto verdict = hitrange::classify(candidates, reach, eye, sight, confirmedActors);
     const bool stableInRange = verdictHold.update(verdict.inRange, nowSeconds);
 
     {
@@ -536,6 +572,7 @@ void tick(void* rawPlayer) {
         state.hasPlayer = true;
         state.targetPresent = verdict.targetPresent || !nextTargets.empty();
         state.inRange = stableInRange;
+        state.gameConfirmed = verdict.gameConfirmed;
         state.hittableActor = verdict.hittableActor;
         state.reach = reach;
         state.selfTrack = selfTrack;
@@ -625,7 +662,7 @@ void renderHook(void* renderer, void* screen, void* params) {
 } // namespace
 
 HitRangeModule::HitRangeModule()
-    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green when any exposed part of a target is in 3D reach with clear sight, regardless of camera aim or vertical offset.") {
+    : Module("Hit Range", "Auto-sized ground circle (survival/creative) that turns green when the game or camera-independent exposed-point geometry confirms a target is hittable, without requiring crosshair aim.") {
     module = this;
     hideInHudEditor = true;
 }
@@ -670,6 +707,10 @@ void HitRangeModule::onInit() {
     fetchNearby = reinterpret_cast<FetchNearby>(resolve(SignatureId::ActorFetchNearbyActorsSorted));
     isSolidBlockingBlock = reinterpret_cast<IsSolidBlockingBlock>(
         resolve(SignatureId::BlockSourceIsSolidBlockingBlock));
+    levelGetHitResult = reinterpret_cast<LevelGetHitResult>(
+        resolve(SignatureId::LevelGetHitResult));
+    hitResultGetEntity = reinterpret_cast<HitResultGetEntity>(
+        resolve(SignatureId::HitResultGetEntity));
     survivalAttackFn = resolve(SignatureId::SurvivalModeAttack);
     creativeAttackFn = resolve(SignatureId::GameModeAttack);
     creativeInternalFn = resolve(SignatureId::GameModeAttackInternal);

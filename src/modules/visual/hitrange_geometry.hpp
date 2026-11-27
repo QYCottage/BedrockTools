@@ -9,10 +9,12 @@
 // turn a reachable target red or an unreachable one green. Dense sampling of
 // every near-facing face covers attacks from above, below, beside and behind;
 // one clear, in-reach hit point is enough when a cage or support block hides
-// only part of the target. It is not plain AABB proximity: a solid wall across
-// every exposed point keeps the ring red. The native BlockSource solid-block
-// query supplies occlusion; without that signature the verdict fails closed to
-// red, never to a crosshair-only guess.
+// only part of the target. The game's own TypeEntity HitResult is an optional
+// positive-only confirmation: it can turn a target green, but cannot veto the
+// camera-independent geometry when the crosshair is elsewhere. It is not plain
+// AABB proximity: a solid wall across every exposed point keeps the ring red.
+// The native BlockSource solid-block query supplies occlusion; without that
+// signature the verdict fails closed to red, never to a crosshair-only guess.
 // These helpers are host-testable without Minecraft.
 
 #include "hitbox_interp.hpp"
@@ -331,35 +333,57 @@ inline bool hasClearLineOfSight(const bedrocktools::sdk::Vec3& eye,
 
 // Range is the 3D eye-to-exposed-hit-point distance, not player-AABB-to-target-
 // AABB or a flat horizontal radius. The green decision is camera-independent:
-// it needs only the eye position and the native solid-block sight test, works
-// from every direction including above/below, and accepts partial visibility.
-// There is no frontal cone, no crosshair HitResult and no exact-aim fallback.
-// Without the occlusion signature the module fails closed to red instead of
-// promising a hit through an unseen wall.
+// geometry works from every direction including above/below and accepts partial
+// visibility. `gameConfirmed` is a positive-only signal from the game's own
+// TypeEntity HitResult; it still requires the automatic 3/5 reach and the
+// native solid-block signature, but can bypass a conservative LOS sample when
+// the game itself already says the actor is hittable. There is no frontal cone,
+// no crosshair requirement and no aim-dependent veto. Without the occlusion
+// signature the module fails closed to red instead of promising a hit through
+// an unseen wall.
 inline bool candidateHittable(const TargetCandidate& candidate, float reach,
                               const bedrocktools::sdk::Vec3& eye,
-                              const SightTest& sight) {
+                              const SightTest& sight,
+                              bool gameConfirmed = false) {
     if (!sight || !validBox(candidate.box)) return false;
+    const float limit = safeReach(reach);
+    const float nearestSq = pointBoxDistanceSq(eye, candidate.box);
+    if (!std::isfinite(nearestSq) || nearestSq > limit * limit) return false;
+    if (gameConfirmed) return true;
     return hasClearLineOfSight(eye, candidate.box, reach, sight);
+}
+
+inline bool actorConfirmed(const std::vector<const void*>& confirmedActors,
+                           const void* actor) {
+    return std::find(confirmedActors.begin(), confirmedActors.end(), actor) !=
+           confirmedActors.end();
 }
 
 struct ReachVerdict {
     bool targetPresent = false;
     bool inRange = false;
+    bool gameConfirmed = false; // at least one actor was confirmed by the game
     const void* hittableActor = nullptr; // first qualifying actor, for diagnostics
     std::vector<const void*> hittableActors{};
 };
 
-// `eye` is the only player-state input. Camera rotation/crosshair hit results
-// are intentionally absent: rotating the screen must not change green/red.
+// `eye` and the native sight test decide the camera-independent verdict.
+// `confirmedActors` comes from the game's own HitResult and is positive-only:
+// rotating the screen to a block/no-hit/out-of-range result must never turn a
+// hittable target red. A confirmed actor still has to pass the automatic 3/5
+// reach and appear in the trusted nearby-actor list.
 inline ReachVerdict classify(const std::vector<TargetCandidate>& candidates,
                              float reach, const bedrocktools::sdk::Vec3& eye,
-                             const SightTest& sight = {}) {
+                             const SightTest& sight = {},
+                             const std::vector<const void*>& confirmedActors = {}) {
     ReachVerdict verdict;
     for (const auto& candidate : candidates) {
         verdict.targetPresent = true;
-        if (candidateHittable(candidate, reach, eye, sight))
+        const bool confirmed = actorConfirmed(confirmedActors, candidate.actor);
+        if (candidateHittable(candidate, reach, eye, sight, confirmed)) {
             verdict.hittableActors.push_back(candidate.actor);
+            verdict.gameConfirmed |= confirmed;
+        }
     }
     verdict.inRange = !verdict.hittableActors.empty();
     verdict.hittableActor = verdict.inRange ? verdict.hittableActors.front() : nullptr;

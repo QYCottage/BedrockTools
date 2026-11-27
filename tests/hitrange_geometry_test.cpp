@@ -87,9 +87,9 @@ int main() {
         {&frontActor, nearFront}, {&sideActor, nearSide},
         {&behindActor, nearBehind}, {&offActor, offCrosshair},
     };
-    // Problem 5: green is a camera-independent range/LOS verdict. Every nearby
-    // unobstructed target qualifies, whether it is in front, beside, behind or
-    // off the crosshair. No camera direction or HitResult is an input.
+    // Problem 5: green remains a camera-independent range/LOS verdict. Every
+    // nearby unobstructed target qualifies, whether it is in front, beside,
+    // behind or off the crosshair; this call supplies no HitResult input.
     auto noCrosshair = classify(mixed, 3.0f, eye, clear);
     assert(noCrosshair.targetPresent && noCrosshair.inRange);
     assert(noCrosshair.hittableActors.size() == 4);
@@ -161,11 +161,38 @@ int main() {
     auto lowWallAll = classify(mixed, 3.0f, lowEye, solidWall);
     assert(lowWallAll.targetPresent && !lowWallAll.inRange);
 
-    // No solid-block signature: fail closed to red. There is no TypeEntity or
-    // exact-crosshair fallback that can promise a hit through an unseen wall.
+    // Native verdict confirmation: the game's own TypeEntity verdict is a positive-only
+    // confirmation. It can turn a trusted nearby actor green despite a
+    // conservative LOS veto, but cannot bypass the native solid-block
+    // signature, extend the automatic 3/5 reach, or veto geometry when the
+    // crosshair is elsewhere.
+    auto confirmedWall = classify({{&frontActor, nearFront}}, 3.0f, eye,
+                                  solidWall, {&frontActor});
+    assert(confirmedWall.targetPresent && confirmedWall.inRange &&
+           confirmedWall.gameConfirmed && confirmedWall.hittableActor == &frontActor);
+    auto unknownConfirmed = classify({{&frontActor, nearFront}}, 3.0f, eye,
+                                     solidWall, {&sideActor});
+    assert(unknownConfirmed.targetPresent && !unknownConfirmed.inRange &&
+           !unknownConfirmed.gameConfirmed);
+    auto confirmedTooFar = classify({{&sideActor, far}}, 3.0f, eye,
+                                    clear, {&sideActor});
+    assert(confirmedTooFar.targetPresent && !confirmedTooFar.inRange &&
+           !confirmedTooFar.gameConfirmed);
+    auto crosshairElsewhere = classify({{&frontActor, nearFront}}, 3.0f, eye,
+                                       clear, {&sideActor});
+    assert(crosshairElsewhere.targetPresent && crosshairElsewhere.inRange &&
+           !crosshairElsewhere.gameConfirmed);
+    assert(candidateHittable({&frontActor, nearFront}, 3.0f, eye, solidWall, true));
+
+    // No solid-block signature: fail closed to red even with a TypeEntity
+    // confirmation. There is no crosshair-only fallback through unseen walls.
     auto noSignature = classify({{&frontActor, nearFront}}, 3.0f, eye);
     assert(noSignature.targetPresent && !noSignature.inRange &&
            noSignature.hittableActor == nullptr);
+    auto noSignatureConfirmed = classify({{&frontActor, nearFront}}, 3.0f, eye,
+                                         SightTest{}, {&frontActor});
+    assert(noSignatureConfirmed.targetPresent && !noSignatureConfirmed.inRange &&
+           !noSignatureConfirmed.gameConfirmed);
     auto empty = classify({}, 3.0f, eye, clear);
     assert(!empty.targetPresent && !empty.inRange && empty.hittableActor == nullptr);
 
@@ -224,5 +251,5 @@ int main() {
         assert(std::abs(a.x - b.x) < 0.00001f && std::abs(a.z - b.z) < 0.00001f);
     }
 
-    std::puts("hitrange camera-independent 3D range, exposed-point LOS, stability and ring geometry: OK");
+    std::puts("hitrange camera-independent 3D range, exposed-point LOS, native confirmation, stability and ring geometry: OK");
 }

@@ -1,6 +1,7 @@
 // Integration test for the Hit Range tick sampler, camera-independent range/LOS
-// verdict, stable attack-frame rings, auto-detected survival/creative reach and
-// ring renderer using fake game memory.
+// verdict, positive-only native hit-result confirmation, stable attack-frame
+// rings, auto-detected survival/creative reach and ring renderer using fake
+// game memory.
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -31,6 +32,8 @@ fake_render::GpuColor gpu;
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_level{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_dimension{};
 alignas(std::max_align_t) std::array<std::byte, 0x100> g_region{};
+alignas(std::max_align_t) std::array<std::byte, 0x100> g_hit{};
+void* g_hitEntity = nullptr;
 enum class SightMode { Clear, Wall, PartialWall, Above, Below };
 SightMode g_sightMode = SightMode::Clear;
 std::vector<DistanceSortedActor> g_nearby;
@@ -39,6 +42,8 @@ ActorVec fakeFetch(void*, void*, int) {
     return ActorVec{g_nearby.data(), g_nearby.data() + g_nearby.size(),
                     g_nearby.data() + g_nearby.size()};
 }
+void* fakeLevelGetHitResult(void*) { return g_hit.data(); }
+void* fakeHitResultGetEntity(void*) { return g_hitEntity; }
 bool fakeIsSolid(void* region, const BlockPosI& position) {
     assert(region == g_region.data());
     switch (g_sightMode) {
@@ -79,11 +84,17 @@ void fresh(SightMode mode = SightMode::Clear) {
     clearState();
     resetDraw();
     g_sightMode = mode;
+    std::memset(g_hit.data(), 0, g_hit.size());
+    g_hitEntity = nullptr;
 }
 
 template <typename T, std::size_t N>
 void put(std::array<std::byte, N>& data, std::size_t offset, T value) {
     std::memcpy(data.data() + offset, &value, sizeof(value));
+}
+void setGameHit(void* entity, int type = off::HitResult::TypeEntity) {
+    put(g_hit, off::HitResult::mType, type);
+    g_hitEntity = entity;
 }
 
 struct FakeActor {
@@ -168,13 +179,16 @@ int main() {
     renderMesh = fakeFlush;
     fetchNearby = fakeFetch;
     isSolidBlockingBlock = fakeIsSolid;
+    levelGetHitResult = fakeLevelGetHitResult;
+    hitResultGetEntity = fakeHitResultGetEntity;
     materialGroup = 1;
     depthMaterial.data[0] = &vertices;
     throughMaterial.data[0] = &vertices;
     mod.showMobs = true;
 
-    // Problem 5: green is determined only by eye distance and native LOS.
-    // No crosshair HitResult or camera direction is sampled by the module.
+    // Problem 5: green is determined by eye distance and native LOS. Camera
+    // direction is never a veto; a native HitResult is only a later optional
+    // positive confirmation, not a crosshair requirement.
     fresh();
     tick(player.ptr());
     assert(state.hasPlayer);
@@ -280,11 +294,57 @@ int main() {
     expectColor(0, mod.inRangeColor);
     expectColor(vertexCount, mod.inRangeColor);
 
-    // A wall that covers every exposed point is still an authoritative red.
+    // A wall that covers every exposed point is still an authoritative red
+    // when the game itself has no in-range entity verdict.
     fresh(SightMode::Wall);
     tick(player.ptr());
     assert(state.targetPresent && !state.inRange);
     assert(state.targets.size() == 1 && !state.targets[0].inRange);
+
+    // Native game verdict: when Level::getHitResult() reports TypeEntity for
+    // this trusted nearby actor, the game's own "can hit" decision confirms a
+    // green ring even if the conservative LOS sampler vetoes it. This uses the
+    // actual native signatures; it is not a crosshair-only fallback.
+    fresh(SightMode::Wall);
+    targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
+    g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};
+    setGameHit(targetPlayer.ptr());
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && state.gameConfirmed);
+    assert(state.targets.size() == 1 && state.targets[0].inRange);
+    resetDraw();
+    render(renderer.data(), screen.data());
+    expectColor(0, mod.inRangeColor);
+    expectColor(vertexCount, mod.inRangeColor);
+
+    // The confirmation is positive-only: an out-of-range/block hit result, or
+    // a crosshair pointed at another actor, never vetoes camera-independent
+    // geometry when the target has a clear in-reach exposed point.
+    fresh();
+    setGameHit(targetPlayer.ptr(), off::HitResult::TypeEntityOutOfRange);
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && !state.gameConfirmed);
+    fresh();
+    setGameHit(targetMob.ptr()); // targetMob is not in this nearby-actor list
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && !state.gameConfirmed);
+
+    // Without either native hit-result signature, the geometry remains the
+    // sole verdict and still turns green without a crosshair on the object.
+    fresh();
+    levelGetHitResult = nullptr;
+    tick(player.ptr());
+    assert(state.targetPresent && state.inRange && !state.gameConfirmed);
+    levelGetHitResult = fakeLevelGetHitResult;
+
+    // A native TypeEntity confirmation is ignored without the solid-block
+    // signature; the module never promises a hit through an unseen wall.
+    fresh(SightMode::Wall);
+    setGameHit(targetPlayer.ptr());
+    isSolidBlockingBlock = nullptr;
+    tick(player.ptr());
+    assert(state.targetPresent && !state.inRange && !state.gameConfirmed);
+    isSolidBlockingBlock = fakeIsSolid;
 
     // A target beside/behind the player is eligible when inside reach with a
     // clear sight line; plain AABB proximity alone still cannot beat a wall.
@@ -300,7 +360,7 @@ int main() {
     assert(!state.inRange && !state.targets[0].inRange);
 
     // Without the native solid-block signature, fail closed to red. There is
-    // no exact TypeEntity/crosshair fallback that can promise a false hit.
+    // no crosshair-only fallback that can promise a false hit.
     fresh();
     targetPlayer.set(frontBox, off::ActorCategories::IsPlayer);
     g_nearby = {{targetPlayer.ptr(), 2.3f, 0.0f}};

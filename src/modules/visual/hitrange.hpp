@@ -13,9 +13,11 @@
 // 5 creative); there is no manual Reach setting. Green follows a 3D in-range
 // target with any exposed, unobstructed hit point and is independent of
 // camera/crosshair rotation, so turning the screen or a one-block vertical
-// offset no longer changes a hittable target to red. A solid wall across every
-// exposed point keeps the ring red. Attack frames cannot resize, flash or
-// briefly drop the rings.
+// offset no longer changes a hittable target to red. The game's own TypeEntity
+// HitResult is an optional positive confirmation; it cannot veto a hittable
+// target when the crosshair is elsewhere. A solid wall across every exposed
+// point keeps the ring red. Attack frames cannot resize, flash or briefly drop
+// the rings.
 class HitRangeModule final : public Module {
 public:
     HitRangeModule();
