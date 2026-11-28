@@ -103,6 +103,33 @@ void PaperDollModule::onInit() {
         });
 }
 
+void PaperDollModule::onDisable() {
+    pl::modmenu::submitHudEditorElements(moduleId, {});
+}
+
+void PaperDollModule::onFrame() {
+    if (!enabled) return;
+    const float sc = scale();
+    pl::modmenu::HudEditorElement element;
+    element.elementId = "paper_doll";
+    element.displayName = "Paper Doll";
+    element.positionKeyX = "hudPosX";
+    element.positionKeyY = "hudPosY";
+    element.x = hudPosX();
+    element.y = hudPosY();
+    element.width = std::max(24.0f, 48.0f * sc);
+    element.height = std::max(32.0f, 64.0f * sc);
+    std::vector<pl::modmenu::HudEditorElement> elements;
+    elements.push_back(std::move(element));
+    pl::modmenu::submitHudEditorElements(moduleId, elements);
+}
+
+void PaperDollModule::setHudPos(float x, float y) {
+    m_hudPosX.store(std::clamp(x, 0.0f, 4000.0f), std::memory_order_relaxed);
+    m_hudPosY.store(std::clamp(y, 0.0f, 4000.0f), std::memory_order_relaxed);
+    m_useHudPos.store(true, std::memory_order_relaxed);
+}
+
 void PaperDollModule::setOffset(float x, float y) {
     m_offsetX.store(std::clamp(x, -400.0f, 400.0f), std::memory_order_relaxed);
     m_offsetY.store(std::clamp(y, -400.0f, 400.0f), std::memory_order_relaxed);
@@ -136,6 +163,14 @@ bool PaperDollModule::isCombatActive() const {
 }
 
 bool PaperDollModule::onMenuConfigChanged(std::string_view key, std::string_view value) {
+    if (key == "hudPosX") {
+        setHudPos(parseFloat(value, hudPosX()), hudPosY());
+        return true;
+    }
+    if (key == "hudPosY") {
+        setHudPos(hudPosX(), parseFloat(value, hudPosY()));
+        return true;
+    }
     if (key == "alwaysVisible") {
         setAlwaysVisible(parseBool(value));
         return true;
@@ -180,6 +215,11 @@ void PaperDollModule::loadConfig(const nlohmann::json& j) {
     } else if (j.contains("alwaysVisible")) {
         setAlwaysVisible(j["alwaysVisible"].get<bool>());
     }
+    if (j.contains("hudPosX") || j.contains("hudPosY")) {
+        float x = j.contains("hudPosX") ? j["hudPosX"].get<float>() : hudPosX();
+        float y = j.contains("hudPosY") ? j["hudPosY"].get<float>() : hudPosY();
+        setHudPos(x, y);
+    }
     if (j.contains("offsetX") || j.contains("offsetY")) {
         float x = j.contains("offsetX") ? j["offsetX"].get<float>() : offsetX();
         float y = j.contains("offsetY") ? j["offsetY"].get<float>() : offsetY();
@@ -201,6 +241,8 @@ void PaperDollModule::loadConfig(const nlohmann::json& j) {
 
 void PaperDollModule::saveConfig(nlohmann::json& j) {
     Module::saveConfig(j);
+    j["hudPosX"] = hudPosX();
+    j["hudPosY"] = hudPosY();
     j["mode"] = static_cast<int>(mode());
     j["alwaysVisible"] = alwaysVisible();
     j["offsetX"] = offsetX();
@@ -238,16 +280,22 @@ bool PaperDollModule::beforeRender(void* renderer, void* control, ControlState& 
     }
 
     if (control) {
+        const bool useHud = m_useHudPos.load(std::memory_order_relaxed);
         const float ox = offsetX();
         const float oy = offsetY();
-        if (ox != 0.0f || oy != 0.0f) {
+        if (useHud || ox != 0.0f || oy != 0.0f) {
             auto* pos = reinterpret_cast<float*>(
                 static_cast<std::byte*>(control) + bedrocktools::sdk::offsets::UIControl::mPosition);
             state.origPosX = pos[0];
             state.origPosY = pos[1];
             state.modifiedPos = true;
-            pos[0] += ox;
-            pos[1] += oy;
+            if (useHud) {
+                pos[0] = hudPosX() + ox;
+                pos[1] = hudPosY() + oy;
+            } else {
+                pos[0] += ox;
+                pos[1] += oy;
+            }
         }
 
         const float sc = scale();

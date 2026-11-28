@@ -34,9 +34,16 @@ public:
     ~PaperDollModule() override;
 
     void onInit() override;
+    void onFrame() override;
+    void onDisable() override;
     bool onMenuConfigChanged(std::string_view key, std::string_view value) override;
     void loadConfig(const nlohmann::json& j) override;
     void saveConfig(nlohmann::json& j) override;
+
+    // HUD Editor position
+    float hudPosX() const { return m_hudPosX.load(std::memory_order_relaxed); }
+    float hudPosY() const { return m_hudPosY.load(std::memory_order_relaxed); }
+    void setHudPos(float x, float y);
 
     // Visibility mode
     VisibilityMode mode() const { return static_cast<VisibilityMode>(m_mode.load(std::memory_order_relaxed)); }
@@ -81,6 +88,9 @@ private:
     bool isCombatActive() const;
 
     std::atomic_int m_mode{static_cast<int>(VisibilityMode::Always)};
+    std::atomic<float> m_hudPosX{16.0f};
+    std::atomic<float> m_hudPosY{16.0f};
+    std::atomic_bool m_useHudPos{false};
     std::atomic<float> m_offsetX{0.0f};
     std::atomic<float> m_offsetY{0.0f};
     std::atomic<float> m_scale{1.0f};

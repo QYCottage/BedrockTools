@@ -58,6 +58,23 @@ struct DrawCommand {
 // which is an exact-match overload for std::vector — stays unambiguous.
 inline void submitDrawCommands(std::string_view, std::span<const DrawCommand>) {}
 
+struct HudEditorElement {
+    std::string elementId;
+    std::string displayName;
+    std::string positionKeyX;
+    std::string positionKeyY;
+    float x{};
+    float y{};
+    float width{};
+    float height{};
+    float gridSize{16.0f};
+    float snapThreshold{12.0f};
+    float gridGap{4.0f};
+    std::uint32_t snapFlags{0};
+};
+
+inline void submitHudEditorElements(std::string_view, std::span<const HudEditorElement>) {}
+
 inline bool registerImage(std::string_view, std::span<const unsigned char>,
                           int, int) {
     return true;
