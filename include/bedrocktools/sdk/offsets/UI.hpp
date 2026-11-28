@@ -44,6 +44,8 @@ namespace HudPlayerRenderer {
 // Float countdown checked at the start of HudPlayerRenderer::render (slot 17):
 // when <= 0.0f the vanilla renderer skips drawing the HUD paper doll.
 inline constexpr std::size_t mTimeRemaining = 0xC;
+inline constexpr std::uintptr_t RenderRva = 0x9A21830;
+inline constexpr std::uintptr_t MatrixRotateRva = 0x9096B58;
 }
 
 namespace UIControl {

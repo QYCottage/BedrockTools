@@ -66,6 +66,7 @@ public:
     void setRotation(float deg);
     bool autoSpin() const { return m_autoSpin.load(std::memory_order_relaxed); }
     void setAutoSpin(bool value) { m_autoSpin.store(value, std::memory_order_relaxed); }
+    float effectiveRotationDegrees() const;
 
     // Hide in containers
     bool hideInContainer() const { return m_hideInContainer.load(std::memory_order_relaxed); }
