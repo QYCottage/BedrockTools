@@ -3,6 +3,10 @@
 
 #include "modules/hud/paperdoll.cpp"
 
+namespace bedrocktools::memory {
+std::uintptr_t resolve(SignatureId) { return 0; }
+}
+
 #include <cassert>
 #include <cmath>
 #include <cstddef>

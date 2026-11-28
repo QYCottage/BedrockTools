@@ -4,6 +4,7 @@
 #include <bedrocktools/events/AttackEvent.hpp>
 #include <bedrocktools/events/EventBus.hpp>
 #include <bedrocktools/events/ScreenStateEvent.hpp>
+#include <bedrocktools/memory/Signatures.hpp>
 #include <bedrocktools/sdk/Offsets.hpp>
 #include <pl/ModMenu.hpp>
 #include <pl/memory/Vtable.hpp>
@@ -24,10 +25,21 @@ constexpr std::int64_t CombatWindowMs = 5000;
 constexpr float AutoSpinDegPerMs = 0.09f; // ~90 deg/sec
 
 using HudPlayerRendererFn = void (*)(void*, void*, void*, void*, int);
+using ScreenViewRenderFn = void (*)(void*, void*);
 
 HudPlayerRendererFn hudPlayerRendererOriginal = nullptr;
 bedrocktools::hooks::Handle hudPlayerRendererHook = nullptr;
+ScreenViewRenderFn screenViewRenderOriginal = nullptr;
+bedrocktools::hooks::Handle screenViewRenderHook = nullptr;
 std::atomic<PaperDollModule*> g_instance{nullptr};
+
+// Cached arguments from the most recent HudPlayerRenderer::render call on hud_screen
+// so we can also draw the Paper Doll on top of chest / ender chest / shulker box screens.
+std::atomic<void*> g_lastRenderer{nullptr};
+std::atomic<void*> g_lastClient{nullptr};
+std::atomic<void*> g_lastControl{nullptr};
+std::atomic<int> g_lastPass{0};
+thread_local bool g_inContainerOverlay = false;
 
 std::int64_t nowMs() {
     using namespace std::chrono;
@@ -35,6 +47,13 @@ std::int64_t nowMs() {
 }
 
 void hudPlayerRendererDetour(void* self, void* context, void* client, void* control, int pass) {
+    if (!g_inContainerOverlay && self && client && control) {
+        g_lastRenderer.store(self, std::memory_order_release);
+        g_lastClient.store(client, std::memory_order_release);
+        g_lastControl.store(control, std::memory_order_release);
+        g_lastPass.store(pass, std::memory_order_relaxed);
+    }
+
     PaperDollModule::ControlState state{};
     auto* mod = g_instance.load(std::memory_order_acquire);
     if (mod && !mod->beforeRender(self, control, state)) {
@@ -48,17 +67,51 @@ void hudPlayerRendererDetour(void* self, void* context, void* client, void* cont
     }
 }
 
+void screenViewRenderDetour(void* screenView, void* uiRenderContext) {
+    if (screenViewRenderOriginal) {
+        screenViewRenderOriginal(screenView, uiRenderContext);
+    }
+    if (g_inContainerOverlay || !uiRenderContext || !hudPlayerRendererOriginal) {
+        return;
+    }
+    auto* mod = g_instance.load(std::memory_order_acquire);
+    if (!mod || !mod->enabled || !mod->inContainer() || mod->hideInContainer()) {
+        return;
+    }
+    void* renderer = g_lastRenderer.load(std::memory_order_acquire);
+    void* client = g_lastClient.load(std::memory_order_acquire);
+    void* control = g_lastControl.load(std::memory_order_acquire);
+    if (!renderer || !client || !control) {
+        return;
+    }
+    g_inContainerOverlay = true;
+    hudPlayerRendererDetour(renderer, uiRenderContext, client, control, g_lastPass.load(std::memory_order_relaxed));
+    g_inContainerOverlay = false;
+}
+
 void installHook() {
-    if (hudPlayerRendererHook) return;
-    const std::uintptr_t target = pl::memory::resolveVtableFunction(
-        "17HudPlayerRenderer",
-        bedrocktools::sdk::offsets::VTable::HudPlayerRendererRender,
-        MinecraftLibrary);
-    if (!target) return;
-    hudPlayerRendererHook = bedrocktools::hooks::install(
-        reinterpret_cast<void*>(target),
-        reinterpret_cast<void*>(hudPlayerRendererDetour),
-        reinterpret_cast<void**>(&hudPlayerRendererOriginal));
+    if (!hudPlayerRendererHook) {
+        const std::uintptr_t target = pl::memory::resolveVtableFunction(
+            "17HudPlayerRenderer",
+            bedrocktools::sdk::offsets::VTable::HudPlayerRendererRender,
+            MinecraftLibrary);
+        if (target) {
+            hudPlayerRendererHook = bedrocktools::hooks::install(
+                reinterpret_cast<void*>(target),
+                reinterpret_cast<void*>(hudPlayerRendererDetour),
+                reinterpret_cast<void**>(&hudPlayerRendererOriginal));
+        }
+    }
+    if (!screenViewRenderHook) {
+        const std::uintptr_t target = bedrocktools::memory::resolve(
+            bedrocktools::memory::SignatureId::ScreenViewRender);
+        if (target) {
+            screenViewRenderHook = bedrocktools::hooks::install(
+                reinterpret_cast<void*>(target),
+                reinterpret_cast<void*>(screenViewRenderDetour),
+                reinterpret_cast<void**>(&screenViewRenderOriginal));
+        }
+    }
 }
 
 bool parseBool(std::string_view value) {

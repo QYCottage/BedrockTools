@@ -67,6 +67,7 @@ public:
     bool autoSpin() const { return m_autoSpin.load(std::memory_order_relaxed); }
     void setAutoSpin(bool value) { m_autoSpin.store(value, std::memory_order_relaxed); }
     float effectiveRotationDegrees() const;
+    bool inContainer() const { return m_screenDepth.load(std::memory_order_relaxed) > 0; }
 
     // Hide in containers
     bool hideInContainer() const { return m_hideInContainer.load(std::memory_order_relaxed); }
