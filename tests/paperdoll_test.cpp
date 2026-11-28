@@ -17,8 +17,9 @@ struct FakeHudPlayerRenderer {
 };
 
 struct FakeUIControl {
-    std::uint8_t header[0x38]{};
+    std::uint8_t header[0x10]{};
     float pos[2]{10.0f, 20.0f};
+    std::uint8_t mid[0x28]{};
     float size[2]{40.0f, 60.0f};
 };
 

@@ -86,7 +86,7 @@ private:
     std::atomic<float> m_scale{1.0f};
     std::atomic<float> m_rotation{0.0f};
     std::atomic_bool m_autoSpin{false};
-    std::atomic_bool m_hideInContainer{true};
+    std::atomic_bool m_hideInContainer{false};
     std::atomic_int m_screenDepth{0};
     std::atomic<std::int64_t> m_lastCombatMs{0};
 };
