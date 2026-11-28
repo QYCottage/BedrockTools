@@ -21,42 +21,17 @@ namespace {
 constexpr const char* MinecraftLibrary = "libminecraftpe.so";
 constexpr float KeepAliveSeconds = 1.0f;
 constexpr std::int64_t CombatWindowMs = 5000;
-constexpr float DegToRad = 3.14159265358979323846f / 180.0f;
 constexpr float AutoSpinDegPerMs = 0.09f; // ~90 deg/sec
 
 using HudPlayerRendererFn = void (*)(void*, void*, void*, void*, int);
-using MatrixRotateFn = void (*)(void*, const void*, float, const float*);
 
 HudPlayerRendererFn hudPlayerRendererOriginal = nullptr;
 bedrocktools::hooks::Handle hudPlayerRendererHook = nullptr;
-MatrixRotateFn matrixRotateOriginal = nullptr;
-bedrocktools::hooks::Handle matrixRotateHook = nullptr;
 std::atomic<PaperDollModule*> g_instance{nullptr};
-
-thread_local bool g_inPaperDollRender = false;
-thread_local bool g_appliedRotationThisFrame = false;
 
 std::int64_t nowMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
-
-void matrixRotateDetour(void* out, const void* in, float angle, const float* axis) {
-    if (!matrixRotateOriginal) return;
-    matrixRotateOriginal(out, in, angle, axis);
-
-    if (g_inPaperDollRender && !g_appliedRotationThisFrame) {
-        if (auto* mod = g_instance.load(std::memory_order_acquire)) {
-            const float extraDeg = mod->effectiveRotationDegrees();
-            if (std::fabs(extraDeg) > 0.01f) {
-                g_appliedRotationThisFrame = true;
-                alignas(16) std::byte temp[64]{};
-                std::memcpy(temp, out, sizeof(temp));
-                const float yAxis[3] = {0.0f, 1.0f, 0.0f};
-                matrixRotateOriginal(out, temp, extraDeg * DegToRad, yAxis);
-            }
-        }
-    }
 }
 
 void hudPlayerRendererDetour(void* self, void* context, void* client, void* control, int pass) {
@@ -65,12 +40,9 @@ void hudPlayerRendererDetour(void* self, void* context, void* client, void* cont
     if (mod && !mod->beforeRender(self, control, state)) {
         return;
     }
-    g_inPaperDollRender = true;
-    g_appliedRotationThisFrame = false;
     if (hudPlayerRendererOriginal) {
         hudPlayerRendererOriginal(self, context, client, control, pass);
     }
-    g_inPaperDollRender = false;
     if (mod) {
         mod->afterRender(control, state);
     }
@@ -87,15 +59,6 @@ void installHook() {
         reinterpret_cast<void*>(target),
         reinterpret_cast<void*>(hudPlayerRendererDetour),
         reinterpret_cast<void**>(&hudPlayerRendererOriginal));
-
-    if (!matrixRotateHook && target > bedrocktools::sdk::offsets::HudPlayerRenderer::RenderRva) {
-        const std::uintptr_t libBase = target - bedrocktools::sdk::offsets::HudPlayerRenderer::RenderRva;
-        const std::uintptr_t rotateAddr = libBase + bedrocktools::sdk::offsets::HudPlayerRenderer::MatrixRotateRva;
-        matrixRotateHook = bedrocktools::hooks::install(
-            reinterpret_cast<void*>(rotateAddr),
-            reinterpret_cast<void*>(matrixRotateDetour),
-            reinterpret_cast<void**>(&matrixRotateOriginal));
-    }
 }
 
 bool parseBool(std::string_view value) {
